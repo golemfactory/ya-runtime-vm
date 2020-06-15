@@ -28,15 +28,17 @@ enum RespType {
     NotifyProcessDied,
 }
 
-/* Is there a better way? */
 impl RespType {
-    fn from_u8(x: u8) -> Option<RespType> {
+    fn from_u8(x: u8) -> io::Result<Self> {
         match x {
-            0 => Some(RespType::RespOk),
-            1 => Some(RespType::RespErr),
-            2 => Some(RespType::NotifyOutputAvailable),
-            3 => Some(RespType::NotifyProcessDied),
-            _ => None,
+            0 => Ok(RespType::RespOk),
+            1 => Ok(RespType::RespErr),
+            2 => Ok(RespType::NotifyOutputAvailable),
+            3 => Ok(RespType::NotifyProcessDied),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid response type",
+            )),
         }
     }
 }
@@ -47,7 +49,7 @@ struct GuestAgent {
 }
 
 impl GuestAgent {
-    fn connected(path: &str) -> Result<GuestAgent, io::Error> {
+    fn connected(path: &str) -> io::Result<GuestAgent> {
         loop {
             match UnixStream::connect(path) {
                 Ok(s) => {
@@ -106,7 +108,7 @@ impl GuestAgent {
         }
     }
 
-    fn get_response(&mut self) -> Result<(), io::Error> {
+    fn get_response(&mut self) -> io::Result<()> {
         let mut buf = [0; 8];
         self.stream.read_exact(&mut buf)?;
         let id = u64::from_le_bytes(buf);
@@ -114,7 +116,7 @@ impl GuestAgent {
 
         let mut buf = [0; 1];
         self.stream.read_exact(&mut buf)?;
-        let typ = RespType::from_u8(buf[0]).expect("Invalid response type!");
+        let typ = RespType::from_u8(buf[0])?;
         println!("Message type: {:?}", typ);
         match typ {
             RespType::RespOk => (),
@@ -130,34 +132,40 @@ impl GuestAgent {
         Ok(())
     }
 
-    fn quit(&mut self) -> Result<(), io::Error> {
+    fn quit(&mut self) -> io::Result<()> {
         let mut buf = GuestAgent::create_header(self.get_new_msg_id(), MsgType::MsgQuit);
         GuestAgent::append_submsg_type(&mut buf, MsgSubType::SubMsgEnd);
         self.stream.write_all(&buf)?;
-        self.get_response().unwrap();
+        self.get_response()?;
         Ok(())
     }
 
     fn run_process(
         &mut self,
-        bin: &[u8],
-        argv: &[&[u8]],
-        maybe_env: Option<&[&[u8]]>,
+        bin: &str,
+        argv: &[&str],
+        maybe_env: Option<&[&str]>,
         uid: u32,
-    ) -> Result<(), io::Error> {
+    ) -> io::Result<()> {
         let mut buf = GuestAgent::create_header(self.get_new_msg_id(), MsgType::MsgRunProcess);
-        GuestAgent::append_submsg_bytes(&mut buf, MsgSubType::SubMsgRunProcessBin, bin);
-        GuestAgent::append_submsg_array(&mut buf, MsgSubType::SubMsgRunProcessArg, argv);
+        GuestAgent::append_submsg_bytes(&mut buf, MsgSubType::SubMsgRunProcessBin, bin.as_bytes());
+        GuestAgent::append_submsg_array(
+            &mut buf,
+            MsgSubType::SubMsgRunProcessArg,
+            &argv.iter().map(|s| s.as_bytes()).collect::<Vec<_>>(),
+        );
         match maybe_env {
-            Some(env) => {
-                GuestAgent::append_submsg_array(&mut buf, MsgSubType::SubMsgRunProcessEnv, env)
-            }
+            Some(env) => GuestAgent::append_submsg_array(
+                &mut buf,
+                MsgSubType::SubMsgRunProcessEnv,
+                &env.iter().map(|s| s.as_bytes()).collect::<Vec<_>>(),
+            ),
             None => (),
         }
         GuestAgent::append_submsg_u32(&mut buf, MsgSubType::SubMsgRunProcessUid, uid);
         GuestAgent::append_submsg_type(&mut buf, MsgSubType::SubMsgEnd);
         self.stream.write_all(&buf)?;
-        self.get_response().unwrap();
+        self.get_response()?;
         Ok(())
     }
 }
@@ -184,9 +192,8 @@ fn main() {
 
     let mut ga = GuestAgent::connected("./manager.sock").unwrap();
 
-    let argv = vec!["a0".as_bytes(), "a1".as_bytes(), "a2".as_bytes()];
-    ga.run_process("binary_name".as_bytes(), &argv, None, 0)
-        .unwrap();
+    let argv = ["a0", "a1", "a2"];
+    ga.run_process("binary_name", &argv, None, 0).unwrap();
     println!("");
 
     ga.quit().unwrap();
