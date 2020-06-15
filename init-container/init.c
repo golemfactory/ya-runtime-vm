@@ -133,12 +133,14 @@ static int recv_bytes(int fd, char** buf_ptr, uint64_t* size_ptr,
 }
 
 static void free_strings_array(char** array) {
-    if (array) {
-        for (size_t i = 0; array[i]; ++i) {
-            free(array[i]);
-        }
-        free(array);
+    if (!array) {
+        return;
     }
+
+    for (size_t i = 0; array[i]; ++i) {
+        free(array[i]);
+    }
+    free(array);
 }
 
 static int recv_strings_array(int fd, char*** array_ptr) {
