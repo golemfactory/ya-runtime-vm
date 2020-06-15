@@ -236,13 +236,15 @@ static void handle_run_process(msg_id_t msg_id) {
 
     while (!done) {
         uint8_t subtype = 0;
+        uint64_t bin_len = 0;
+
         CHECK(readn(g_cmds_fd, &subtype, sizeof(subtype)));
+
         switch (subtype) {
             case SUB_MSG_END:
                 done = true;
                 break;
-            case SUB_MSG_RUN_PROCESS_BIN: ; // got to love C
-                uint64_t bin_len = 0;
+            case SUB_MSG_RUN_PROCESS_BIN:
                 CHECK(recv_bytes(g_cmds_fd, &bin, &bin_len,
                                  /*is_cstring=*/true));
                 break;
