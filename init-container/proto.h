@@ -50,11 +50,14 @@ enum MSG_TYPE {
     MSG_SYNC_FS,
 };
 
-enum MSG_SUB_TYPE {
+enum SUB_MSG_QUIT_TYPE {
     /* End of sub-messages. */
-    SUB_MSG_END = 0,
+    SUB_MSG_QUIT_END = 0,
+};
 
-    /* MSG_RUN_PROCESS */
+enum SUB_MSG_RUN_PROCESS_TYPE {
+    /* End of sub-messages. */
+    SUB_MSG_RUN_PROCESS_END = 0,
     /* Binary path. (BYTES) */
     SUB_MSG_RUN_PROCESS_BIN,
     /* Argv. (ARRAY) */
@@ -65,18 +68,27 @@ enum MSG_SUB_TYPE {
     SUB_MSG_RUN_PROCESS_UID,
     /* Redirect a fd to the given path. (u32 + REDIRECT_FD_TYPE (1-byte)) */
     SUB_MSG_RUN_PROCESS_RFD,
+};
 
-    /* MSG_KILL_PROCESS */
+enum SUB_MSG_KILL_PROCESS_TYPE {
+    /* End of sub-messages. */
+    SUB_MSG_KILL_PROCESS_END = 0,
     /* ID of process. (u64) */
     SUB_MSG_KILL_PROCESS_ID,
+};
 
-    /* MSG_MOUNT_VOLUME */
+enum SUB_MSG_MOUNT_VOLUME_TYPE {
+    /* End of sub-messages. */
+    SUB_MSG_MOUNT_VOLUME_END = 0,
     /* Path of device to be mounted. (BYTES) */
     SUB_MSG_MOUNT_VOLUME_DEV,
     /* Path to mount at. (BYTES) */
     SUB_MSG_MOUNT_VOLUME_PATH,
+};
 
-    /* MSG_UPLOAD_FILE */
+enum SUB_MSG_UPLOAD_FILE_TYPE {
+    /* End of sub-messages. */
+    SUB_MSG_UPLOAD_FILE_END = 0,
     /* Path of the file. (BYTES) */
     SUB_MSG_UPLOAD_FILE_PATH,
     /* Permissions of the file. (u32) */
@@ -87,24 +99,27 @@ enum MSG_SUB_TYPE {
     SUB_MSG_UPLOAD_FILE_GRP,
     /* Data to put into file. (BYTES) */
     SUB_MSG_UPLOAD_FILE_DATA,
+};
 
-    /* MSG_QUERY_OUTPUT */
+enum SUB_MSG_QUERY_OUTPUT_TYPE {
+    /* End of sub-messages. */
+    SUB_MSG_QUERY_OUTPUT_END = 0,
     /* ID of process. (u64) */
     SUB_MSG_QUERY_OUTPUT_ID,
     /* Offset in output. (u64) */
     SUB_MSG_QUERY_OUTPUT_OFF,
     /* Requested length. (u64) */
     SUB_MSG_QUERY_OUTPUT_LEN,
+};
 
-    /* MSG_PUT_INPUT */
+enum SUB_MSG_PUT_INPUT_TYPE {
+    /* End of sub-messages. */
+    SUB_MSG_PUT_INPUT_END = 0,
     /* ID of process. (u64) */
     SUG_MSG_PUT_INPUT_ID,
     /* Data to put on process' stdin. (BYTES) */
     SUB_MSG_PUT_INPUT_DATA,
-
-    MSG_SUB_TYPE_BOUND,
 };
-_Static_assert(MSG_SUB_TYPE_BOUND <= 0xff, "MSG_SUB_TYPE overflows 1 byte!");
 
 enum REDIRECT_FD_TYPE {
     /* Path to the file. (BYTES) */
