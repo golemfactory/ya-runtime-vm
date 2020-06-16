@@ -1,0 +1,70 @@
+syntax = "proto2";
+
+message Request {
+    required uint32 id = 1;
+
+    message Quit {
+
+    }
+
+    message RunProcess {
+        required bytes bin = 1;
+        repeated bytes arg = 2;
+        repeated bytes env = 3;
+        optional uint32 uid = 4;
+        optional uint32 gid = 5;
+        repeated RedirectFd redirect_fd = 6;
+    }
+
+    message KillProcess {
+        required uint64 process_id = 1;
+    }
+
+    message Mount9P {
+        required string vol_tag = 1;
+        required bytes path = 2;
+    }
+
+    message QueryOutput {
+        required uint64 process_id = 1;
+        optional uint64 offset = 2;
+        optional uint64 len = 3;
+    }
+
+    message PutInput {
+        required uint64 process_id = 1;
+        required uint32 fd = 2;
+        required bytes data = 3;
+    }
+
+    message UploadFile {
+        required bytes file_path = 1;
+        optional uint32 file_erm = 2;
+        optional uint32 uid = 3;
+        optional uint32 guid = 4;
+        required bytes data = 5;
+    }
+
+    oneof Command {
+        Quit quit = 2;
+        RunProcess run = 3;
+        KillProcess kill = 4;
+        Mount9P mount_9p = 5;
+        QueryOutput query_output = 6;
+        PutInput put_input = 7;
+        UploadFile upload_file = 8;
+    }
+}
+
+message RedirectFd {
+    required uint32 fd = 1;
+    oneof Type {
+        string output_file = 2;
+        // buffer size in bytes
+        uint32 pipe_blocking = 3;
+        // cyclic buffer size in bytes
+        uint32 pipe_cyclic = 4;
+        // buffered
+        uint32 input_pipe_blocking = 5;
+    }
+}
