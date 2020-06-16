@@ -23,7 +23,7 @@ fn main() {
         .spawn()
         .expect("failed to spawn VM");
 
-    let mut ga = GuestAgent::connected("./manager.sock").unwrap();
+    let mut ga = GuestAgent::connected("./manager.sock", 10).unwrap();
 
     let argv = ["a0", "a1", "a2"];
     ga.run_process("binary_name", &argv, None, 0).unwrap();

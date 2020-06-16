@@ -1,3 +1,4 @@
+use std::convert::TryFrom;
 use std::io::{self, prelude::*};
 use std::marker::PhantomData;
 use std::os::unix::net::UnixStream;
@@ -43,8 +44,10 @@ pub struct GuestAgent {
     last_msg_id: u64,
 }
 
-impl RespType {
-    fn from_u8(x: u8) -> io::Result<Self> {
+impl TryFrom<u8> for RespType {
+    type Error = io::Error;
+
+    fn try_from(x: u8) -> io::Result<Self> {
         match x {
             0 => Ok(RespType::RespOk),
             1 => Ok(RespType::RespErr),
@@ -58,7 +61,7 @@ impl RespType {
     }
 }
 
-trait SubMsgTrait : Into<u8> {
+trait SubMsgTrait: Into<u8> {
     fn get_type() -> MsgType;
 }
 
@@ -87,17 +90,24 @@ impl Into<u8> for SubMsgRunProcessType {
 }
 
 fn new_quit_message() -> Message<SubMsgQuitType> {
-    Message::<SubMsgQuitType> { buf: Vec::new(), phantom: PhantomData, }
+    Message::<SubMsgQuitType> {
+        buf: Vec::new(),
+        phantom: PhantomData,
+    }
 }
 
 fn new_run_process_message() -> Message<SubMsgRunProcessType> {
-    Message::<SubMsgRunProcessType> { buf: Vec::new(), phantom: PhantomData, }
+    Message::<SubMsgRunProcessType> {
+        buf: Vec::new(),
+        phantom: PhantomData,
+    }
 }
 
 impl<T: SubMsgTrait> Message<T> {
     fn create_header(&mut self, msg_id: u64) -> () {
         self.buf.extend_from_slice(&msg_id.to_le_bytes());
-        self.buf.extend_from_slice(&(T::get_type() as u8).to_le_bytes());
+        self.buf
+            .extend_from_slice(&(T::get_type() as u8).to_le_bytes());
     }
 
     fn append_submsg_type(&mut self, subtype: T) -> () {
@@ -133,7 +143,8 @@ impl<T: SubMsgTrait> Message<T> {
 }
 
 impl GuestAgent {
-    pub fn connected(path: &str) -> io::Result<GuestAgent> {
+    pub fn connected(path: &str, timeout: u32) -> io::Result<GuestAgent> {
+        let mut timeout_remaining = timeout;
         loop {
             match UnixStream::connect(path) {
                 Ok(s) => {
@@ -145,7 +156,15 @@ impl GuestAgent {
                 Err(err) => match err.kind() {
                     io::ErrorKind::NotFound => {
                         println!("Waiting for Guest Agent socket ...");
-                        thread::sleep(time::Duration::from_secs(1));
+                        if timeout_remaining > 0 {
+                            thread::sleep(time::Duration::from_secs(1));
+                            timeout_remaining -= 1;
+                        } else {
+                            break Err(io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                "Could not connect to the Guest Agent socket",
+                            ));
+                        }
                     }
                     _ => break Err(err),
                 },
@@ -166,7 +185,7 @@ impl GuestAgent {
 
         let mut buf = [0; 1];
         self.stream.read_exact(&mut buf)?;
-        let typ = RespType::from_u8(buf[0])?;
+        let typ = RespType::try_from(buf[0])?;
         println!("Message type: {:?}", typ);
         match typ {
             RespType::RespOk => (),
