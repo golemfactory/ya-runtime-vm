@@ -10,19 +10,24 @@ enum MsgType {
     MsgRunProcess,
 }
 
-#[repr(u8)]
 enum SubMsgQuitType {
-    SubMsgEnd = 0,
+    SubMsgEnd,
 }
 
-#[repr(u8)]
-enum SubMsgRunProcessType {
-    SubMsgEnd = 0,
-    SubMsgRunProcessBin,
-    SubMsgRunProcessArg,
-    SubMsgRunProcessEnv,
-    SubMsgRunProcessUid,
-    SubMsgRunProcessRfd,
+enum SubMsgRunProcessType<'a> {
+    SubMsgEnd,
+    SubMsgRunProcessBin(&'a [u8]),
+    SubMsgRunProcessArg(&'a [&'a [u8]]),
+    SubMsgRunProcessEnv(&'a [&'a [u8]]),
+    SubMsgRunProcessUid(u32),
+    SubMsgRunProcessGid(u32),
+    SubMsgRunProcessRfd(u32, &'a RedirectFdType<'a>),
+}
+
+pub enum RedirectFdType<'a> {
+    RedirectFdFile(&'a [u8]),
+    RedirectFdPipeBlocking(u64),
+    RedirectFdPipeCyclic(u64),
 }
 
 #[repr(u8)]
@@ -61,80 +66,136 @@ impl TryFrom<u8> for RespType {
     }
 }
 
-trait SubMsgTrait: Into<u8> {
-    fn get_type() -> MsgType;
+trait EncodeInto {
+    fn encode_into(&self, buf: &mut Vec<u8>);
 }
 
-impl SubMsgTrait for SubMsgQuitType {
-    fn get_type() -> MsgType {
-        MsgType::MsgQuit
-    }
+trait SubMsgTrait<T>: EncodeInto {
+    const TYPE: u8;
 }
 
-impl SubMsgTrait for SubMsgRunProcessType {
-    fn get_type() -> MsgType {
-        MsgType::MsgRunProcess
-    }
+impl SubMsgTrait<SubMsgQuitType> for SubMsgQuitType {
+    const TYPE: u8 = MsgType::MsgQuit as u8;
 }
 
-impl Into<u8> for SubMsgQuitType {
-    fn into(self) -> u8 {
-        self as u8
-    }
+impl SubMsgTrait<SubMsgRunProcessType<'_>> for SubMsgRunProcessType<'_> {
+    const TYPE: u8 = MsgType::MsgRunProcess as u8;
 }
 
-impl Into<u8> for SubMsgRunProcessType {
-    fn into(self) -> u8 {
-        self as u8
+impl EncodeInto for u8 {
+    fn encode_into(&self, buf: &mut Vec<u8>) {
+        buf.extend(&self.to_le_bytes());
     }
 }
 
-fn new_quit_message() -> Message<SubMsgQuitType> {
-    Message::<SubMsgQuitType> {
-        buf: Vec::new(),
-        phantom: PhantomData,
+impl EncodeInto for u32 {
+    fn encode_into(&self, buf: &mut Vec<u8>) {
+        buf.extend(&self.to_le_bytes());
     }
 }
 
-fn new_run_process_message() -> Message<SubMsgRunProcessType> {
-    Message::<SubMsgRunProcessType> {
-        buf: Vec::new(),
-        phantom: PhantomData,
+impl EncodeInto for u64 {
+    fn encode_into(&self, buf: &mut Vec<u8>) {
+        buf.extend(&self.to_le_bytes());
     }
 }
 
-impl<T: SubMsgTrait> Message<T> {
-    fn create_header(&mut self, msg_id: u64) -> () {
-        self.buf.extend_from_slice(&msg_id.to_le_bytes());
-        self.buf
-            .extend_from_slice(&(T::get_type() as u8).to_le_bytes());
+impl EncodeInto for [u8] {
+    fn encode_into(&self, buf: &mut Vec<u8>) {
+        (self.len() as u64).encode_into(buf);
+        buf.extend(self);
     }
+}
 
-    fn append_submsg_type(&mut self, subtype: T) -> () {
-        self.buf.extend(&subtype.into().to_le_bytes());
-    }
-
-    fn append_submsg_u32(&mut self, subtype: T, val: u32) -> () {
-        self.append_submsg_type(subtype);
-        self.buf.extend_from_slice(&val.to_le_bytes());
-    }
-
-    fn append_bytes(&mut self, bytes: &[u8]) -> () {
-        self.buf.extend_from_slice(&bytes.len().to_le_bytes());
-        self.buf.extend_from_slice(bytes);
-    }
-
-    fn append_submsg_bytes(&mut self, subtype: T, bytes: &[u8]) -> () {
-        self.append_submsg_type(subtype);
-        self.append_bytes(bytes);
-    }
-
-    fn append_submsg_array(&mut self, subtype: T, array: &[&[u8]]) -> () {
-        self.append_submsg_type(subtype);
-        self.buf.extend_from_slice(&array.len().to_le_bytes());
-        for &a in array {
-            self.append_bytes(&a);
+impl EncodeInto for [&[u8]] {
+    fn encode_into(&self, buf: &mut Vec<u8>) {
+        (self.len() as u64).encode_into(buf);
+        for &a in self {
+            a.encode_into(buf)
         }
+    }
+}
+
+impl EncodeInto for SubMsgQuitType {
+    fn encode_into(&self, buf: &mut Vec<u8>) {
+        0u8.encode_into(buf);
+    }
+}
+
+impl EncodeInto for SubMsgRunProcessType<'_> {
+    fn encode_into(&self, buf: &mut Vec<u8>) {
+        match self {
+            SubMsgRunProcessType::SubMsgEnd => {
+                0u8.encode_into(buf);
+            }
+            SubMsgRunProcessType::SubMsgRunProcessBin(path) => {
+                1u8.encode_into(buf);
+                path.encode_into(buf);
+            }
+            SubMsgRunProcessType::SubMsgRunProcessArg(args) => {
+                2u8.encode_into(buf);
+                args.encode_into(buf);
+            }
+            SubMsgRunProcessType::SubMsgRunProcessEnv(env) => {
+                3u8.encode_into(buf);
+                env.encode_into(buf);
+            }
+            SubMsgRunProcessType::SubMsgRunProcessUid(uid) => {
+                4u8.encode_into(buf);
+                uid.encode_into(buf);
+            }
+            SubMsgRunProcessType::SubMsgRunProcessGid(gid) => {
+                5u8.encode_into(buf);
+                gid.encode_into(buf);
+            }
+            SubMsgRunProcessType::SubMsgRunProcessRfd(fd, redir_fd) => {
+                6u8.encode_into(buf);
+                fd.encode_into(buf);
+                redir_fd.encode_into(buf);
+            }
+        }
+    }
+}
+
+impl EncodeInto for RedirectFdType<'_> {
+    fn encode_into(&self, buf: &mut Vec<u8>) {
+        match self {
+            RedirectFdType::RedirectFdFile(path) => {
+                0u8.encode_into(buf);
+                path.encode_into(buf);
+            }
+            RedirectFdType::RedirectFdPipeBlocking(size) => {
+                1u8.encode_into(buf);
+                size.encode_into(buf);
+            }
+            RedirectFdType::RedirectFdPipeCyclic(size) => {
+                2u8.encode_into(buf);
+                size.encode_into(buf);
+            }
+        }
+    }
+}
+
+impl<T> Default for Message<T> {
+    fn default() -> Self {
+        Self {
+            buf: Vec::new(),
+            phantom: PhantomData,
+        }
+    }
+}
+
+impl<T> Message<T>
+where
+    T: SubMsgTrait<T>,
+{
+    fn create_header(&mut self, msg_id: u64) {
+        self.buf.extend(&msg_id.to_le_bytes());
+        self.buf.extend(&T::TYPE.to_le_bytes());
+    }
+
+    fn append_submsg<A: SubMsgTrait<T>>(&mut self, submsg: &A) {
+        submsg.encode_into(&mut self.buf);
     }
 }
 
@@ -204,9 +265,9 @@ impl GuestAgent {
     }
 
     pub fn quit(&mut self) -> io::Result<()> {
-        let mut msg = new_quit_message();
+        let mut msg = Message::default();
         msg.create_header(self.get_new_msg_id());
-        msg.append_submsg_type(SubMsgQuitType::SubMsgEnd);
+        msg.append_submsg(&SubMsgQuitType::SubMsgEnd);
         self.stream.write_all(msg.as_ref())?;
         self.get_response()?;
         Ok(())
@@ -218,23 +279,38 @@ impl GuestAgent {
         argv: &[&str],
         maybe_env: Option<&[&str]>,
         uid: u32,
+        gid: u32,
+        fds: &[Option<RedirectFdType>; 3],
     ) -> io::Result<()> {
-        let mut msg = new_run_process_message();
+        let mut msg = Message::default();
+
         msg.create_header(self.get_new_msg_id());
-        msg.append_submsg_bytes(SubMsgRunProcessType::SubMsgRunProcessBin, bin.as_bytes());
-        msg.append_submsg_array(
-            SubMsgRunProcessType::SubMsgRunProcessArg,
+
+        msg.append_submsg(&SubMsgRunProcessType::SubMsgRunProcessBin(bin.as_bytes()));
+
+        msg.append_submsg(&SubMsgRunProcessType::SubMsgRunProcessArg(
             &argv.iter().map(|s| s.as_bytes()).collect::<Vec<_>>(),
-        );
-        match maybe_env {
-            Some(env) => msg.append_submsg_array(
-                SubMsgRunProcessType::SubMsgRunProcessEnv,
+        ));
+
+        if let Some(env) = maybe_env {
+            msg.append_submsg(&SubMsgRunProcessType::SubMsgRunProcessEnv(
                 &env.iter().map(|s| s.as_bytes()).collect::<Vec<_>>(),
-            ),
-            None => (),
+            ));
         }
-        msg.append_submsg_u32(SubMsgRunProcessType::SubMsgRunProcessUid, uid);
-        msg.append_submsg_type(SubMsgRunProcessType::SubMsgEnd);
+
+        msg.append_submsg(&SubMsgRunProcessType::SubMsgRunProcessUid(uid));
+
+        msg.append_submsg(&SubMsgRunProcessType::SubMsgRunProcessGid(gid));
+
+        fds.iter()
+            .enumerate()
+            .filter_map(|(i, fdr)| fdr.as_ref().map(|fdr| (i, fdr)))
+            .for_each(|(i, fdr)| {
+                msg.append_submsg(&SubMsgRunProcessType::SubMsgRunProcessRfd(i as u32, fdr))
+            });
+
+        msg.append_submsg(&SubMsgRunProcessType::SubMsgEnd);
+
         self.stream.write_all(msg.as_ref())?;
         self.get_response()?;
         Ok(())

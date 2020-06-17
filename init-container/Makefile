@@ -1,5 +1,13 @@
 CC := musl-gcc
 
+CFLAGS := -std=c11 -O2 -Wall -Werror -fPIE -pie -Iinclude/
+
+ifneq ($(DEBUG), "")
+CFLAGS += -DNDEBUG
+endif
+
+SRC_DIR ?= src
+
 KERNEL_URL ?= "https://nl.alpinelinux.org/alpine/v3.11/main/x86_64/linux-virt-5.4.34-r0.apk"
 KERNEL_SHA256 ?= "a6b32dc0ba8a52604b2adc9f9ae5035dc1d7936d81324911b9ee089eca81b2e3"
 
@@ -8,6 +16,14 @@ UNPACKED_DIR := unpacked_kernel
 .DEFAULT_GOAL = all
 .PHONY: all
 all: vmlinuz-virt initramfs.cpio.gz
+
+%.o: %.c
+	$(CC) $(CFLAGS) -o $@ -c $^
+
+init: $(addprefix $(SRC_DIR)/,init.o communication.o)
+	$(CC) $(CFLAGS) -static -o $@ $^
+	@# default musl libs on some distros have debug symbols, lets strip them (and everythig else)
+	strip $@
 
 $(UNPACKED_DIR):
 	wget -q -O "unverified" $(KERNEL_URL)
@@ -19,11 +35,6 @@ $(UNPACKED_DIR):
 
 vmlinuz-virt: $(UNPACKED_DIR)
 	cp $(UNPACKED_DIR)/boot/vmlinuz-virt .
-
-init: %: %.c
-	$(CC) -std=c11 -O2 -Wall -Werror -static -fPIE -pie -o $@ $^
-	@# default musl libs on some distros have debug symbols, lets strip them (and everythig else)
-	strip $@
 
 initramfs.cpio.gz: init $(UNPACKED_DIR)
 	$(RM) -rf initramfs
@@ -41,7 +52,8 @@ initramfs.cpio.gz: init $(UNPACKED_DIR)
 
 .PHONY: clean
 clean:
-	$(RM) init vmlinuz-virt initramfs.cpio.gz
+	$(RM) init $(SRC_DIR)/*.o
+	$(RM) vmlinuz-virt initramfs.cpio.gz
 
 .PHONY: distclean
 distclean:
