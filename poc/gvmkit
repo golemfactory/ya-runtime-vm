@@ -38,7 +38,14 @@ do_repack() {
 	docker inspect "$1" | jq '.[0].Config.Env[]' -r > $OUT/.env
 	ep=$(docker inspect "$1" | jq '.[0].Config.Entrypoint[]' -e -r) && echo $ep > $OUT/.entrypoint
 	cmd=$(docker inspect "$1" | jq '.[0].Config.Cmd[]' -e -r) && echo $cmd > $OUT/.cmd
+  vols=$(docker inspect "$1" | jq '.[0].Config.Volumes | keys[]' -e -r) && echo $vols > $OUT/.vols
+  docker inspect "$1" | jq '.[0].Config' > "${OUT}.json"
 	mksquashfs "$OUT" "$OUT.golem-app" -comp lzo
+  (
+  cat "${OUT}.json"
+  printf "%08d" $(stat -c%s "${OUT}.json")
+  ) >> "$OUT.golem-app" 
+
 }
 
 SCRIPT_DIR=$(readlink -f ${0%/*})
