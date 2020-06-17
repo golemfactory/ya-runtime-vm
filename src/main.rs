@@ -1,9 +1,10 @@
+use std::io;
 use std::process::{Command, Stdio};
 
 mod guest_agent_comm;
-use crate::guest_agent_comm::GuestAgent;
+use crate::guest_agent_comm::{GuestAgent, RedirectFdType};
 
-fn main() {
+fn main() -> io::Result<()> {
     let mut child = Command::new("qemu-system-x86_64")
         .args(&[
             "-m", "256m",
@@ -23,14 +24,35 @@ fn main() {
         .spawn()
         .expect("failed to spawn VM");
 
-    let mut ga = GuestAgent::connected("./manager.sock", 10).unwrap();
+    let mut ga = GuestAgent::connected("./manager.sock", 10)?;
 
-    let argv = ["a0", "a1", "a2"];
-    ga.run_process("binary_name", &argv, None, 0).unwrap();
-    println!("");
+    let no_redir = [None, None, None];
+    let fds = [
+        None,
+        Some(RedirectFdType::RedirectFdFile("/a".as_bytes())),
+        Some(RedirectFdType::RedirectFdFile("/b".as_bytes())),
+    ];
 
-    ga.quit().unwrap();
+    ga.run_process("/bin/ls", &["ls", "-al", "/"], None, 0, 0, &no_redir)?;
+
+    ga.run_process("/bin/echo", &["echo", "TEST TEST TEST"], None, 0, 0, &fds)?;
+
+    ga.run_process("/bin/ls", &["ls", "-al", "/"], None, 0, 0, &no_redir)?;
+
+    ga.run_process(
+        "/bin/echo",
+        &["echo", "Contents of \"/a\":"],
+        None,
+        0,
+        0,
+        &no_redir,
+    )?;
+    ga.run_process("/bin/cat", &["cat", "/a"], None, 0, 0, &no_redir)?;
+
+    ga.quit()?;
 
     let e = child.wait().expect("failed to wait on child");
     println!("{:?}", e);
+
+    Ok(())
 }

@@ -1,4 +1,4 @@
-CC := musl-gcc
+SRC_DIR ?= src
 
 KERNEL_URL ?= "https://nl.alpinelinux.org/alpine/v3.11/main/x86_64/linux-virt-5.4.34-r0.apk"
 KERNEL_SHA256 ?= "a6b32dc0ba8a52604b2adc9f9ae5035dc1d7936d81324911b9ee089eca81b2e3"
@@ -20,12 +20,10 @@ $(UNPACKED_DIR):
 vmlinuz-virt: $(UNPACKED_DIR)
 	cp $(UNPACKED_DIR)/boot/vmlinuz-virt .
 
-init: %: %.c
-	$(CC) -std=c11 -O2 -Wall -Werror -static -fPIE -pie -o $@ $^
-	@# default musl libs on some distros have debug symbols, lets strip them (and everythig else)
-	strip $@
+$(SRC_DIR)/init:
+	$(MAKE) -C $(SRC_DIR) all
 
-initramfs.cpio.gz: init $(UNPACKED_DIR)
+initramfs.cpio.gz: $(SRC_DIR)/init $(UNPACKED_DIR)
 	$(RM) -rf initramfs
 	mkdir initramfs
 	cp $< initramfs
@@ -41,7 +39,8 @@ initramfs.cpio.gz: init $(UNPACKED_DIR)
 
 .PHONY: clean
 clean:
-	$(RM) init vmlinuz-virt initramfs.cpio.gz
+	$(MAKE) -C $(SRC_DIR) $@
+	$(RM) vmlinuz-virt initramfs.cpio.gz
 
 .PHONY: distclean
 distclean:

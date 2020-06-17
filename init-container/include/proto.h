@@ -66,7 +66,10 @@ enum SUB_MSG_RUN_PROCESS_TYPE {
     SUB_MSG_RUN_PROCESS_ENV,
     /* Uid to run as. (u32) */
     SUB_MSG_RUN_PROCESS_UID,
-    /* Redirect a fd to the given path. (u32 + REDIRECT_FD_TYPE (1-byte)) */
+    /* Gid to run as. (u32) */
+    SUB_MSG_RUN_PROCESS_GID,
+    /* Redirect a fd to the given path. (u32 + REDIRECT_FD_TYPE (1-byte)
+     * + type sepcific data). */
     SUB_MSG_RUN_PROCESS_RFD,
 };
 
@@ -123,7 +126,7 @@ enum SUB_MSG_PUT_INPUT_TYPE {
 
 enum REDIRECT_FD_TYPE {
     /* Path to the file. (BYTES) */
-    REDIRECT_FD_FILE,
+    REDIRECT_FD_FILE = 0,
     /* Buffer size. (u64) */
     REDIRECT_FD_PIPE_BLOCKING,
     /* Buffer size. (u64) */
