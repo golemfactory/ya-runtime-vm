@@ -136,8 +136,10 @@ impl<T: SubMsgTrait> Message<T> {
             self.append_bytes(&a);
         }
     }
+}
 
-    fn get_bytes(&mut self) -> &Vec<u8> {
+impl<T> AsRef<Vec<u8>> for Message<T> {
+    fn as_ref(&self) -> &Vec<u8> {
         &self.buf
     }
 }
@@ -205,7 +207,7 @@ impl GuestAgent {
         let mut msg = new_quit_message();
         msg.create_header(self.get_new_msg_id());
         msg.append_submsg_type(SubMsgQuitType::SubMsgEnd);
-        self.stream.write_all(msg.get_bytes())?;
+        self.stream.write_all(msg.as_ref())?;
         self.get_response()?;
         Ok(())
     }
@@ -233,7 +235,7 @@ impl GuestAgent {
         }
         msg.append_submsg_u32(SubMsgRunProcessType::SubMsgRunProcessUid, uid);
         msg.append_submsg_type(SubMsgRunProcessType::SubMsgEnd);
-        self.stream.write_all(msg.get_bytes())?;
+        self.stream.write_all(msg.as_ref())?;
         self.get_response()?;
         Ok(())
     }
