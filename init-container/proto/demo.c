@@ -1,7 +1,11 @@
-#include <stdio.h>
 #include <pb_encode.h>
 #include <pb_decode.h>
 #include "vm-agent.pb.h"
+
+int printf(const char *msg, ...) {
+  return 0;
+}
+
 
 int main()
 {

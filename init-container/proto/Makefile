@@ -4,6 +4,6 @@ DEMO_SRC=demo.c vm-agent.pb.c
 all: demo
 
 demo: $(DEMO_SRC) $(PBSRC)
-	gcc -O2 -o $@ -Wall -I. $^
+	musl-gcc -Os -flto -static -fdata-sections -ffunction-sections -Wl,--gc-sections -fwhole-program -o $@ -Wall -I. $^
 
 
