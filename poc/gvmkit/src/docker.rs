@@ -1,5 +1,6 @@
 use anyhow::anyhow;
-use bollard::{container, service::ContainerConfig, Docker};
+use bollard::service::{ContainerConfig, HostConfig, Mount};
+use bollard::{container, Docker};
 use bytes::{Bytes, BytesMut};
 use futures_util::stream::TryStreamExt;
 
@@ -18,28 +19,46 @@ impl DockerInstance {
         &mut self,
         image_name: &str,
         container_name: &str,
+        mounts: Option<Vec<Mount>>,
     ) -> anyhow::Result<()> {
-        let options = Some(container::CreateContainerOptions {
+        let options = container::CreateContainerOptions {
             name: container_name,
-        });
-        let config = container::Config {
-            image: Some(image_name),
+        };
+
+        let host_config = HostConfig {
+            mounts: mounts,
             ..Default::default()
         };
 
-        let result = self.docker.create_container(options, config).await?;
+        let config = container::Config {
+            image: Some(image_name),
+            host_config: Some(host_config),
+            ..Default::default()
+        };
+
+        let result = self.docker.create_container(Some(options), config).await?;
         dbg!(result);
         Ok(())
     }
 
+    pub async fn start_container(&mut self, container_name: &str) -> anyhow::Result<()> {
+        self.docker
+            .start_container(
+                container_name,
+                None::<container::StartContainerOptions<String>>,
+            )
+            .await?;
+        Ok(())
+    }
+
     pub async fn remove_container(&mut self, container_name: &str) -> anyhow::Result<()> {
-        let options = Some(container::RemoveContainerOptions {
+        let options = container::RemoveContainerOptions {
             force: true,
             ..Default::default()
-        });
+        };
 
         self.docker
-            .remove_container(container_name, options)
+            .remove_container(container_name, Some(options))
             .await?;
         Ok(())
     }
@@ -69,10 +88,9 @@ impl DockerInstance {
         &mut self,
         container_name: &str,
     ) -> anyhow::Result<(String, ContainerConfig)> {
-        let options = Some(container::InspectContainerOptions { size: false });
         let cont = self
             .docker
-            .inspect_container(container_name, options)
+            .inspect_container(container_name, None::<container::InspectContainerOptions>)
             .await?;
 
         let hash = cont.id.ok_or(anyhow!("Container has no id"))?;
