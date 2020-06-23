@@ -62,8 +62,8 @@ static void sigchld_handler(int sig, siginfo_t* info, void* uctx) {
 
     int ret = waitpid(child_pid, &status, WNOHANG);
     if (ret <= 0) {
-        /* Eiter child is still alive or an error occured (but nothing fatal can
-         * happen here). */
+        /* Either child is still alive or an error occured (but nothing fatal
+         * can happen here). */
         return;
     }
 
@@ -204,7 +204,7 @@ static uint32_t spawn_new_process(char* bin, char** argv, char** envp,
     uint32_t ret = 0;
 
     /* All these shenanigans with pipes are so that we can distinguish internal
-     * failures from spanwed process exiting. */
+     * failures from spawned process exiting. */
     int status_pipe[2];
     if (pipe2(status_pipe, O_CLOEXEC | O_DIRECT) < 0) {
         return errno;

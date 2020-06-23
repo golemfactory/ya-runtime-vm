@@ -15,6 +15,9 @@ int readn(int fd, void* buf, size_t size) {
             continue;
         }
         if (ret < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
             /* `errno` should be set. */
             return -1;
         }
@@ -120,6 +123,9 @@ int writen(int fd, void* buf, size_t size) {
             continue;
         }
         if (ret < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
             /* `errno` should be set. */
             return -1;
         }
