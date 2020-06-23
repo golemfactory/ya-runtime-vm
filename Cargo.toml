@@ -5,6 +5,19 @@ authors = ["Golem Factory <contact@golem.network>"]
 edition = "2018"
 license = "GPL-3.0"
 
+[package.metadata.deb]
+assets = [
+    ["conf/ya-runtime-vm.json",         "usr/lib/yagna/plugins/", "644"],
+    ["target/release/ya-runtime-vm",    "usr/lib/yagna/plugins/ya-runtime-vm/", "755"],
+    ["poc/gvmkit",                      "usr/lib/yagna/plugins/ya-runtime-vm/poc/", "755"],
+    ["poc/runtime/bios-256k.bin",       "usr/lib/yagna/plugins/ya-runtime-vm/poc/runtime/", "644"],
+    ["poc/runtime/initramfs-virt",      "usr/lib/yagna/plugins/ya-runtime-vm/poc/runtime/", "644"],
+    ["poc/runtime/kvmvapic.bin",        "usr/lib/yagna/plugins/ya-runtime-vm/poc/runtime/", "644"],
+    ["poc/runtime/linuxboot_dma.bin",   "usr/lib/yagna/plugins/ya-runtime-vm/poc/runtime/", "644"],
+    ["poc/runtime/vmlinuz-virt",        "usr/lib/yagna/plugins/ya-runtime-vm/poc/runtime/", "644"],
+    ["poc/runtime/vmrt",                "usr/lib/yagna/plugins/ya-runtime-vm/poc/runtime/", "755"]
+]
+
 [dependencies]
 anyhow = "1.0"
 serde = { version = "^1.0", features = ["derive"] }

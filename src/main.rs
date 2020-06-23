@@ -1,4 +1,6 @@
+use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
+use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 use structopt::StructOpt;
@@ -31,6 +33,13 @@ pub struct DeployResult {
     pub valid: Result<String, String>,
 }
 
+fn get_gvmkit_path(current_exe: PathBuf) -> anyhow::Result<PathBuf> {
+    let base_dir = current_exe
+        .parent()
+        .ok_or(anyhow!("exe path has no parent"))?;
+    Ok(base_dir.join("poc/gvmkit"))
+}
+
 fn main() -> anyhow::Result<()> {
     let cmdargs = CmdArgs::from_args();
     match cmdargs.command {
@@ -42,10 +51,7 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Start {} => (),
         Commands::Run { entrypoint, args } => {
-            let mut exe = cmdargs.workdir;
-            exe.push("gvmkit");
-
-            Command::new(exe)
+            Command::new(get_gvmkit_path(env::current_exe()?)?)
                 .arg("run")
                 .arg(cmdargs.task_package)
                 .arg(entrypoint)
@@ -55,4 +61,23 @@ fn main() -> anyhow::Result<()> {
         }
     };
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_gvmkit_path_absolute() {
+        let gvmkit_path = get_gvmkit_path(PathBuf::from("/foo/bar/ya-runtime-vm"));
+        assert!(gvmkit_path.is_ok());
+        assert_eq!(gvmkit_path.unwrap(), PathBuf::from("/foo/bar/poc/gvmkit"));
+    }
+
+    #[test]
+    fn test_get_gvmkit_path_relative() {
+        let gvmkit_path = get_gvmkit_path(PathBuf::from("./ya-runtime-vm"));
+        assert!(gvmkit_path.is_ok());
+        assert_eq!(gvmkit_path.unwrap(), PathBuf::from("./poc/gvmkit"));
+    }
 }
