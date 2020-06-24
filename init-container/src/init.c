@@ -3,6 +3,7 @@
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -11,6 +12,7 @@
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/reboot.h>
+#include <sys/signalfd.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
@@ -18,7 +20,11 @@
 #include <unistd.h>
 
 #include "communication.h"
+#include "process_bookkeeping.h"
 #include "proto.h"
+
+// XXX: maybe obtain this with sysconf?
+#define PAGE_SIZE 0x1000
 
 #define DEFAULT_UID 0
 #define DEFAULT_GID 0
@@ -27,9 +33,11 @@
 extern char** environ;
 
 static int g_cmds_fd = -1;
+static int g_sig_fd = -1;
 
 static noreturn void die(void) {
     sync();
+    (void)close(g_sig_fd);
     (void)close(g_cmds_fd);
 
     while (1) {
@@ -53,46 +61,112 @@ static void load_module(const char* path) {
     CHECK(close(fd));
 }
 
-/* Since we set SA_NODEFER, this handler needs to be reentrant. */
-static void sigchld_handler(int sig, siginfo_t* info, void* uctx) {
-    (void)sig; // We know it's SIGCHLD.
-    (void)uctx;
-    pid_t child_pid = info->si_pid;
-    int status = 0;
-
-    int ret = waitpid(child_pid, &status, WNOHANG);
-    if (ret <= 0) {
-        /* Either child is still alive or an error occured (but nothing fatal
-         * can happen here). */
-        return;
-    }
-
-    // TODO: check whether this is a child process we care about (spawned task)
-    (void)child_pid;
-}
-
-static void add_child_handler(void) {
-    struct sigaction act = {
-        .sa_sigaction = sigchld_handler,
-        .sa_flags = SA_NOCLDSTOP | SA_NODEFER | SA_RESTART | SA_SIGINFO,
-    };
-    CHECK(sigaction(SIGCHLD, &act, NULL));
-}
-
-static void send_response(msg_id_t msg_id, uint32_t ret_val) {
+static void send_process_died(uint64_t id, uint32_t reason) {
     struct msg_hdr resp = {
-        .msg_id = msg_id,
-        .type = !ret_val ? RESP_OK : RESP_ERR,
+        .msg_id = 0,
+        .type = NOTIFY_PROCESS_DIED,
     };
 
     CHECK(writen(g_cmds_fd, &resp, sizeof(resp)));
-    if (ret_val) {
-        CHECK(writen(g_cmds_fd, &ret_val, sizeof(ret_val)));
+    CHECK(writen(g_cmds_fd, &id, sizeof(id)));
+    CHECK(writen(g_cmds_fd, &reason, sizeof(reason)));
+}
+
+static uint32_t encode_status(int status, int type) {
+    uint32_t val = 0;
+
+    switch (type) {
+        case CLD_EXITED:
+            val = 0;
+            break;
+        case CLD_KILLED:
+            val = 1;
+            break;
+        case CLD_DUMPED:
+            val = 2;
+            break;
+        default:
+            fprintf(stderr, "Invalid exit reason to encode: %d\n", type);
+            die();
     }
+
+    val = (val << 30) | (status & 0xff);
+
+    return val;
+}
+
+static void handle_sigchld(void) {
+    struct signalfd_siginfo siginfo = { 0 };
+
+    if (read(g_sig_fd, &siginfo, sizeof(siginfo)) != sizeof(siginfo)) {
+        fprintf(stderr, "Invalid signalfd read: %m\n");
+        die();
+    }
+
+    if (siginfo.ssi_signo != SIGCHLD) {
+        fprintf(stderr, "BUG: read unexpected signal from signalfd: %d\n",
+                siginfo.ssi_signo);
+        die();
+    }
+
+    uint32_t child_pid = siginfo.ssi_pid;
+
+    if (siginfo.ssi_code != CLD_EXITED
+            && siginfo.ssi_code != CLD_KILLED
+            && siginfo.ssi_code != CLD_DUMPED) {
+        /* Received spurious SIGCHLD - ignore it. */
+        return;
+    }
+
+    pid_t w_pid = waitpid(child_pid, NULL, WNOHANG);
+    if (w_pid != child_pid) {
+        fprintf(stderr, "Error at waitpid: %d: %m\n", w_pid);
+        die();
+    }
+
+    struct process_desc* proc_desc = find_process_by_pid(child_pid);
+    if (!proc_desc) {
+        /* This process was not tracked. */
+        return;
+    }
+
+    send_process_died(proc_desc->id, encode_status(siginfo.ssi_status, siginfo.ssi_code));
+
+    remove_process(proc_desc);
+}
+
+static void setup_sigfd(void) {
+    sigset_t set;
+    CHECK(sigemptyset(&set));
+    CHECK(sigaddset(&set, SIGCHLD));
+    CHECK(sigprocmask(SIG_BLOCK, &set, NULL));
+    g_sig_fd = CHECK(signalfd(g_sig_fd, &set, SFD_CLOEXEC));
+}
+
+static void send_response_hdr(msg_id_t msg_id, enum RESP_TYPE type) {
+    struct msg_hdr resp = {
+        .msg_id = msg_id,
+        .type = type,
+    };
+    CHECK(writen(g_cmds_fd, &resp, sizeof(resp)));
+}
+
+static void send_response_ok(msg_id_t msg_id) {
+    send_response_hdr(msg_id, RESP_OK);
+}
+
+static void send_response_err(msg_id_t msg_id, uint32_t ret_val) {
+    send_response_hdr(msg_id, RESP_ERR);
+    CHECK(writen(g_cmds_fd, &ret_val, sizeof(ret_val)));
+}
+
+static void send_response_u64(msg_id_t msg_id, uint64_t ret_val) {
+    send_response_hdr(msg_id, RESP_OK_U64);
+    CHECK(writen(g_cmds_fd, &ret_val, sizeof(ret_val)));
 }
 
 static noreturn void handle_quit(msg_id_t msg_id) {
-    send_response(msg_id, 0);
+    send_response_ok(msg_id);
     die();
 }
 
@@ -161,6 +235,14 @@ static noreturn void child_wrapper(int parent_pipe[2], char* bin, char** argv,
         goto out;
     }
 
+    sigset_t set;
+    if (sigemptyset(&set) < 0) {
+        goto out;
+    }
+    if (sigprocmask(SIG_SETMASK, &set, NULL) < 0) {
+        goto out;
+    }
+
     for (int fd = 0; fd < 3; ++fd) {
         switch (fd_descs[fd].type) {
             case REDIRECT_FD_FILE:
@@ -198,34 +280,46 @@ out: ;
     exit(ecode);
 }
 
+static uint64_t get_next_id(void) {
+    static uint64_t id = 0;
+    return ++id;
+}
+
 static uint32_t spawn_new_process(char* bin, char** argv, char** envp,
                                   uid_t uid, gid_t gid,
-                                  struct redir_fd_desc fd_descs[3]) {
+                                  struct redir_fd_desc fd_descs[3],
+                                  uint64_t* id) {
     uint32_t ret = 0;
+
+    struct process_desc* proc_desc = malloc(sizeof(*proc_desc));
+    if (!proc_desc) {
+        return ENOMEM;
+    }
 
     /* All these shenanigans with pipes are so that we can distinguish internal
      * failures from spawned process exiting. */
-    int status_pipe[2];
+    int status_pipe[2] = { -1, -1 };
     if (pipe2(status_pipe, O_CLOEXEC | O_DIRECT) < 0) {
-        return errno;
+        ret = errno;
+        goto out;
     }
 
     pid_t p = fork();
     if (p < 0) {
         ret = errno;
-        CHECK(close(status_pipe[0]));
-        CHECK(close(status_pipe[1]));
-        return ret;
+        goto out;
     } else if (p == 0) {
         child_wrapper(status_pipe, bin, argv, envp, uid, gid, fd_descs);
     }
 
     CHECK(close(status_pipe[1]));
+    status_pipe[1] = -1;
 
     char c;
     ssize_t x = read(status_pipe[0], &c, sizeof(c));
     if (x < 0) {
         ret = errno;
+        goto out;
     } else if (x > 0) {
         /* Process failed to spawn. */
         int status = 0;
@@ -237,15 +331,33 @@ static uint32_t spawn_new_process(char* bin, char** argv, char** envp,
         } else {
             ret = ENOTRECOVERABLE;
         }
+        goto out;
     } // else x == 0, which means successful process spawn.
 
     CHECK(close(status_pipe[0]));
+    status_pipe[0] = -1;
 
-    // TODO: remove once child processes are bookkeeped
-    if (x == 0) {
-        (void)waitpid(p, NULL, 0);
+    proc_desc->id = get_next_id();
+    proc_desc->pid = p;
+
+    *id = proc_desc->id;
+
+    add_process(proc_desc);
+    proc_desc = NULL;
+
+out:
+    if (status_pipe[0] != -1) {
+        CHECK(close(status_pipe[0]));
     }
+    if (status_pipe[1] != -1) {
+        CHECK(close(status_pipe[1]));
+    }
+    free(proc_desc);
     return ret;
+}
+
+static bool is_fd_buf_size_valid(size_t size) {
+    return size > 0 && (size % PAGE_SIZE) == 0;
 }
 
 static uint32_t parse_fd_redir(struct redir_fd_desc fd_descs[3]) {
@@ -277,6 +389,13 @@ static uint32_t parse_fd_redir(struct redir_fd_desc fd_descs[3]) {
         return EINVAL;
     }
 
+    if (fd_desc.type == REDIRECT_FD_PIPE_BLOCKING
+            || fd_desc.type == REDIRECT_FD_PIPE_CYCLIC) {
+        if (!is_fd_buf_size_valid(fd_desc.size)) {
+            return EINVAL;
+        }
+    }
+
     cleanup_fd_desc(&fd_descs[fd]);
 
     memcpy(&fd_descs[fd], &fd_desc, sizeof(fd_descs[fd]));
@@ -297,6 +416,7 @@ static void handle_run_process(msg_id_t msg_id) {
         DEFAULT_FD_DESC,
         DEFAULT_FD_DESC,
     };
+    uint64_t proc_id = 0;
 
     while (!done) {
         uint8_t subtype = 0;
@@ -351,7 +471,7 @@ static void handle_run_process(msg_id_t msg_id) {
         goto out;
     }
 
-    ret = spawn_new_process(bin, argv, envp, uid, gid, fd_descs);
+    ret = spawn_new_process(bin, argv, envp, uid, gid, fd_descs, &proc_id);
 
 out:
     for (size_t i = 0; i < 3; ++i) {
@@ -360,36 +480,72 @@ out:
     free_strings_array(envp);
     free_strings_array(argv);
     free(bin);
-    send_response(msg_id, ret);
+    if (ret) {
+        send_response_err(msg_id, ret);
+    } else {
+        send_response_u64(msg_id, proc_id);
+    }
 }
 
-static noreturn void handle_messages(void) {
+static void handle_message(void) {
+    struct msg_hdr msg_hdr;
+
+    CHECK(readn(g_cmds_fd, &msg_hdr, sizeof(msg_hdr)));
+
+    switch (msg_hdr.type) {
+        case MSG_QUIT:
+            fprintf(stderr, "Exiting\n");
+            handle_quit(msg_hdr.msg_id);
+        case MSG_RUN_PROCESS:
+            fprintf(stderr, "MSG_RUN_PROCESS\n");
+            handle_run_process(msg_hdr.msg_id);
+            break;
+        case MSG_KILL_PROCESS:
+        case MSG_MOUNT_VOLUME:
+        case MSG_UPLOAD_FILE:
+        case MSG_QUERY_OUTPUT:
+        case MSG_PUT_INPUT:
+        case MSG_SYNC_FS:
+            fprintf(stderr, "Not implemented yet!\n");
+            send_response_err(msg_hdr.msg_id, EPROTONOSUPPORT);
+            break;
+        default:
+            fprintf(stderr, "Unknown message type: %hhu\n", msg_hdr.type);
+            send_response_err(msg_hdr.msg_id, ENOPROTOOPT);
+            die();
+    }
+}
+
+static noreturn void main_loop(void) {
     while (1) {
-        struct msg_hdr msg_hdr;
+        struct pollfd fds[] = {
+            { .fd = g_cmds_fd, .events = POLLIN },
+            { .fd = g_sig_fd, .events = POLLIN },
+        };
 
-        CHECK(readn(g_cmds_fd, &msg_hdr, sizeof(msg_hdr)));
+        int ret = poll(fds, sizeof(fds) / sizeof(fds[0]), -1);
+        if (ret < 0) {
+            if (errno == EINTR || errno == EAGAIN) {
+                continue;
+            }
+            fprintf(stderr, "poll failed: %m\n");
+            die();
+        }
 
-        switch (msg_hdr.type) {
-            case MSG_QUIT:
-                fprintf(stderr, "Exiting\n");
-                handle_quit(msg_hdr.msg_id);
-            case MSG_RUN_PROCESS:
-                fprintf(stderr, "MSG_RUN_PROCESS\n");
-                handle_run_process(msg_hdr.msg_id);
-                break;
-            case MSG_KILL_PROCESS:
-            case MSG_MOUNT_VOLUME:
-            case MSG_UPLOAD_FILE:
-            case MSG_QUERY_OUTPUT:
-            case MSG_PUT_INPUT:
-            case MSG_SYNC_FS:
-                fprintf(stderr, "Not implemented yet!\n");
-                send_response(msg_hdr.msg_id, EPROTONOSUPPORT);
-                break;
-            default:
-                fprintf(stderr, "Unknown message type: %hhu\n", msg_hdr.type);
-                send_response(msg_hdr.msg_id, ENOPROTOOPT);
-                die();
+        if (fds[0].revents & (POLLNVAL | POLLERR)) {
+            fprintf(stderr, "poll error event: 0x%04hx\n", fds[0].revents);
+            die();
+        }
+        if (fds[1].revents & (POLLNVAL | POLLERR)) {
+            fprintf(stderr, "poll error event: 0x%04hx\n", fds[1].revents);
+            die();
+        }
+
+        if (fds[0].revents & POLLIN) {
+            handle_message();
+        }
+        if (fds[1].revents & POLLIN) {
+            handle_sigchld();
         }
     }
 }
@@ -436,7 +592,7 @@ int main(void) {
     CHECK(chroot("."));
     CHECK(chdir("/"));
 
-    add_child_handler();
+    setup_sigfd();
 
-    handle_messages();
+    main_loop();
 }

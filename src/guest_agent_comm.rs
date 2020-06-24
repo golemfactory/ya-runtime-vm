@@ -1,8 +1,12 @@
-use std::convert::TryFrom;
 use std::io::{self, prelude::*};
 use std::marker::PhantomData;
 use std::os::unix::net::UnixStream;
 use std::{thread, time};
+
+enum Either<T1, T2> {
+    Left(T1),
+    Right(T2),
+}
 
 #[repr(u8)]
 enum MsgType {
@@ -30,13 +34,16 @@ pub enum RedirectFdType<'a> {
     RedirectFdPipeCyclic(u64),
 }
 
-#[repr(u8)]
-#[derive(Debug)]
 enum RespType {
-    RespOk = 0,
-    RespErr,
-    NotifyOutputAvailable,
-    NotifyProcessDied,
+    RespOk,
+    RespOkU64(u64),
+    RespOkBytes(Vec<u8>),
+    RespErr(u32),
+}
+
+pub enum NotifyType {
+    NotifyOutputAvailable(u64, u32),
+    NotifyProcessDied(u64, u32),
 }
 
 struct Message<T> {
@@ -44,26 +51,13 @@ struct Message<T> {
     phantom: PhantomData<T>,
 }
 
-pub struct GuestAgent {
+pub struct GuestAgent<F>
+where
+    F: FnMut(NotifyType) -> (),
+{
     stream: UnixStream,
     last_msg_id: u64,
-}
-
-impl TryFrom<u8> for RespType {
-    type Error = io::Error;
-
-    fn try_from(x: u8) -> io::Result<Self> {
-        match x {
-            0 => Ok(RespType::RespOk),
-            1 => Ok(RespType::RespErr),
-            2 => Ok(RespType::NotifyOutputAvailable),
-            3 => Ok(RespType::NotifyProcessDied),
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Invalid response type",
-            )),
-        }
-    }
+    notification_handler: F,
 }
 
 trait EncodeInto {
@@ -205,8 +199,15 @@ impl<T> AsRef<Vec<u8>> for Message<T> {
     }
 }
 
-impl GuestAgent {
-    pub fn connected(path: &str, timeout: u32) -> io::Result<GuestAgent> {
+impl<F> GuestAgent<F>
+where
+    F: FnMut(NotifyType) -> (),
+{
+    pub fn connected(
+        path: &str,
+        timeout: u32,
+        notification_handler: F,
+    ) -> io::Result<GuestAgent<F>> {
         let mut timeout_remaining = timeout;
         loop {
             match UnixStream::connect(path) {
@@ -214,6 +215,7 @@ impl GuestAgent {
                     break Ok(GuestAgent {
                         stream: s,
                         last_msg_id: 0,
+                        notification_handler: notification_handler,
                     })
                 }
                 Err(err) => match err.kind() {
@@ -240,37 +242,126 @@ impl GuestAgent {
         self.last_msg_id
     }
 
-    fn get_response(&mut self) -> io::Result<()> {
-        let mut buf = [0; 8];
-        self.stream.read_exact(&mut buf)?;
-        let id = u64::from_le_bytes(buf);
-        println!("Message ID: {}", id);
-
+    fn recv_u8(&mut self) -> io::Result<u8> {
         let mut buf = [0; 1];
         self.stream.read_exact(&mut buf)?;
-        let typ = RespType::try_from(buf[0])?;
-        println!("Message type: {:?}", typ);
-        match typ {
-            RespType::RespOk => (),
-            RespType::RespErr => {
-                let mut buf = [0; 4];
-                self.stream.read_exact(&mut buf)?;
-                let code = u32::from_le_bytes(buf);
-                println!("Error code: {}", code);
-            }
-            RespType::NotifyOutputAvailable => (),
-            RespType::NotifyProcessDied => (),
-        };
-        Ok(())
+        Ok(u8::from_le_bytes(buf))
     }
 
-    pub fn quit(&mut self) -> io::Result<()> {
+    fn recv_u32(&mut self) -> io::Result<u32> {
+        let mut buf = [0; 4];
+        self.stream.read_exact(&mut buf)?;
+        Ok(u32::from_le_bytes(buf))
+    }
+
+    fn recv_u64(&mut self) -> io::Result<u64> {
+        let mut buf = [0; 8];
+        self.stream.read_exact(&mut buf)?;
+        Ok(u64::from_le_bytes(buf))
+    }
+
+    fn recv_bytes(&mut self) -> io::Result<Vec<u8>> {
+        let len = self.recv_u64()?;
+        let mut buf = vec![0; len as usize];
+        self.stream.read_exact(buf.as_mut_slice())?;
+        Ok(buf)
+    }
+
+    fn get_one_response(&mut self) -> io::Result<Either<NotifyType, (u64, RespType)>> {
+        let id = self.recv_u64()?;
+
+        let typ = self.recv_u8()?;
+        match typ {
+            0 => Ok(Either::Right((id, RespType::RespOk))),
+            1 => {
+                let val = self.recv_u64()?;
+                Ok(Either::Right((id, RespType::RespOkU64(val))))
+            }
+            2 => {
+                let buf = self.recv_bytes()?;
+                Ok(Either::Right((id, RespType::RespOkBytes(buf))))
+            }
+            3 => {
+                let code = self.recv_u32()?;
+                Ok(Either::Right((id, RespType::RespErr(code))))
+            }
+            4 => {
+                if id == 0 {
+                    let proc_id = self.recv_u64()?;
+                    let fd = self.recv_u32()?;
+                    Ok(Either::Left(NotifyType::NotifyOutputAvailable(proc_id, fd)))
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Invalid response message ID",
+                    ))
+                }
+            }
+            5 => {
+                if id == 0 {
+                    let proc_id = self.recv_u64()?;
+                    let code = self.recv_u32()?;
+                    Ok(Either::Left(NotifyType::NotifyProcessDied(proc_id, code)))
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Invalid response message ID",
+                    ))
+                }
+            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid response type",
+            )),
+        }
+    }
+
+    fn get_response(&mut self, msg_id: u64) -> io::Result<RespType> {
+        loop {
+            match self.get_one_response()? {
+                Either::Left(notification) => (self.notification_handler)(notification),
+                Either::Right((id, resp)) => {
+                    break {
+                        if id != msg_id {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "Got response with different ID",
+                            ));
+                        }
+                        Ok(resp)
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn get_one_notification(&mut self) -> io::Result<NotifyType> {
+        match self.get_one_response()? {
+            Either::Left(notification) => Ok(notification),
+            Either::Right(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Unexptected response",
+            )),
+        }
+    }
+
+    pub fn quit(&mut self) -> io::Result<Result<(), u32>> {
         let mut msg = Message::default();
-        msg.create_header(self.get_new_msg_id());
+        let msg_id = self.get_new_msg_id();
+        msg.create_header(msg_id);
         msg.append_submsg(&SubMsgQuitType::SubMsgEnd);
         self.stream.write_all(msg.as_ref())?;
-        self.get_response()?;
-        Ok(())
+        let ret = match self.get_response(msg_id)? {
+            RespType::RespOk => Ok(()),
+            RespType::RespErr(code) => Err(code),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "quit: invalid response",
+                ))
+            }
+        };
+        Ok(ret)
     }
 
     pub fn run_process(
@@ -281,10 +372,11 @@ impl GuestAgent {
         uid: u32,
         gid: u32,
         fds: &[Option<RedirectFdType>; 3],
-    ) -> io::Result<()> {
+    ) -> io::Result<Result<u64, u32>> {
         let mut msg = Message::default();
+        let msg_id = self.get_new_msg_id();
 
-        msg.create_header(self.get_new_msg_id());
+        msg.create_header(msg_id);
 
         msg.append_submsg(&SubMsgRunProcessType::SubMsgRunProcessBin(bin.as_bytes()));
 
@@ -312,7 +404,17 @@ impl GuestAgent {
         msg.append_submsg(&SubMsgRunProcessType::SubMsgEnd);
 
         self.stream.write_all(msg.as_ref())?;
-        self.get_response()?;
-        Ok(())
+
+        let ret = match self.get_response(msg_id)? {
+            RespType::RespOkU64(val) => Ok(val),
+            RespType::RespErr(code) => Err(code),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "run_process: invalid response",
+                ))
+            }
+        };
+        Ok(ret)
     }
 }

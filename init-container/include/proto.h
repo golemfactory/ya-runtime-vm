@@ -135,7 +135,11 @@ enum REDIRECT_FD_TYPE {
 
 enum RESP_TYPE {
     /* No body. */
-    RESP_OK,
+    RESP_OK = 0,
+    /* Number. (u64) */
+    RESP_OK_U64,
+    /* Bytes. (BYTES) */
+    RESP_OK_BYTES,
     /* Error code. (u32) */
     RESP_ERR,
     /* ID of process and a file descriptor. (u64 + u32) */
