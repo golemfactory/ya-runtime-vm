@@ -1,8 +1,12 @@
 use anyhow::anyhow;
-use bollard::service::{ContainerConfig, HostConfig, Mount};
+//use bollard::exec::{CreateExecOptions, StartExecOptions};
+use bollard::image::CreateImageOptions;
+use bollard::service::{ContainerConfig, HostConfig, Mount, MountTypeEnum};
 use bollard::{container, Docker};
 use bytes::{Bytes, BytesMut};
 use futures_util::stream::TryStreamExt;
+
+use crate::image_builder::DirectoryMount;
 
 pub struct DockerInstance {
     docker: Docker,
@@ -15,43 +19,168 @@ impl DockerInstance {
         })
     }
 
-    pub async fn create_container(
+    pub async fn create_image(&mut self, image_name: &str) -> anyhow::Result<()> {
+        print!("Creating image '{}'...", image_name);
+        let options = CreateImageOptions {
+            from_image: image_name,
+            ..Default::default()
+        };
+        self.docker
+            .create_image(Some(options), None, None)
+            .try_collect::<Vec<_>>()
+            .await?;
+        println!("OK");
+        Ok(())
+    }
+
+    pub async fn try_create_container(
         &mut self,
         image_name: &str,
         container_name: &str,
-        mounts: Option<Vec<Mount>>,
+        mounts: Option<Vec<DirectoryMount>>,
+        cmd: Option<Vec<String>>,
     ) -> anyhow::Result<()> {
         let options = container::CreateContainerOptions {
             name: container_name,
         };
 
+        // TODO: run as user not root
         let host_config = HostConfig {
-            mounts: mounts,
+            mounts: match mounts {
+                None => None,
+                Some(m) => Some(
+                    m.iter()
+                        .map(|mount_point| Mount {
+                            // TODO: don't clone, use references?
+                            target: Some(mount_point.guest.clone()),
+                            source: Some(mount_point.host.clone()),
+                            read_only: Some(mount_point.readonly),
+                            _type: Some(MountTypeEnum::BIND),
+                            ..Default::default()
+                        })
+                        .collect(),
+                ),
+            },
             ..Default::default()
         };
 
         let config = container::Config {
-            image: Some(image_name),
+            cmd: cmd,
+            image: Some(image_name.to_string()),
             host_config: Some(host_config),
             ..Default::default()
         };
 
-        let result = self.docker.create_container(Some(options), config).await?;
-        dbg!(result);
+        self.docker.create_container(Some(options), config).await?;
         Ok(())
     }
 
-    pub async fn start_container(&mut self, container_name: &str) -> anyhow::Result<()> {
+    pub async fn create_container(
+        &mut self,
+        image_name: &str,
+        container_name: &str,
+        mounts: Option<Vec<DirectoryMount>>,
+        cmd: Option<Vec<String>>,
+    ) -> anyhow::Result<()> {
+        print!(
+            "Creating container '{}' from image '{}'...",
+            container_name, image_name
+        );
+
+        let result = self
+            .try_create_container(image_name, container_name, mounts.clone(), cmd.clone())
+            .await;
+
+        match result {
+            Ok(_) => (),
+            Err(err) => {
+                if err.to_string().contains("No such image") {
+                    // TODO: better way
+                    println!("Required image not found locally");
+                    self.create_image(image_name).await?;
+                    self.try_create_container(image_name, container_name, mounts, cmd)
+                        .await?;
+                }
+                return Err(err);
+            }
+        }
+        println!("OK");
+        Ok(())
+    }
+
+    pub async fn run_container(&mut self, container_name: &str) -> anyhow::Result<()> {
+        print!("Starting container '{}'...", container_name);
         self.docker
             .start_container(
                 container_name,
                 None::<container::StartContainerOptions<String>>,
             )
             .await?;
+        println!("OK");
+
+        self.docker
+            .wait_container(
+                container_name,
+                None::<container::WaitContainerOptions<String>>,
+            )
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        let opt = container::LogsOptions {
+            stdout: true,
+            stderr: true,
+            follow: true,
+            ..Default::default()
+        };
+        let log = self
+            .docker
+            .logs(container_name, Some(opt))
+            .try_collect::<Vec<_>>()
+            .await?;
+        println!("Container log: {:#?}", log);
         Ok(())
     }
+    /*
+        pub async fn run_command(
+            &mut self,
+            container_name: &str,
+            cmd: Vec<&str>,
+            dir: &str,
+        ) -> anyhow::Result<()> {
+            print!("Running '{:?}' in container '{}'...", cmd, container_name);
+            let config = CreateExecOptions {
+                cmd: Some(cmd),
+                working_dir: Some(dir),
+                ..Default::default()
+            };
 
+            let result = self.docker.create_exec(container_name, config).await?;
+
+            let options = StartExecOptions {
+                detach: false, // run synchronously
+            };
+
+            let result = self
+                .docker
+                .start_exec(&result.id, Some(options))
+                .try_collect::<Vec<_>>()
+                .await?;
+            println!("OK");
+            println!("OUTPUT: {:#?}", result);
+            Ok(())
+        }
+
+        pub async fn stop_container(&mut self, container_name: &str) -> anyhow::Result<()> {
+            print!("Stopping container '{}'...", container_name);
+            self.docker
+                .stop_container(container_name, None::<container::StopContainerOptions>)
+                .await?;
+            println!("OK");
+            Ok(())
+        }
+    */
     pub async fn remove_container(&mut self, container_name: &str) -> anyhow::Result<()> {
+        print!("Removing container '{}'...", container_name);
         let options = container::RemoveContainerOptions {
             force: true,
             ..Default::default()
@@ -60,11 +189,12 @@ impl DockerInstance {
         self.docker
             .remove_container(container_name, Some(options))
             .await?;
+        println!("OK");
         Ok(())
     }
 
     pub async fn export_container(&mut self, container_name: &str) -> anyhow::Result<Bytes> {
-        println!("Exporting FS of container {}...", container_name);
+        println!("Exporting FS of container '{}'...", container_name);
 
         let options = container::DownloadFromContainerOptions { path: "/" };
         let chunks: Vec<Bytes> = self

@@ -33,7 +33,6 @@ async fn main() -> anyhow::Result<()> {
         Commands::Build { image_name } => {
             let mut img = ImageBuilder::new().await?;
             img.build(&image_name).await?;
-            img.finish()?;
         }
 
         Commands::Run { entrypoint, args } => {
