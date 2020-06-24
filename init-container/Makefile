@@ -20,7 +20,7 @@ all: vmlinuz-virt initramfs.cpio.gz
 %.o: %.c
 	$(CC) $(CFLAGS) -o $@ -c $^
 
-init: $(addprefix $(SRC_DIR)/,init.o communication.o)
+init: $(addprefix $(SRC_DIR)/,init.o communication.o process_bookkeeping.o)
 	$(CC) $(CFLAGS) -static -o $@ $^
 	@# default musl libs on some distros have debug symbols, lets strip them (and everythig else)
 	strip $@

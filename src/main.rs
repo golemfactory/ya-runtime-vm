@@ -1,8 +1,21 @@
+mod guest_agent_comm;
+mod response_parser;
+
 use std::io;
 use std::process::{Command, Stdio};
 
-mod guest_agent_comm;
-use crate::guest_agent_comm::{GuestAgent, RedirectFdType};
+use crate::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
+
+fn handle_notification(notification: Notification) {
+    match notification {
+        Notification::OutputAvailable { id, fd } => {
+            println!("Process {} has output available on fd {}", id, fd);
+        }
+        Notification::ProcessDied { id, reason } => {
+            println!("Process {} died with {:?}", id, reason);
+        }
+    }
+}
 
 fn main() -> io::Result<()> {
     let mut child = Command::new("qemu-system-x86_64")
@@ -24,7 +37,7 @@ fn main() -> io::Result<()> {
         .spawn()
         .expect("failed to spawn VM");
 
-    let mut ga = GuestAgent::connected("./manager.sock", 10)?;
+    let mut ga = GuestAgent::connected("./manager.sock", 10, handle_notification)?;
 
     let no_redir = [None, None, None];
     let fds = [
@@ -33,23 +46,31 @@ fn main() -> io::Result<()> {
         Some(RedirectFdType::RedirectFdFile("/b".as_bytes())),
     ];
 
-    ga.run_process("/bin/ls", &["ls", "-al", "/"], None, 0, 0, &no_redir)?;
+    let id = ga
+        .run_process("/bin/ls", &["ls", "-al", "/"], None, 0, 0, &no_redir)?
+        .expect("Run process failed");
+    println!("Spawned process with id: {}", id);
+    handle_notification(ga.get_one_notification()?);
 
-    ga.run_process("/bin/echo", &["echo", "TEST TEST TEST"], None, 0, 0, &fds)?;
+    let id = ga
+        .run_process("/bin/echo", &["echo", "TEST TEST TEST"], None, 0, 0, &fds)?
+        .expect("Run process failed");
+    println!("Spawned process with id: {}", id);
+    handle_notification(ga.get_one_notification()?);
 
-    ga.run_process("/bin/ls", &["ls", "-al", "/"], None, 0, 0, &no_redir)?;
+    let id = ga
+        .run_process("/bin/ls", &["ls", "-al", "/"], None, 0, 0, &no_redir)?
+        .expect("Run process failed");
+    println!("Spawned process with id: {}", id);
+    handle_notification(ga.get_one_notification()?);
 
-    ga.run_process(
-        "/bin/echo",
-        &["echo", "Contents of \"/a\":"],
-        None,
-        0,
-        0,
-        &no_redir,
-    )?;
-    ga.run_process("/bin/cat", &["cat", "/a"], None, 0, 0, &no_redir)?;
+    let id = ga
+        .run_process("/bin/cat", &["cat", "/a"], None, 0, 0, &no_redir)?
+        .expect("Run process failed");
+    println!("Spawned process with id: {}", id);
+    handle_notification(ga.get_one_notification()?);
 
-    ga.quit()?;
+    ga.quit()?.expect("Quit failed");
 
     let e = child.wait().expect("failed to wait on child");
     println!("{:?}", e);

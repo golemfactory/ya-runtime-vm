@@ -37,16 +37,31 @@ struct msg_hdr {
     uint8_t type;
 };
 
-enum MSG_TYPE {
+/* All of the messages can respond with RESP_ERR in addition to what's listed
+ * below. */
+enum HOST_MSG_TYPE {
+    /* Expected response: RESP_OK */
     MSG_QUIT = 1,
-    /* Returns ID of spawned process. */
+
+    /* Expected response: RESP_OK_U64 - process ID. */
     MSG_RUN_PROCESS,
+
+    /* Expected response: RESP_OK */
     MSG_KILL_PROCESS,
+
+    /* Expected response: RESP_OK */
     MSG_MOUNT_VOLUME,
+
+    /* Expected response: RESP_OK */
     MSG_UPLOAD_FILE,
-    /* Returns chunk of process' output as BYTES. */
+
+    /* Expected response: RESP_OK_BYTES - chunk of process' output */
     MSG_QUERY_OUTPUT,
+
+    /* Expected response: RESP_OK */
     MSG_PUT_INPUT,
+
+    /* Expected response: RESP_OK */
     MSG_SYNC_FS,
 };
 
@@ -133,9 +148,13 @@ enum REDIRECT_FD_TYPE {
     REDIRECT_FD_PIPE_CYCLIC,
 };
 
-enum RESP_TYPE {
+enum GUEST_MSG_TYPE {
     /* No body. */
-    RESP_OK,
+    RESP_OK = 0,
+    /* Number. (u64) */
+    RESP_OK_U64,
+    /* Bytes. (BYTES) */
+    RESP_OK_BYTES,
     /* Error code. (u32) */
     RESP_ERR,
     /* ID of process and a file descriptor. (u64 + u32) */
