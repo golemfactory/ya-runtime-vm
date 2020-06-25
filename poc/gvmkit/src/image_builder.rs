@@ -1,7 +1,8 @@
 use bollard::service::ContainerConfig;
 use bytes::Bytes;
+use crc::crc32;
 use std::io::Write;
-use std::{fs, path::PathBuf};
+use std::{env, fs, path::PathBuf};
 use tar;
 
 use crate::docker::DockerInstance;
@@ -67,7 +68,7 @@ impl ImageBuilder {
         self.add_metadata_inside(&cfg).await?;
         let squashfs_image = self.repack(&work_dir_in, &work_dir_out).await?;
         self.add_metadata_outside(&squashfs_image, &cfg).await?;
-        fs::copy(&squashfs_image, work_dir.join("out.img"))?; // TODO: final output name from cmd
+        fs::copy(&squashfs_image, env::current_dir().unwrap().join("out.img"))?; // TODO: final output name from cmd
         fs::remove_dir_all(work_dir)?;
 
         Ok(())
@@ -106,12 +107,14 @@ impl ImageBuilder {
         image_path: &PathBuf,
         config: &ContainerConfig,
     ) -> anyhow::Result<()> {
-        // TODO: crc32 of json
+        let mut json_buf = RWBuffer::new();
+        serde_json::to_writer(&mut json_buf, config)?;
         let mut file = fs::OpenOptions::new().append(true).open(image_path)?;
-        let img_size = file.metadata()?.len();
-        serde_json::to_writer(&file, config)?;
-        // TODO: get size from serde?
-        let meta_size = file.metadata()?.len() - img_size;
+        let meta_size = json_buf.bytes.len();
+        let crc = crc32::checksum_ieee(&json_buf.bytes);
+        println!("Image metadata checksum: 0x{:x}", crc);
+        file.write(&crc.to_le_bytes())?;
+        file.write(&json_buf.bytes)?;
         file.write(format!("{:08}", meta_size).as_bytes())?;
         Ok(())
     }

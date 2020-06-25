@@ -26,6 +26,7 @@ struct CmdArgs {
     command: Commands,
 }
 
+// TODO: use logger
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cmdargs = CmdArgs::from_args();
@@ -37,6 +38,7 @@ async fn main() -> anyhow::Result<()> {
 
         Commands::Run { entrypoint, args } => {
             println!("Running: entrypoint {}, args {:?}", entrypoint, args);
+            // TODO
         }
     };
     Ok(())
