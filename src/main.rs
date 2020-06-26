@@ -1,6 +1,7 @@
 use anyhow::anyhow;
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
+use serde_json::map::VacantEntry;
 use std::{env, fs, io, path::PathBuf, process::Command, str};
 use structopt::StructOpt;
 use uuid::Uuid;
@@ -106,17 +107,36 @@ fn main() -> anyhow::Result<()> {
             for vol in &volumes {
                 fs::create_dir(cmdargs.workdir.join(&vol.name))?;
             }
+
+            {
+                let f = fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(cmdargs.workdir.join("vols.json"))?;
+                serde_json::to_writer_pretty(&mut io::BufWriter::new(f), &volumes)?;
+            }
+
             let result = DeployResult {
                 valid: Ok("Ok".to_string()),
                 vols: volumes,
             };
+
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Commands::Start {} => (),
         Commands::Run { entrypoint, args } => {
-            Command::new(get_gvmkit_path(env::current_exe()?)?)
-                .arg("run")
-                .arg(cmdargs.task_package)
+            let volumes: Vec<ContainerVolume> =
+                { serde_json::from_str(&fs::read_to_string(cmdargs.workdir.join("vols.json"))?)? };
+            let mut cmd = Command::new(get_gvmkit_path(env::current_exe()?)?);
+
+            cmd.arg("run");
+            for vol in volumes {
+                let src = cmdargs.workdir.join(vol.name);
+                let dst = vol.path;
+                cmd.arg("-v").arg(format!("{}:{}", src.display(), dst));
+            }
+
+            cmd.arg(cmdargs.task_package)
                 .arg(entrypoint)
                 .args(args)
                 .spawn()?
