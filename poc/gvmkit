@@ -44,7 +44,7 @@ do_repack() {
   (
   cat "${OUT}.json"
   printf "%08d" $(stat -c%s "${OUT}.json")
-  ) >> "$OUT.golem-app" 
+  ) >> "$OUT.golem-app"
 
 }
 
@@ -105,7 +105,7 @@ do_run() {
 		$arg
 }
 
-case $1 
+case $1
 in
 	build)
 		do_build $2

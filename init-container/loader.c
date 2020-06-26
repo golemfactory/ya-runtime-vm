@@ -35,7 +35,7 @@ static char **load_list(const char *file_name) {
 	char *start = buf;
 	for (int i=0; i<len; ++i) {
 		if (buf[i] == '\n') {
-			buf[i++]=0;			
+			buf[i++]=0;
 			ret[cnt++] = start;
 			start = &buf[i];
 		}
@@ -68,7 +68,7 @@ struct parser {
 /*
  * 0 - init
  * 1 - in key
- * 2 - 
+ * 2 -
  */
 enum {
 	S_INIT,
@@ -178,7 +178,7 @@ static char *copy_string(char *s[2]) {
 		*p = 0;
 		return p;
 	}
-	
+
 	char *it = s[0];
 	char *dst_it = p;
 	if (*it == '"') {
@@ -269,7 +269,7 @@ static char **concat_list(char **l1, char **l2) {
 	ret[cnt++] =0;
 	return ret;
 }
-	
+
 int main(int argc, const char *argv[]) {
 
 #ifdef TESTS

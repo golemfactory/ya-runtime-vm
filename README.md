@@ -20,5 +20,6 @@ ln -s ../../poc target/debug/
 ## Run
 
 ```sh
-cargo run -- --task-package poc/alpine.golem-app --workdir . run --entrypoint ls /
+cargo run -- --task-package poc/alpine.golem-app --workdir . \
+    run --entrypoint ls /
 ```

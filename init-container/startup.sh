@@ -17,7 +17,7 @@ mkdir /var/run
 
 /sbin/rngd
 
-mkdir /mnt /mnt/work /mnt/app-ro /mnt/app-rw 
+mkdir /mnt /mnt/work /mnt/app-ro /mnt/app-rw
 mount /dev/vda /mnt/app-ro
 
 mount -t tmpfs tmpfs /mnt/work
