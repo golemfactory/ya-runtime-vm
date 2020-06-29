@@ -133,6 +133,7 @@ static void handle_sigchld(void) {
     send_process_died(proc_desc->id, encode_status(siginfo.ssi_status, siginfo.ssi_code));
 
     remove_process(proc_desc);
+    free(proc_desc);
 }
 
 static void setup_sigfd(void) {
