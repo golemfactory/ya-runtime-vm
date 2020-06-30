@@ -134,3 +134,11 @@ int writen(int fd, void* buf, size_t size) {
     }
     return 0;
 }
+
+int send_bytes(int fd, char* buf, uint64_t size) {
+    if (writen(fd, &size, sizeof(size)) < 0) {
+        return -1;
+    }
+
+    return writen(fd, buf, size);
+}

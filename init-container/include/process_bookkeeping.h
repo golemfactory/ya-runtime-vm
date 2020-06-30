@@ -4,9 +4,27 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+#include "proto.h"
+
+struct redir_fd_desc {
+    enum REDIRECT_FD_TYPE type;
+    union {
+        /* For REDIRECT_FD_FILE */
+        char* path;
+        /* For REDIRECT_FD_PIPE_* */
+        struct {
+            char* buf;
+            size_t size;
+            int fd;
+        } buffer;
+    };
+};
+
 struct process_desc {
     uint64_t id;
     pid_t pid;
+    bool is_alive;
+    struct redir_fd_desc redirs[3];
     struct process_desc* prev;
     struct process_desc* next;
 };
