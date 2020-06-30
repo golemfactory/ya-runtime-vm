@@ -281,6 +281,7 @@ out: ;
     exit(ecode);
 }
 
+/* 0 is considered an invalid ID. */
 static uint64_t get_next_id(void) {
     static uint64_t id = 0;
     return ++id;
@@ -488,6 +489,58 @@ out:
     }
 }
 
+static uint32_t do_kill_process(uint64_t id) {
+    struct process_desc* proc_desc = find_process_by_id(id);
+    if (!proc_desc) {
+        return ESRCH;
+    }
+
+    if (kill(proc_desc->pid, SIGKILL) < 0) {
+        return errno;
+    }
+
+    return 0;
+}
+
+static void handle_kill_process(msg_id_t msg_id) {
+    bool done = false;
+    uint32_t ret = 0;
+    uint64_t id = 0;
+
+    while (!done) {
+        uint8_t subtype = 0;
+
+        CHECK(recv_u8(g_cmds_fd, &subtype));
+
+        switch (subtype) {
+            case SUB_MSG_KILL_PROCESS_END:
+                done = true;
+                break;
+            case SUB_MSG_KILL_PROCESS_ID:
+                CHECK(recv_u64(g_cmds_fd, &id));
+                break;
+            default:
+                fprintf(stderr, "Unknown MSG_KILL_PROCESS subtype: %hhu\n",
+                        subtype);
+                die();
+        }
+    }
+
+    if (!id) {
+        ret = EINVAL;
+        goto out;
+    }
+
+    ret = do_kill_process(id);
+
+out:
+    if (ret) {
+        send_response_err(msg_id, ret);
+    } else {
+        send_response_ok(msg_id);
+    }
+}
+
 static void handle_message(void) {
     struct msg_hdr msg_hdr;
 
@@ -502,6 +555,9 @@ static void handle_message(void) {
             handle_run_process(msg_hdr.msg_id);
             break;
         case MSG_KILL_PROCESS:
+            fprintf(stderr, "MSG_KILL_PROCESS\n");
+            handle_kill_process(msg_hdr.msg_id);
+            break;
         case MSG_MOUNT_VOLUME:
         case MSG_UPLOAD_FILE:
         case MSG_QUERY_OUTPUT:

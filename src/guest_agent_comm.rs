@@ -10,6 +10,7 @@ use crate::response_parser::{parse_one_response, GuestAgentMessage, Response};
 enum MsgType {
     MsgQuit = 1,
     MsgRunProcess,
+    MsgKillProcess,
 }
 
 enum SubMsgQuitType {
@@ -24,6 +25,11 @@ enum SubMsgRunProcessType<'a> {
     SubMsgRunProcessUid(u32),
     SubMsgRunProcessGid(u32),
     SubMsgRunProcessRfd(u32, &'a RedirectFdType<'a>),
+}
+
+enum SubMsgKillProcessType {
+    SubMsgEnd,
+    SubMsgKillProcessId(u64),
 }
 
 pub enum RedirectFdType<'a> {
@@ -60,6 +66,10 @@ impl SubMsgTrait<SubMsgQuitType> for SubMsgQuitType {
 
 impl SubMsgTrait<SubMsgRunProcessType<'_>> for SubMsgRunProcessType<'_> {
     const TYPE: u8 = MsgType::MsgRunProcess as u8;
+}
+
+impl SubMsgTrait<SubMsgKillProcessType> for SubMsgKillProcessType {
+    const TYPE: u8 = MsgType::MsgKillProcess as u8;
 }
 
 impl EncodeInto for u8 {
@@ -151,6 +161,20 @@ impl EncodeInto for RedirectFdType<'_> {
             RedirectFdType::RedirectFdPipeCyclic(size) => {
                 2u8.encode_into(buf);
                 size.encode_into(buf);
+            }
+        }
+    }
+}
+
+impl EncodeInto for SubMsgKillProcessType {
+    fn encode_into(&self, buf: &mut Vec<u8>) {
+        match self {
+            SubMsgKillProcessType::SubMsgEnd => {
+                0u8.encode_into(buf);
+            }
+            SubMsgKillProcessType::SubMsgKillProcessId(id) => {
+                1u8.encode_into(buf);
+                id.encode_into(buf);
             }
         }
     }
@@ -255,6 +279,30 @@ where
         }
     }
 
+    fn match_error<T>(resp: Response) -> io::Result<RemoteCommandResult<T>> {
+        match resp {
+            Response::Err(code) => Ok(Err(code)),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid response",
+            )),
+        }
+    }
+
+    fn get_ok_response(&mut self, msg_id: u64) -> io::Result<RemoteCommandResult<()>> {
+        match self.get_response(msg_id)? {
+            Response::Ok => Ok(Ok(())),
+            x => GuestAgent::<F>::match_error(x),
+        }
+    }
+
+    fn get_u64_response(&mut self, msg_id: u64) -> io::Result<RemoteCommandResult<u64>> {
+        match self.get_response(msg_id)? {
+            Response::OkU64(val) => Ok(Ok(val)),
+            x => GuestAgent::<F>::match_error(x),
+        }
+    }
+
     pub fn get_one_notification(&mut self) -> io::Result<Notification> {
         match self.get_one_response()? {
             GuestAgentMessage::Notification(notification) => Ok(notification),
@@ -268,20 +316,14 @@ where
     pub fn quit(&mut self) -> io::Result<RemoteCommandResult<()>> {
         let mut msg = Message::default();
         let msg_id = self.get_new_msg_id();
+
         msg.create_header(msg_id);
+
         msg.append_submsg(&SubMsgQuitType::SubMsgEnd);
+
         self.stream.write_all(msg.as_ref())?;
-        let ret = match self.get_response(msg_id)? {
-            Response::Ok => Ok(()),
-            Response::Err(code) => Err(code),
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "quit: invalid response",
-                ))
-            }
-        };
-        Ok(ret)
+
+        self.get_ok_response(msg_id)
     }
 
     pub fn run_process(
@@ -325,16 +367,21 @@ where
 
         self.stream.write_all(msg.as_ref())?;
 
-        let ret = match self.get_response(msg_id)? {
-            Response::OkU64(val) => Ok(val),
-            Response::Err(code) => Err(code),
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "run_process: invalid response",
-                ))
-            }
-        };
-        Ok(ret)
+        self.get_u64_response(msg_id)
+    }
+
+    pub fn kill(&mut self, id: u64) -> io::Result<RemoteCommandResult<()>> {
+        let mut msg = Message::default();
+        let msg_id = self.get_new_msg_id();
+
+        msg.create_header(msg_id);
+
+        msg.append_submsg(&SubMsgKillProcessType::SubMsgKillProcessId(id));
+
+        msg.append_submsg(&SubMsgKillProcessType::SubMsgEnd);
+
+        self.stream.write_all(msg.as_ref())?;
+
+        self.get_ok_response(msg_id)
     }
 }

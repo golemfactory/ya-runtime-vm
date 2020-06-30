@@ -70,6 +70,14 @@ fn main() -> io::Result<()> {
     println!("Spawned process with id: {}", id);
     handle_notification(ga.get_one_notification()?);
 
+    let id = ga
+        .run_process("/bin/sleep", &["sleep", "10"], None, 0, 0, &no_redir)?
+        .expect("Run process failed");
+    println!("Spawned process with id: {}", id);
+
+    ga.kill(id)?.expect("Kill failed");
+    handle_notification(ga.get_one_notification()?);
+
     ga.quit()?.expect("Quit failed");
 
     let e = child.wait().expect("failed to wait on child");
