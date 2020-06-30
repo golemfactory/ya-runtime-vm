@@ -11,6 +11,9 @@ enum MsgType {
     MsgQuit = 1,
     MsgRunProcess,
     MsgKillProcess,
+    MsgMountVolume,
+    MsgUploadFile,
+    MsgQueryOutput,
 }
 
 enum SubMsgQuitType {
@@ -30,6 +33,13 @@ enum SubMsgRunProcessType<'a> {
 enum SubMsgKillProcessType {
     SubMsgEnd,
     SubMsgKillProcessId(u64),
+}
+
+enum SubMsgQueryOutputType {
+    SubMsgEnd,
+    SubMsgQueryOutputId(u64),
+    SubMsgQueryOutputOff(u64),
+    SubMsgQueryOutputLen(u64),
 }
 
 pub enum RedirectFdType<'a> {
@@ -70,6 +80,10 @@ impl SubMsgTrait<SubMsgRunProcessType<'_>> for SubMsgRunProcessType<'_> {
 
 impl SubMsgTrait<SubMsgKillProcessType> for SubMsgKillProcessType {
     const TYPE: u8 = MsgType::MsgKillProcess as u8;
+}
+
+impl SubMsgTrait<SubMsgQueryOutputType> for SubMsgQueryOutputType {
+    const TYPE: u8 = MsgType::MsgQueryOutput as u8;
 }
 
 impl EncodeInto for u8 {
@@ -175,6 +189,28 @@ impl EncodeInto for SubMsgKillProcessType {
             SubMsgKillProcessType::SubMsgKillProcessId(id) => {
                 1u8.encode_into(buf);
                 id.encode_into(buf);
+            }
+        }
+    }
+}
+
+impl EncodeInto for SubMsgQueryOutputType {
+    fn encode_into(&self, buf: &mut Vec<u8>) {
+        match self {
+            SubMsgQueryOutputType::SubMsgEnd => {
+                0u8.encode_into(buf);
+            }
+            SubMsgQueryOutputType::SubMsgQueryOutputId(id) => {
+                1u8.encode_into(buf);
+                id.encode_into(buf);
+            }
+            SubMsgQueryOutputType::SubMsgQueryOutputOff(off) => {
+                2u8.encode_into(buf);
+                off.encode_into(buf);
+            }
+            SubMsgQueryOutputType::SubMsgQueryOutputLen(len) => {
+                3u8.encode_into(buf);
+                len.encode_into(buf);
             }
         }
     }
@@ -303,6 +339,13 @@ where
         }
     }
 
+    fn get_bytes_response(&mut self, msg_id: u64) -> io::Result<RemoteCommandResult<Vec<u8>>> {
+        match self.get_response(msg_id)? {
+            Response::OkBytes(bytes) => Ok(Ok(bytes)),
+            x => GuestAgent::<F>::match_error(x),
+        }
+    }
+
     pub fn get_one_notification(&mut self) -> io::Result<Notification> {
         match self.get_one_response()? {
             GuestAgentMessage::Notification(notification) => Ok(notification),
@@ -383,5 +426,27 @@ where
         self.stream.write_all(msg.as_ref())?;
 
         self.get_ok_response(msg_id)
+    }
+
+    pub fn query_output(
+        &mut self,
+        id: u64,
+        off: u64,
+        len: u64,
+    ) -> io::Result<RemoteCommandResult<Vec<u8>>> {
+        let mut msg = Message::default();
+        let msg_id = self.get_new_msg_id();
+
+        msg.create_header(msg_id);
+
+        msg.append_submsg(&SubMsgQueryOutputType::SubMsgQueryOutputId(id));
+        msg.append_submsg(&SubMsgQueryOutputType::SubMsgQueryOutputOff(off));
+        msg.append_submsg(&SubMsgQueryOutputType::SubMsgQueryOutputLen(len));
+
+        msg.append_submsg(&SubMsgQueryOutputType::SubMsgEnd);
+
+        self.stream.write_all(msg.as_ref())?;
+
+        self.get_bytes_response(msg_id)
     }
 }

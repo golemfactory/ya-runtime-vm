@@ -124,7 +124,7 @@ enum SUB_MSG_QUERY_OUTPUT_TYPE {
     SUB_MSG_QUERY_OUTPUT_END = 0,
     /* ID of process. (u64) */
     SUB_MSG_QUERY_OUTPUT_ID,
-    /* Offset in output. (u64) */
+    /* Offset in output (default = 0). (u64) */
     SUB_MSG_QUERY_OUTPUT_OFF,
     /* Requested length. (u64) */
     SUB_MSG_QUERY_OUTPUT_LEN,

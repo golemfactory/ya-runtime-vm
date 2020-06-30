@@ -18,4 +18,6 @@ void free_strings_array(char** array);
 
 int writen(int fd, void* buf, size_t size);
 
+int send_bytes(int fd, char* buf, uint64_t size);
+
 #endif // _COMMUNICATION_H

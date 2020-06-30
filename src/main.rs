@@ -1,7 +1,7 @@
 mod guest_agent_comm;
 mod response_parser;
 
-use std::io;
+use std::io::{self, prelude::*};
 use std::process::{Command, Stdio};
 
 use crate::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
@@ -40,18 +40,23 @@ fn main() -> io::Result<()> {
     let mut ga = GuestAgent::connected("./manager.sock", 10, handle_notification)?;
 
     let no_redir = [None, None, None];
-    let fds = [
-        None,
-        Some(RedirectFdType::RedirectFdFile("/a".as_bytes())),
-        Some(RedirectFdType::RedirectFdFile("/b".as_bytes())),
-    ];
 
     let id = ga
         .run_process("/bin/ls", &["ls", "-al", "/"], None, 0, 0, &no_redir)?
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
     handle_notification(ga.get_one_notification()?);
+    let out = ga
+        .query_output(id, 0, u64::MAX)?
+        .expect("Output query failed");
+    println!("Output:");
+    io::stdout().write_all(&out)?;
 
+    let fds = [
+        None,
+        Some(RedirectFdType::RedirectFdFile("/a".as_bytes())),
+        None,
+    ];
     let id = ga
         .run_process("/bin/echo", &["echo", "TEST TEST TEST"], None, 0, 0, &fds)?
         .expect("Run process failed");
@@ -63,12 +68,22 @@ fn main() -> io::Result<()> {
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
     handle_notification(ga.get_one_notification()?);
+    let out = ga
+        .query_output(id, 0, u64::MAX)?
+        .expect("Output query failed");
+    println!("Output:");
+    io::stdout().write_all(&out)?;
 
     let id = ga
         .run_process("/bin/cat", &["cat", "/a"], None, 0, 0, &no_redir)?
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
     handle_notification(ga.get_one_notification()?);
+    let out = ga
+        .query_output(id, 0, u64::MAX)?
+        .expect("Output query failed");
+    println!("Output:");
+    io::stdout().write_all(&out)?;
 
     let id = ga
         .run_process("/bin/sleep", &["sleep", "10"], None, 0, 0, &no_redir)?

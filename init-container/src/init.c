@@ -1,6 +1,5 @@
 #define _GNU_SOURCE
 #include <assert.h>
-#include <err.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -10,6 +9,7 @@
 #include <stdlib.h>
 #include <stdnoreturn.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/reboot.h>
 #include <sys/signalfd.h>
@@ -28,7 +28,9 @@
 
 #define DEFAULT_UID 0
 #define DEFAULT_GID 0
-#define DEFAULT_OUT_FILE_PERM (S_IRWXU)
+#define DEFAULT_OUT_FILE_PERM S_IRWXU
+
+#define OUTPUT_PATH_PREFIX "/var/tmp/guest_agent_private/fds"
 
 extern char** environ;
 
@@ -59,6 +61,28 @@ static void load_module(const char* path) {
     int fd = CHECK(open(path, O_RDONLY | O_CLOEXEC));
     CHECK(syscall(SYS_finit_module, fd, "", 0));
     CHECK(close(fd));
+}
+
+static void cleanup_fd_desc(struct redir_fd_desc* fd_desc) {
+    switch (fd_desc->type) {
+        case REDIRECT_FD_FILE:
+            free(fd_desc->path);
+            break;
+        case REDIRECT_FD_PIPE_BLOCKING:
+        case REDIRECT_FD_PIPE_CYCLIC:
+            // TODO
+            break;
+        default:
+            break;
+    }
+}
+
+__attribute__((unused)) static void delete_proc(struct process_desc* proc_desc) {
+    remove_process(proc_desc);
+    for (size_t fd = 0; fd < 3; ++fd) {
+        cleanup_fd_desc(&proc_desc->redirs[fd]);
+    }
+    free(proc_desc);
 }
 
 static void send_process_died(uint64_t id, uint32_t reason) {
@@ -130,10 +154,10 @@ static void handle_sigchld(void) {
         return;
     }
 
-    send_process_died(proc_desc->id, encode_status(siginfo.ssi_status, siginfo.ssi_code));
+    proc_desc->is_alive = false;
 
-    remove_process(proc_desc);
-    free(proc_desc);
+    send_process_died(proc_desc->id, encode_status(siginfo.ssi_status,
+                      siginfo.ssi_code));
 }
 
 static void setup_sigfd(void) {
@@ -142,6 +166,38 @@ static void setup_sigfd(void) {
     CHECK(sigaddset(&set, SIGCHLD));
     CHECK(sigprocmask(SIG_BLOCK, &set, NULL));
     g_sig_fd = CHECK(signalfd(g_sig_fd, &set, SFD_CLOEXEC));
+}
+
+static void create_dir(const char* path, mode_t mode) {
+    if (mkdir(path, mode) < 0 && errno != EEXIST) {
+        fprintf(stderr, "mkdir(%s) failed with: %m\n", path);
+        die();
+    }
+}
+
+static void setup_agent_directories(void) {
+    char* path = strdup(OUTPUT_PATH_PREFIX);
+    if (!path) {
+        fprintf(stderr, "setup_agent_directories OOM\n");
+        die();
+    }
+
+    assert(path[0] == '/');
+
+    char* next = path;
+    while (1) {
+        next = strchr(next + 1, '/');
+        if (!next) {
+            break;
+        }
+        *next = '\0';
+        create_dir(path, S_IRWXU);
+        *next = '/';
+    }
+
+    create_dir(path, S_IRWXU);
+
+    free(path);
 }
 
 static void send_response_hdr(msg_id_t msg_id, enum GUEST_MSG_TYPE type) {
@@ -166,30 +222,20 @@ static void send_response_u64(msg_id_t msg_id, uint64_t ret_val) {
     CHECK(writen(g_cmds_fd, &ret_val, sizeof(ret_val)));
 }
 
+static void send_response_bytes(msg_id_t msg_id, char* buf, size_t len) {
+    send_response_hdr(msg_id, RESP_OK_BYTES);
+    CHECK(send_bytes(g_cmds_fd, buf, len));
+}
+
 static noreturn void handle_quit(msg_id_t msg_id) {
     send_response_ok(msg_id);
     die();
 }
 
-struct redir_fd_desc {
-    enum REDIRECT_FD_TYPE type;
-    union {
-        char* path;
-        size_t size;
-    };
-};
-
-#define DEFAULT_FD_BUF_SIZE 0x10000
-#define DEFAULT_FD_DESC {                   \
-        .type = REDIRECT_FD_PIPE_BLOCKING,  \
-        .size = DEFAULT_FD_BUF_SIZE         \
+#define DEFAULT_FD_DESC {           \
+        .type = REDIRECT_FD_FILE,   \
+        .path = NULL,               \
     }
-
-static void cleanup_fd_desc(struct redir_fd_desc* fd_desc) {
-    if (fd_desc->type == REDIRECT_FD_FILE) {
-        free(fd_desc->path);
-    }
-}
 
 /* Assumes fd is either 0, 1 or 2.
  * Returns whether call was successful (setting errno on failures). */
@@ -253,7 +299,10 @@ static noreturn void child_wrapper(int parent_pipe[2], char* bin, char** argv,
                 break;
             case REDIRECT_FD_PIPE_BLOCKING:
             case REDIRECT_FD_PIPE_CYCLIC:
-                fprintf(stderr, "Not yet supported (fd: %d)\n", fd);
+                // TODO
+                fprintf(stderr,
+                        "Redir type %d not yet supported, ignoring (fd: %d)\n",
+                        fd_descs[fd].type, fd);
                 break;
             default:
                 fprintf(stderr, "Unknown type in child_wrapper (BUG): %u\n",
@@ -287,15 +336,47 @@ static uint64_t get_next_id(void) {
     return ++id;
 }
 
+static int create_process_fds_dir(uint64_t id) {
+    char* path = NULL;
+    if (asprintf(&path, OUTPUT_PATH_PREFIX "/%llu", id) < 0) {
+        return -1;
+    }
+
+    if (mkdir(path, S_IRWXU) < 0) {
+        free(path);
+        return -1;
+    }
+
+    free(path);
+    return 0;
+}
+
+static char* construct_output_path(uint64_t id, unsigned int fd) {
+    char* path = NULL;
+    if (asprintf(&path, OUTPUT_PATH_PREFIX "/%llu/%u", id, fd) < 0) {
+        return NULL;
+    }
+    return path;
+}
+
 static uint32_t spawn_new_process(char* bin, char** argv, char** envp,
                                   uid_t uid, gid_t gid,
                                   struct redir_fd_desc fd_descs[3],
                                   uint64_t* id) {
     uint32_t ret = 0;
 
-    struct process_desc* proc_desc = malloc(sizeof(*proc_desc));
+    struct process_desc* proc_desc = calloc(1, sizeof(*proc_desc));
     if (!proc_desc) {
         return ENOMEM;
+    }
+    for (size_t fd = 0; fd < 3; ++fd) {
+        proc_desc->redirs[fd].type = -1; // Invalid type
+    }
+
+    proc_desc->id = get_next_id();
+    if (create_process_fds_dir(proc_desc->id) < 0) {
+        ret = errno;
+        goto out;
     }
 
     /* All these shenanigans with pipes are so that we can distinguish internal
@@ -306,12 +387,47 @@ static uint32_t spawn_new_process(char* bin, char** argv, char** envp,
         goto out;
     }
 
+    for (size_t fd = 0; fd < 3; ++fd) {
+        proc_desc->redirs[fd].type = fd_descs[fd].type;
+        switch (fd_descs[fd].type) {
+            case REDIRECT_FD_FILE:
+                if (fd_descs[fd].path) {
+                    proc_desc->redirs[fd].path = strdup(fd_descs[fd].path);
+                    if (!proc_desc->redirs[fd].path) {
+                        ret = errno;
+                        goto out;
+                    }
+                } else {
+                    proc_desc->redirs[fd].path =
+                        construct_output_path(proc_desc->id, fd);
+                    if (!proc_desc->redirs[fd].path) {
+                        ret = errno;
+                        goto out;
+                    }
+                    int tmp_fd = open(proc_desc->redirs[fd].path,
+                                      O_RDWR | O_CREAT | O_EXCL,
+                                      S_IRWXU);
+                    if (tmp_fd < 0 || close(tmp_fd) < 0) {
+                        ret = errno;
+                        goto out;
+                    }
+                }
+                break;
+            case REDIRECT_FD_PIPE_BLOCKING:
+            case REDIRECT_FD_PIPE_CYCLIC:
+                // TODO
+                break;
+            default:
+                break;
+        }
+    }
+
     pid_t p = fork();
     if (p < 0) {
         ret = errno;
         goto out;
     } else if (p == 0) {
-        child_wrapper(status_pipe, bin, argv, envp, uid, gid, fd_descs);
+        child_wrapper(status_pipe, bin, argv, envp, uid, gid, proc_desc->redirs);
     }
 
     CHECK(close(status_pipe[1]));
@@ -339,8 +455,8 @@ static uint32_t spawn_new_process(char* bin, char** argv, char** envp,
     CHECK(close(status_pipe[0]));
     status_pipe[0] = -1;
 
-    proc_desc->id = get_next_id();
     proc_desc->pid = p;
+    proc_desc->is_alive = true;
 
     *id = proc_desc->id;
 
@@ -354,7 +470,12 @@ out:
     if (status_pipe[1] != -1) {
         CHECK(close(status_pipe[1]));
     }
-    free(proc_desc);
+    if (proc_desc) {
+        for (size_t fd = 0; fd < 3; ++fd) {
+            cleanup_fd_desc(&proc_desc->redirs[fd]);
+        }
+        free(proc_desc);
+    }
     return ret;
 }
 
@@ -378,7 +499,8 @@ static uint32_t parse_fd_redir(struct redir_fd_desc fd_descs[3]) {
             break;
         case REDIRECT_FD_PIPE_BLOCKING:
         case REDIRECT_FD_PIPE_CYCLIC:
-            CHECK(recv_u64(g_cmds_fd, &fd_desc.size));
+            CHECK(recv_u64(g_cmds_fd, &fd_desc.buffer.size));
+            fd_desc.buffer.buf = NULL;
             break;
         default:
             fprintf(stderr, "Unknown REDIRECT_FD_TYPE: %hhu\n", type);
@@ -393,7 +515,7 @@ static uint32_t parse_fd_redir(struct redir_fd_desc fd_descs[3]) {
 
     if (fd_desc.type == REDIRECT_FD_PIPE_BLOCKING
             || fd_desc.type == REDIRECT_FD_PIPE_CYCLIC) {
-        if (!is_fd_buf_size_valid(fd_desc.size)) {
+        if (!is_fd_buf_size_valid(fd_desc.buffer.size)) {
             return EINVAL;
         }
     }
@@ -492,6 +614,10 @@ out:
 static uint32_t do_kill_process(uint64_t id) {
     struct process_desc* proc_desc = find_process_by_id(id);
     if (!proc_desc) {
+        return EINVAL;
+    }
+
+    if (!proc_desc->is_alive) {
         return ESRCH;
     }
 
@@ -541,6 +667,124 @@ out:
     }
 }
 
+static uint32_t do_query_output(uint64_t id, uint64_t off, char** buf_ptr,
+                                uint64_t* len_ptr) {
+    uint32_t ret = 0;
+    char* buf = MAP_FAILED;
+    off_t len = 0;
+
+    struct process_desc* proc_desc = find_process_by_id(id);
+    if (!proc_desc) {
+        return ESRCH;
+    }
+
+    if (proc_desc->redirs[1].type != REDIRECT_FD_FILE) {
+        return EOPNOTSUPP;
+    }
+
+    int fd = open(proc_desc->redirs[1].path, O_RDONLY);
+    if (fd < 0) {
+        return errno;
+    }
+
+    len = lseek(fd, 0, SEEK_END);
+    if (len == (off_t)-1) {
+        ret = errno;
+        goto out;
+    }
+
+    if (off >= len) {
+        ret = ENXIO;
+        goto out;
+    }
+    len -= off;
+
+    if (*len_ptr < len) {
+        len = *len_ptr;
+    }
+
+    if (lseek(fd, off, SEEK_SET) == (off_t)-1) {
+        ret = errno;
+        goto out;
+    }
+
+    buf = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE,
+               -1, 0);
+    if (buf == MAP_FAILED) {
+        ret = errno;
+        goto out;
+    }
+
+again: ;
+    ssize_t real_len = read(fd, buf, len);
+    if (real_len < 0) {
+        if (errno == EINTR) {
+            goto again;
+        }
+        ret = errno;
+        goto out;
+    }
+
+    *buf_ptr = buf;
+    buf = MAP_FAILED;
+    *len_ptr = real_len;
+
+out:
+    if (buf != MAP_FAILED) {
+        CHECK(munmap(buf, len));
+    }
+    close(fd);
+    return ret;
+}
+
+static void handle_query_output(msg_id_t msg_id) {
+    bool done = false;
+    uint32_t ret = 0;
+    uint64_t id = 0;
+    uint64_t off = 0;
+    uint64_t len = 0;
+    char* buf = NULL;
+
+    while (!done) {
+        uint8_t subtype = 0;
+        CHECK(recv_u8(g_cmds_fd, &subtype));
+
+        switch (subtype) {
+            case SUB_MSG_QUERY_OUTPUT_END:
+                done = true;
+                break;
+            case SUB_MSG_QUERY_OUTPUT_ID:
+                CHECK(recv_u64(g_cmds_fd, &id));
+                break;
+            case SUB_MSG_QUERY_OUTPUT_OFF:
+                CHECK(recv_u64(g_cmds_fd, &off));
+                break;
+            case SUB_MSG_QUERY_OUTPUT_LEN:
+                CHECK(recv_u64(g_cmds_fd, &len));
+                break;
+            default:
+                fprintf(stderr, "Unknown MSG_QUERY_OUTPUT subtype: %hhu\n",
+                        subtype);
+                die();
+        }
+    }
+
+    if (!id || !len) {
+        ret = EINVAL;
+        goto out;
+    }
+
+    ret = do_query_output(id, off, &buf, &len);
+
+out:
+    if (ret) {
+        send_response_err(msg_id, ret);
+    } else {
+        send_response_bytes(msg_id, buf, len);
+        CHECK(munmap(buf, len));
+    }
+}
+
 static void handle_message(void) {
     struct msg_hdr msg_hdr;
 
@@ -558,14 +802,17 @@ static void handle_message(void) {
             fprintf(stderr, "MSG_KILL_PROCESS\n");
             handle_kill_process(msg_hdr.msg_id);
             break;
+        case MSG_QUERY_OUTPUT:
+            fprintf(stderr, "MSG_QUERY_OUTPUT\n");
+            handle_query_output(msg_hdr.msg_id);
+            break;
         case MSG_MOUNT_VOLUME:
         case MSG_UPLOAD_FILE:
-        case MSG_QUERY_OUTPUT:
         case MSG_PUT_INPUT:
         case MSG_SYNC_FS:
             fprintf(stderr, "Not implemented yet!\n");
             send_response_err(msg_hdr.msg_id, EPROTONOSUPPORT);
-            break;
+            die();
         default:
             fprintf(stderr, "Unknown message type: %hhu\n", msg_hdr.type);
             send_response_err(msg_hdr.msg_id, ENOPROTOOPT);
@@ -612,10 +859,7 @@ int main(void) {
     setbuf(stdout, NULL);
     setbuf(stderr, NULL);
 
-    int x = mkdir("/dev", S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH);
-    if (x == -1 && errno != EEXIST) {
-        err(1, "mkdir /dev");
-    }
+    create_dir("/dev", S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH);
 
     CHECK(mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID,
                 "mode=0755,size=2M"));
@@ -648,6 +892,8 @@ int main(void) {
     CHECK(mount(".", "/", "none", MS_MOVE, NULL));
     CHECK(chroot("."));
     CHECK(chdir("/"));
+
+    setup_agent_directories();
 
     setup_sigfd();
 
