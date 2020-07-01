@@ -1,5 +1,5 @@
 use anyhow::anyhow;
-use bollard::exec::{CreateExecOptions, StartExecOptions};
+use bollard::exec::{CreateExecOptions, StartExecOptions, StartExecResults};
 use bollard::image::CreateImageOptions;
 use bollard::service::{ContainerConfig, HostConfig, Mount, MountTypeEnum};
 use bollard::{container, Docker};
@@ -147,7 +147,11 @@ impl DockerInstance {
             .await?;
 
         println!("OK");
-        println!("Cmd output: {:#?}", result); // TODO: prettify, stream progress
+        // TODO: stream progress
+        result.iter().for_each(|el| match el {
+            StartExecResults::Attached { log } => println!("{}", log),
+            StartExecResults::Detached => println!("[Detached]"),
+        });
         Ok(())
     }
 

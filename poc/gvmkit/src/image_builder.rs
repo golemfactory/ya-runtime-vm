@@ -50,7 +50,7 @@ impl ImageBuilder {
         let (hash, cfg) = self.docker.get_config(cont_name).await?;
 
         let tar_bytes = self.docker.export_container(cont_name).await?;
-        self.from_bytes(&tar_bytes)?;
+        self.tar_from_bytes(&tar_bytes)?;
 
         self.docker.remove_container(cont_name).await?;
 
@@ -61,48 +61,39 @@ impl ImageBuilder {
         work_dir = work_dir.canonicalize()?;
         let work_dir_in = work_dir.join("in");
         let work_dir_out = work_dir.join("out");
-        dbg!(&work_dir_in);
+        dbg!(&work_dir_in, &work_dir_out);
         fs::create_dir_all(&work_dir_in)?;
         fs::create_dir_all(&work_dir_out)?;
 
-        self.add_metadata_inside(&cfg).await?;
-        let squashfs_image = self.repack(&work_dir_in, &work_dir_out).await?;
-        self.add_metadata_outside(&squashfs_image, &cfg).await?;
-        fs::copy(&squashfs_image, env::current_dir().unwrap().join("out.img"))?; // TODO: final output name from cmd
+        self.add_metadata_inside(&cfg)?;
+        let squashfs_image_path = self.repack(&work_dir_in, &work_dir_out).await?;
+        self.add_metadata_outside(&squashfs_image_path, &cfg)?;
+        fs::copy(
+            &squashfs_image_path,
+            env::current_dir().unwrap().join("out.img"),
+        )?; // TODO: final output name from cmd
         fs::remove_dir_all(work_dir)?;
 
         Ok(())
     }
 
-    async fn add_metadata_inside(&mut self, config: &ContainerConfig) -> anyhow::Result<()> {
-        let env = &config.env;
-        let entrypoint = &config.entrypoint;
-        let cmd = &config.cmd;
-        let volumes = &config.volumes;
-        dbg!(env, entrypoint, cmd, volumes);
-
-        // TODO: cleanup
-        match env {
-            // Vec<String>
-            Some(val) => self.add_file(".env", val.join("\n").as_bytes())?,
-            None => self.add_file(".env", &[])?,
-        }
-
-        match entrypoint {
-            // Vec<String>
-            Some(val) => self.add_file(".entrypoint", val.join("\n").as_bytes())?,
-            None => self.add_file(".entrypoint", &[])?,
-        }
-
-        match cmd {
-            // Vec<String>
-            Some(val) => self.add_file(".cmd", val.join("\n").as_bytes())?,
-            None => self.add_file(".cmd", &[])?,
+    fn add_meta_file(&mut self, path: &str, strings: &Option<Vec<String>>) -> anyhow::Result<()> {
+        dbg!(path, strings);
+        match strings {
+            Some(val) => self.add_file(path, val.join("\n").as_bytes())?,
+            None => self.add_file(path, &[])?,
         }
         Ok(())
     }
 
-    async fn add_metadata_outside(
+    fn add_metadata_inside(&mut self, config: &ContainerConfig) -> anyhow::Result<()> {
+        self.add_meta_file(".env", &config.env)?;
+        self.add_meta_file(".entrypoint", &config.entrypoint)?;
+        self.add_meta_file(".cmd", &config.cmd)?;
+        Ok(())
+    }
+
+    fn add_metadata_outside(
         &mut self,
         image_path: &PathBuf,
         config: &ContainerConfig,
@@ -124,7 +115,7 @@ impl ImageBuilder {
         work_dir_in: &PathBuf,
         work_dir_out: &PathBuf,
     ) -> anyhow::Result<PathBuf> {
-        let buf = self.finish()?; // final image as .tar
+        let buf = self.finish_tar()?; // final image as .tar
 
         // TODO: tar::Archive can't extract files outside of the target path (no stripping leading / like normal tar)
         // ...so we end up using the tar command anyway :/ (inside the squashfs-tools container)
@@ -146,25 +137,29 @@ impl ImageBuilder {
             },
         ];
 
-        let sqfs = "sqfs-tools";
+        let squashfs_cont = "sqfs-tools";
         let start_cmd = vec!["tail", "-f", "/dev/null"]; // prevent container from exiting
         self.docker
             .create_container(
                 squashfs_image,
-                sqfs,
+                squashfs_cont,
                 Some(mounts.clone()),
                 Some(start_cmd.iter().map(|s| s.to_string()).collect()),
             )
             .await?;
-        self.docker.start_container(sqfs).await?;
+        self.docker.start_container(squashfs_cont).await?;
 
         self.docker
-            .run_command(sqfs, vec!["tar", "xf", "/work/in/img.tar"], "/work/out")
+            .run_command(
+                squashfs_cont,
+                vec!["tar", "xf", "/work/in/img.tar"],
+                "/work/out",
+            )
             .await?;
 
         self.docker
             .run_command(
-                sqfs,
+                squashfs_cont,
                 vec![
                     "mksquashfs",
                     "/work/in",
@@ -178,13 +173,13 @@ impl ImageBuilder {
             )
             .await?;
 
-        self.docker.stop_container(sqfs).await?;
-        self.docker.remove_container(sqfs).await?;
+        self.docker.stop_container(squashfs_cont).await?;
+        self.docker.remove_container(squashfs_cont).await?;
 
         Ok(work_dir_out.join("image.squashfs"))
     }
 
-    pub fn add_file(&mut self, path: &str, data: &[u8]) -> anyhow::Result<()> {
+    fn add_file(&mut self, path: &str, data: &[u8]) -> anyhow::Result<()> {
         let mut header = tar::Header::new_ustar();
         header.set_path(path)?;
         header.set_size(data.len() as u64);
@@ -194,7 +189,7 @@ impl ImageBuilder {
         Ok(())
     }
 
-    fn from_bytes(&mut self, bytes: &Bytes) -> anyhow::Result<()> {
+    fn tar_from_bytes(&mut self, bytes: &Bytes) -> anyhow::Result<()> {
         // the tar builder doesn't have any method for constructing an archive from in-memory
         // representation of the whole file, so we need to do that in chunks
 
@@ -202,7 +197,7 @@ impl ImageBuilder {
         loop {
             if offset + 2 * 0x200 > bytes.len() {
                 // tar file is terminated by two zeroed chunks
-                println!("Break at offset {:x}: EOF (incomplete file)", offset);
+                println!("Break at offset 0x{:x}: EOF (incomplete file)", offset);
                 break;
             }
 
@@ -213,7 +208,7 @@ impl ImageBuilder {
                 val
             }) == 0
             {
-                println!("Break at offset {:x}: EOF", offset);
+                println!("Break at offset 0x{:x}: EOF", offset);
                 break;
             }
 
@@ -235,9 +230,9 @@ impl ImageBuilder {
         Ok(())
     }
 
-    pub fn finish(&mut self) -> anyhow::Result<RWBuffer> {
+    fn finish_tar(&mut self) -> anyhow::Result<RWBuffer> {
         let buf = self.tar.take().unwrap().into_inner()?;
-        println!("Bytes in archive: {}", buf.bytes.len());
+        println!("Bytes in tar archive: {}", buf.bytes.len());
         Ok(buf)
     }
 }
