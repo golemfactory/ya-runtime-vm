@@ -147,39 +147,40 @@ impl ImageBuilder {
         ];
 
         let sqfs = "sqfs-tools";
-        // TODO: use docker.run_command() - debug why it doesn't work
-        let cmd = vec!["tar", "xf", "/work/in/img.tar", "-C", "/work/out"];
+        let start_cmd = vec!["tail", "-f", "/dev/null"]; // prevent container from exiting
         self.docker
             .create_container(
                 squashfs_image,
                 sqfs,
                 Some(mounts.clone()),
-                Some(cmd.iter().map(|s| s.to_string()).collect()),
+                Some(start_cmd.iter().map(|s| s.to_string()).collect()),
             )
             .await?;
-        self.docker.run_container(sqfs).await?;
-        self.docker.remove_container(sqfs).await?;
-
-        let cmd = vec![
-            "mksquashfs",
-            "/work/in",
-            "/work/out/image.squashfs",
-            "-info",
-            "-comp",
-            "lzo",
-            "-noappend",
-        ];
+        self.docker.start_container(sqfs).await?;
 
         self.docker
-            .create_container(
-                squashfs_image,
+            .run_command(sqfs, vec!["tar", "xf", "/work/in/img.tar"], "/work/out")
+            .await?;
+
+        self.docker
+            .run_command(
                 sqfs,
-                Some(mounts),
-                Some(cmd.iter().map(|s| s.to_string()).collect()),
+                vec![
+                    "mksquashfs",
+                    "/work/in",
+                    "/work/out/image.squashfs",
+                    "-info",
+                    "-comp",
+                    "lzo",
+                    "-noappend",
+                ],
+                "/",
             )
             .await?;
-        self.docker.run_container(sqfs).await?;
+
+        self.docker.stop_container(sqfs).await?;
         self.docker.remove_container(sqfs).await?;
+
         Ok(work_dir_out.join("image.squashfs"))
     }
 
@@ -199,7 +200,6 @@ impl ImageBuilder {
 
         let mut offset: usize = 0;
         loop {
-            //println!("offset: {:x}", offset);
             if offset + 2 * 0x200 > bytes.len() {
                 // tar file is terminated by two zeroed chunks
                 println!("Break at offset {:x}: EOF (incomplete file)", offset);
@@ -219,11 +219,6 @@ impl ImageBuilder {
 
             let hdr = tar::Header::from_byte_slice(&bytes[offset..offset + 0x200]);
             let entry_size = hdr.entry_size()? as usize;
-            // println!(
-            //     "tar entry size {:x}, path {:?}",
-            //     hdr.entry_size()?,
-            //     hdr.path()?
-            // );
             offset += 0x200;
             self.tar
                 .as_mut()

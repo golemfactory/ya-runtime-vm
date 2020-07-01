@@ -1,5 +1,5 @@
 use anyhow::anyhow;
-//use bollard::exec::{CreateExecOptions, StartExecOptions};
+use bollard::exec::{CreateExecOptions, StartExecOptions};
 use bollard::image::CreateImageOptions;
 use bollard::service::{ContainerConfig, HostConfig, Mount, MountTypeEnum};
 use bollard::{container, Docker};
@@ -44,7 +44,6 @@ impl DockerInstance {
             name: container_name,
         };
 
-        // TODO: run as user not root
         let host_config = HostConfig {
             mounts: match mounts {
                 None => None,
@@ -108,7 +107,7 @@ impl DockerInstance {
         Ok(())
     }
 
-    pub async fn run_container(&mut self, container_name: &str) -> anyhow::Result<()> {
+    pub async fn start_container(&mut self, container_name: &str) -> anyhow::Result<()> {
         print!("Starting container '{}'...", container_name);
         self.docker
             .start_container(
@@ -117,68 +116,50 @@ impl DockerInstance {
             )
             .await?;
         println!("OK");
-
-        self.docker
-            .wait_container(
-                container_name,
-                None::<container::WaitContainerOptions<String>>,
-            )
-            .try_collect::<Vec<_>>()
-            .await?;
-
-        let opt = container::LogsOptions {
-            stdout: true,
-            stderr: true,
-            follow: true,
-            ..Default::default()
-        };
-        let log = self
-            .docker
-            .logs(container_name, Some(opt))
-            .try_collect::<Vec<_>>()
-            .await?;
-        println!("Container log: {:#?}", log);
         Ok(())
     }
-    /*
-        pub async fn run_command(
-            &mut self,
-            container_name: &str,
-            cmd: Vec<&str>,
-            dir: &str,
-        ) -> anyhow::Result<()> {
-            print!("Running '{:?}' in container '{}'...", cmd, container_name);
-            let config = CreateExecOptions {
-                cmd: Some(cmd),
-                working_dir: Some(dir),
-                ..Default::default()
-            };
 
-            let result = self.docker.create_exec(container_name, config).await?;
+    pub async fn run_command(
+        &mut self,
+        container_name: &str,
+        cmd: Vec<&str>,
+        dir: &str,
+    ) -> anyhow::Result<()> {
+        print!("Running '{:?}' in container '{}'...", cmd, container_name);
+        let config = CreateExecOptions {
+            cmd: Some(cmd),
+            working_dir: Some(dir),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            ..Default::default()
+        };
 
-            let options = StartExecOptions {
-                detach: false, // run synchronously
-            };
+        let result = self.docker.create_exec(container_name, config).await?;
 
-            let result = self
-                .docker
-                .start_exec(&result.id, Some(options))
-                .try_collect::<Vec<_>>()
-                .await?;
-            println!("OK");
-            println!("OUTPUT: {:#?}", result);
-            Ok(())
-        }
+        let options = StartExecOptions {
+            detach: false, // run synchronously
+        };
 
-        pub async fn stop_container(&mut self, container_name: &str) -> anyhow::Result<()> {
-            print!("Stopping container '{}'...", container_name);
-            self.docker
-                .stop_container(container_name, None::<container::StopContainerOptions>)
-                .await?;
-            println!("OK");
-            Ok(())
-        }
-    */
+        let result = self
+            .docker
+            .start_exec(&result.id, Some(options))
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        println!("OK");
+        println!("Cmd output: {:#?}", result); // TODO: prettify, stream progress
+        Ok(())
+    }
+
+    pub async fn stop_container(&mut self, container_name: &str) -> anyhow::Result<()> {
+        print!("Stopping container '{}'...", container_name);
+        self.docker
+            .stop_container(container_name, None::<container::StopContainerOptions>)
+            .await?;
+        println!("OK");
+        Ok(())
+    }
+
     pub async fn remove_container(&mut self, container_name: &str) -> anyhow::Result<()> {
         print!("Removing container '{}'...", container_name);
         let options = container::RemoveContainerOptions {
