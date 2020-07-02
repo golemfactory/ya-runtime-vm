@@ -144,7 +144,7 @@ static void setup_sigfd(void) {
     g_sig_fd = CHECK(signalfd(g_sig_fd, &set, SFD_CLOEXEC));
 }
 
-static void send_response_hdr(msg_id_t msg_id, enum RESP_TYPE type) {
+static void send_response_hdr(msg_id_t msg_id, enum GUEST_MSG_TYPE type) {
     struct msg_hdr resp = {
         .msg_id = msg_id,
         .type = type,

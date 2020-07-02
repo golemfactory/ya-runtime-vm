@@ -1,7 +1,9 @@
+mod guest_agent_comm;
+mod response_parser;
+
 use std::io;
 use std::process::{Command, Stdio};
 
-mod guest_agent_comm;
 use crate::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
 
 fn handle_notification(notification: Notification) {

@@ -1,8 +1,10 @@
-use std::convert::TryFrom;
 use std::io::{self, prelude::*};
 use std::marker::PhantomData;
 use std::os::unix::net::UnixStream;
 use std::{thread, time};
+
+pub use crate::response_parser::Notification;
+use crate::response_parser::{parse_one_response, GuestAgentMessage, Response};
 
 #[repr(u8)]
 enum MsgType {
@@ -28,46 +30,6 @@ pub enum RedirectFdType<'a> {
     RedirectFdFile(&'a [u8]),
     RedirectFdPipeBlocking(u64),
     RedirectFdPipeCyclic(u64),
-}
-
-enum Response {
-    Ok,
-    OkU64(u64),
-    OkBytes(Vec<u8>),
-    Err(u32),
-}
-
-#[derive(Debug)]
-pub enum ExitReason {
-    Exited(u8),
-    Killed(u8),
-    Dumped(u8),
-}
-
-impl TryFrom<u32> for ExitReason {
-    type Error = io::Error;
-
-    fn try_from(v: u32) -> Result<Self, Self::Error> {
-        match v >> 30 {
-            0 => Ok(ExitReason::Exited((v & 0xff) as u8)),
-            1 => Ok(ExitReason::Killed((v & 0xff) as u8)),
-            2 => Ok(ExitReason::Dumped((v & 0xff) as u8)),
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Invalid exit reason",
-            )),
-        }
-    }
-}
-
-pub enum Notification {
-    OutputAvailable { id: u64, fd: u32 },
-    ProcessDied { id: u64, reason: ExitReason },
-}
-
-enum GuestAgentMessage {
-    Response { id: u64, resp: Response },
-    Notification(Notification),
 }
 
 struct Message<T> {
@@ -266,98 +228,8 @@ where
         self.last_msg_id
     }
 
-    fn recv_u8(&mut self) -> io::Result<u8> {
-        let mut buf = [0; 1];
-        self.stream.read_exact(&mut buf)?;
-        Ok(u8::from_le_bytes(buf))
-    }
-
-    fn recv_u32(&mut self) -> io::Result<u32> {
-        let mut buf = [0; 4];
-        self.stream.read_exact(&mut buf)?;
-        Ok(u32::from_le_bytes(buf))
-    }
-
-    fn recv_u64(&mut self) -> io::Result<u64> {
-        let mut buf = [0; 8];
-        self.stream.read_exact(&mut buf)?;
-        Ok(u64::from_le_bytes(buf))
-    }
-
-    fn recv_bytes(&mut self) -> io::Result<Vec<u8>> {
-        let len = self.recv_u64()?;
-        let mut buf = vec![0; len as usize];
-        self.stream.read_exact(buf.as_mut_slice())?;
-        Ok(buf)
-    }
-
     fn get_one_response(&mut self) -> io::Result<GuestAgentMessage> {
-        let id = self.recv_u64()?;
-
-        let typ = self.recv_u8()?;
-        match typ {
-            0 => Ok(GuestAgentMessage::Response {
-                id: id,
-                resp: Response::Ok,
-            }),
-            1 => {
-                let val = self.recv_u64()?;
-                Ok(GuestAgentMessage::Response {
-                    id: id,
-                    resp: Response::OkU64(val),
-                })
-            }
-            2 => {
-                let buf = self.recv_bytes()?;
-                Ok(GuestAgentMessage::Response {
-                    id: id,
-                    resp: Response::OkBytes(buf),
-                })
-            }
-            3 => {
-                let code = self.recv_u32()?;
-                Ok(GuestAgentMessage::Response {
-                    id: id,
-                    resp: Response::Err(code),
-                })
-            }
-            4 => {
-                if id == 0 {
-                    let proc_id = self.recv_u64()?;
-                    let fd = self.recv_u32()?;
-                    Ok(GuestAgentMessage::Notification(
-                        Notification::OutputAvailable {
-                            id: proc_id,
-                            fd: fd,
-                        },
-                    ))
-                } else {
-                    Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "Invalid response message ID",
-                    ))
-                }
-            }
-            5 => {
-                if id == 0 {
-                    let proc_id = self.recv_u64()?;
-                    let reason = ExitReason::try_from(self.recv_u32()?)?;
-                    Ok(GuestAgentMessage::Notification(Notification::ProcessDied {
-                        id: proc_id,
-                        reason: reason,
-                    }))
-                } else {
-                    Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "Invalid response message ID",
-                    ))
-                }
-            }
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Invalid response type",
-            )),
-        }
+        parse_one_response(&mut self.stream)
     }
 
     fn get_response(&mut self, msg_id: u64) -> io::Result<Response> {

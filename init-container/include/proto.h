@@ -39,7 +39,7 @@ struct msg_hdr {
 
 /* All of the messages can respond with RESP_ERR in addition to what's listed
  * below. */
-enum MSG_TYPE {
+enum HOST_MSG_TYPE {
     /* Expected response: RESP_OK */
     MSG_QUIT = 1,
 
@@ -148,7 +148,7 @@ enum REDIRECT_FD_TYPE {
     REDIRECT_FD_PIPE_CYCLIC,
 };
 
-enum RESP_TYPE {
+enum GUEST_MSG_TYPE {
     /* No body. */
     RESP_OK = 0,
     /* Number. (u64) */
