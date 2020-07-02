@@ -3,7 +3,7 @@ use bytes::Bytes;
 use crc::crc32;
 use std::io::Write;
 use std::{
-    env, fs,
+    fs,
     path::{Path, PathBuf},
 };
 use tar;
@@ -25,7 +25,7 @@ impl ImageBuilder {
         })
     }
 
-    pub async fn build(&mut self, image_name: &str) -> anyhow::Result<()> {
+    pub async fn build(&mut self, image_name: &str, output: &str) -> anyhow::Result<()> {
         println!("Building image from '{}'...", image_name);
 
         let cont_name = "gvmkit-tmp";
@@ -54,10 +54,7 @@ impl ImageBuilder {
         self.add_metadata_inside(&cfg)?;
         let squashfs_image_path = self.repack(&work_dir_out).await?;
         self.add_metadata_outside(&squashfs_image_path, &cfg)?;
-        fs::copy(
-            &squashfs_image_path,
-            env::current_dir().unwrap().join("out.img"),
-        )?; // TODO: final output name from cmd
+        fs::copy(&squashfs_image_path, output)?;
         fs::remove_dir_all(work_dir)?;
 
         Ok(())
