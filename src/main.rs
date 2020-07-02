@@ -2,15 +2,15 @@ use std::io;
 use std::process::{Command, Stdio};
 
 mod guest_agent_comm;
-use crate::guest_agent_comm::{GuestAgent, NotifyType, RedirectFdType};
+use crate::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
 
-fn handle_notification(notification: NotifyType) {
+fn handle_notification(notification: Notification) {
     match notification {
-        NotifyType::NotifyOutputAvailable(id, fd) => {
+        Notification::OutputAvailable { id, fd } => {
             println!("Process {} has output available on fd {}", id, fd);
         }
-        NotifyType::NotifyProcessDied(id, code) => {
-            println!("Process {} died with {}", id, code);
+        Notification::ProcessDied { id, reason } => {
+            println!("Process {} died with {:?}", id, reason);
         }
     }
 }

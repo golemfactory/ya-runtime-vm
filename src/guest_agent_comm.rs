@@ -1,12 +1,8 @@
+use std::convert::TryFrom;
 use std::io::{self, prelude::*};
 use std::marker::PhantomData;
 use std::os::unix::net::UnixStream;
 use std::{thread, time};
-
-enum Either<T1, T2> {
-    Left(T1),
-    Right(T2),
-}
 
 #[repr(u8)]
 enum MsgType {
@@ -34,16 +30,44 @@ pub enum RedirectFdType<'a> {
     RedirectFdPipeCyclic(u64),
 }
 
-enum RespType {
-    RespOk,
-    RespOkU64(u64),
-    RespOkBytes(Vec<u8>),
-    RespErr(u32),
+enum Response {
+    Ok,
+    OkU64(u64),
+    OkBytes(Vec<u8>),
+    Err(u32),
 }
 
-pub enum NotifyType {
-    NotifyOutputAvailable(u64, u32),
-    NotifyProcessDied(u64, u32),
+#[derive(Debug)]
+pub enum ExitReason {
+    Exited(u8),
+    Killed(u8),
+    Dumped(u8),
+}
+
+impl TryFrom<u32> for ExitReason {
+    type Error = io::Error;
+
+    fn try_from(v: u32) -> Result<Self, Self::Error> {
+        match v >> 30 {
+            0 => Ok(ExitReason::Exited((v & 0xff) as u8)),
+            1 => Ok(ExitReason::Killed((v & 0xff) as u8)),
+            2 => Ok(ExitReason::Dumped((v & 0xff) as u8)),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid exit reason",
+            )),
+        }
+    }
+}
+
+pub enum Notification {
+    OutputAvailable { id: u64, fd: u32 },
+    ProcessDied { id: u64, reason: ExitReason },
+}
+
+enum GuestAgentMessage {
+    Response { id: u64, resp: Response },
+    Notification(Notification),
 }
 
 struct Message<T> {
@@ -53,7 +77,7 @@ struct Message<T> {
 
 pub struct GuestAgent<F>
 where
-    F: FnMut(NotifyType) -> (),
+    F: FnMut(Notification) -> (),
 {
     stream: UnixStream,
     last_msg_id: u64,
@@ -201,7 +225,7 @@ impl<T> AsRef<Vec<u8>> for Message<T> {
 
 impl<F> GuestAgent<F>
 where
-    F: FnMut(NotifyType) -> (),
+    F: FnMut(Notification) -> (),
 {
     pub fn connected(
         path: &str,
@@ -267,29 +291,46 @@ where
         Ok(buf)
     }
 
-    fn get_one_response(&mut self) -> io::Result<Either<NotifyType, (u64, RespType)>> {
+    fn get_one_response(&mut self) -> io::Result<GuestAgentMessage> {
         let id = self.recv_u64()?;
 
         let typ = self.recv_u8()?;
         match typ {
-            0 => Ok(Either::Right((id, RespType::RespOk))),
+            0 => Ok(GuestAgentMessage::Response {
+                id: id,
+                resp: Response::Ok,
+            }),
             1 => {
                 let val = self.recv_u64()?;
-                Ok(Either::Right((id, RespType::RespOkU64(val))))
+                Ok(GuestAgentMessage::Response {
+                    id: id,
+                    resp: Response::OkU64(val),
+                })
             }
             2 => {
                 let buf = self.recv_bytes()?;
-                Ok(Either::Right((id, RespType::RespOkBytes(buf))))
+                Ok(GuestAgentMessage::Response {
+                    id: id,
+                    resp: Response::OkBytes(buf),
+                })
             }
             3 => {
                 let code = self.recv_u32()?;
-                Ok(Either::Right((id, RespType::RespErr(code))))
+                Ok(GuestAgentMessage::Response {
+                    id: id,
+                    resp: Response::Err(code),
+                })
             }
             4 => {
                 if id == 0 {
                     let proc_id = self.recv_u64()?;
                     let fd = self.recv_u32()?;
-                    Ok(Either::Left(NotifyType::NotifyOutputAvailable(proc_id, fd)))
+                    Ok(GuestAgentMessage::Notification(
+                        Notification::OutputAvailable {
+                            id: proc_id,
+                            fd: fd,
+                        },
+                    ))
                 } else {
                     Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -300,8 +341,11 @@ where
             5 => {
                 if id == 0 {
                     let proc_id = self.recv_u64()?;
-                    let code = self.recv_u32()?;
-                    Ok(Either::Left(NotifyType::NotifyProcessDied(proc_id, code)))
+                    let reason = ExitReason::try_from(self.recv_u32()?)?;
+                    Ok(GuestAgentMessage::Notification(Notification::ProcessDied {
+                        id: proc_id,
+                        reason: reason,
+                    }))
                 } else {
                     Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -316,11 +360,13 @@ where
         }
     }
 
-    fn get_response(&mut self, msg_id: u64) -> io::Result<RespType> {
+    fn get_response(&mut self, msg_id: u64) -> io::Result<Response> {
         loop {
             match self.get_one_response()? {
-                Either::Left(notification) => (self.notification_handler)(notification),
-                Either::Right((id, resp)) => {
+                GuestAgentMessage::Notification(notification) => {
+                    (self.notification_handler)(notification)
+                }
+                GuestAgentMessage::Response { id, resp } => {
                     break {
                         if id != msg_id {
                             return Err(io::Error::new(
@@ -335,10 +381,10 @@ where
         }
     }
 
-    pub fn get_one_notification(&mut self) -> io::Result<NotifyType> {
+    pub fn get_one_notification(&mut self) -> io::Result<Notification> {
         match self.get_one_response()? {
-            Either::Left(notification) => Ok(notification),
-            Either::Right(_) => Err(io::Error::new(
+            GuestAgentMessage::Notification(notification) => Ok(notification),
+            GuestAgentMessage::Response { .. } => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Unexptected response",
             )),
@@ -352,8 +398,8 @@ where
         msg.append_submsg(&SubMsgQuitType::SubMsgEnd);
         self.stream.write_all(msg.as_ref())?;
         let ret = match self.get_response(msg_id)? {
-            RespType::RespOk => Ok(()),
-            RespType::RespErr(code) => Err(code),
+            Response::Ok => Ok(()),
+            Response::Err(code) => Err(code),
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -406,8 +452,8 @@ where
         self.stream.write_all(msg.as_ref())?;
 
         let ret = match self.get_response(msg_id)? {
-            RespType::RespOkU64(val) => Ok(val),
-            RespType::RespErr(code) => Err(code),
+            Response::OkU64(val) => Ok(val),
+            Response::Err(code) => Err(code),
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
