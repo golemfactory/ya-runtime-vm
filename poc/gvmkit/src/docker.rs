@@ -1,12 +1,15 @@
 use anyhow::anyhow;
-use bollard::exec::{CreateExecOptions, StartExecOptions, StartExecResults};
-use bollard::image::CreateImageOptions;
 use bollard::service::{ContainerConfig, HostConfig, Mount, MountTypeEnum};
-use bollard::{container, Docker};
+use bollard::{container, exec, image, Docker};
 use bytes::{Bytes, BytesMut};
 use futures_util::stream::TryStreamExt;
 
-use crate::image_builder::DirectoryMount;
+#[derive(Debug, Clone)]
+pub struct DirectoryMount {
+    pub host: String,
+    pub guest: String,
+    pub readonly: bool,
+}
 
 pub struct DockerInstance {
     docker: Docker,
@@ -21,7 +24,7 @@ impl DockerInstance {
 
     pub async fn create_image(&mut self, image_name: &str) -> anyhow::Result<()> {
         print!("Creating image '{}'...", image_name);
-        let options = CreateImageOptions {
+        let options = image::CreateImageOptions {
             from_image: image_name,
             ..Default::default()
         };
@@ -126,7 +129,7 @@ impl DockerInstance {
         dir: &str,
     ) -> anyhow::Result<()> {
         print!("Running '{:?}' in container '{}'...", cmd, container_name);
-        let config = CreateExecOptions {
+        let config = exec::CreateExecOptions {
             cmd: Some(cmd),
             working_dir: Some(dir),
             attach_stdout: Some(true),
@@ -136,7 +139,7 @@ impl DockerInstance {
 
         let result = self.docker.create_exec(container_name, config).await?;
 
-        let options = StartExecOptions {
+        let options = exec::StartExecOptions {
             detach: false, // run synchronously
         };
 
@@ -149,8 +152,8 @@ impl DockerInstance {
         println!("OK");
         // TODO: stream progress
         result.iter().for_each(|el| match el {
-            StartExecResults::Attached { log } => println!("{}", log),
-            StartExecResults::Detached => println!("[Detached]"),
+            exec::StartExecResults::Attached { log } => println!("{}", log),
+            exec::StartExecResults::Detached => println!("[Detached]"),
         });
         Ok(())
     }
@@ -178,10 +181,13 @@ impl DockerInstance {
         Ok(())
     }
 
-    pub async fn export_container(&mut self, container_name: &str) -> anyhow::Result<Bytes> {
-        println!("Exporting FS of container '{}'...", container_name);
+    pub async fn download(&mut self, container_name: &str, path: &str) -> anyhow::Result<Bytes> {
+        print!(
+            "Downloading '{}' from container '{}'...",
+            path, container_name
+        );
 
-        let options = container::DownloadFromContainerOptions { path: "/" };
+        let options = container::DownloadFromContainerOptions { path: path };
         let chunks: Vec<Bytes> = self
             .docker
             .download_from_container(container_name, Some(options))
@@ -195,8 +201,25 @@ impl DockerInstance {
             buf
         });
 
-        println!("Total image size: {}", tar.len());
+        println!("OK");
         Ok(tar.freeze())
+    }
+
+    pub async fn upload(
+        &mut self,
+        container_name: &str,
+        path: &str,
+        data: Bytes,
+    ) -> anyhow::Result<()> {
+        let options = container::UploadToContainerOptions {
+            path: path,
+            ..Default::default()
+        };
+
+        self.docker
+            .upload_to_container(container_name, Some(options), data.into())
+            .await?;
+        Ok(())
     }
 
     pub async fn get_config(

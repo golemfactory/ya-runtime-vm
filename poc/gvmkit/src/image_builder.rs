@@ -2,28 +2,14 @@ use bollard::service::ContainerConfig;
 use bytes::Bytes;
 use crc::crc32;
 use std::io::Write;
-use std::{env, fs, path::PathBuf};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 use tar;
 
 use crate::docker::DockerInstance;
 use crate::rwbuf::RWBuffer;
-
-#[derive(Debug, Clone)]
-pub struct DirectoryMount {
-    pub host: String,
-    pub guest: String,
-    pub readonly: bool,
-}
-
-fn path_to_str(path: &PathBuf) -> anyhow::Result<String> {
-    let mut path_str = path.to_str().unwrap().to_string();
-    if cfg!(windows) {
-        // canonicalize creates paths with extended syntax, prefixed with \\?\
-        // docker API doesn't like that
-        path_str = path_str.split_off(4);
-    }
-    Ok(path_str)
-}
 
 pub struct ImageBuilder {
     tar: Option<tar::Builder<RWBuffer>>,
@@ -49,7 +35,9 @@ impl ImageBuilder {
 
         let (hash, cfg) = self.docker.get_config(cont_name).await?;
 
-        let tar_bytes = self.docker.export_container(cont_name).await?;
+        let tar_bytes = self.docker.download(cont_name, "/").await?;
+        println!("Docker image size: {}", tar_bytes.len());
+
         self.tar_from_bytes(&tar_bytes)?;
 
         self.docker.remove_container(cont_name).await?;
@@ -59,14 +47,12 @@ impl ImageBuilder {
         let mut work_dir = PathBuf::from(&work_dir_name);
         fs::create_dir_all(&work_dir)?; // path must exist for canonicalize()
         work_dir = work_dir.canonicalize()?;
-        let work_dir_in = work_dir.join("in");
         let work_dir_out = work_dir.join("out");
-        dbg!(&work_dir_in, &work_dir_out);
-        fs::create_dir_all(&work_dir_in)?;
+        dbg!(&work_dir_out);
         fs::create_dir_all(&work_dir_out)?;
 
         self.add_metadata_inside(&cfg)?;
-        let squashfs_image_path = self.repack(&work_dir_in, &work_dir_out).await?;
+        let squashfs_image_path = self.repack(&work_dir_out).await?;
         self.add_metadata_outside(&squashfs_image_path, &cfg)?;
         fs::copy(
             &squashfs_image_path,
@@ -110,51 +96,28 @@ impl ImageBuilder {
         Ok(())
     }
 
-    async fn repack(
-        &mut self,
-        work_dir_in: &PathBuf,
-        work_dir_out: &PathBuf,
-    ) -> anyhow::Result<PathBuf> {
-        let buf = self.finish_tar()?; // final image as .tar
-
-        // TODO: tar::Archive can't extract files outside of the target path (no stripping leading / like normal tar)
-        // ...so we end up using the tar command anyway :/ (inside the squashfs-tools container)
-        //let mut ar = tar::Archive::new(buf);
-
-        fs::File::create(work_dir_in.join("img.tar"))?.write_all(&buf.bytes)?;
+    async fn repack(&mut self, dir_out: &PathBuf) -> anyhow::Result<PathBuf> {
+        let img_as_tar = self.finish_tar()?;
 
         let squashfs_image = "prekucki/squashfs-tools:latest";
-        let mounts = vec![
-            DirectoryMount {
-                readonly: true,
-                guest: String::from("/work/in"),
-                host: path_to_str(work_dir_in)?,
-            },
-            DirectoryMount {
-                readonly: false,
-                guest: String::from("/work/out"),
-                host: path_to_str(work_dir_out)?,
-            },
-        ];
-
         let squashfs_cont = "sqfs-tools";
         let start_cmd = vec!["tail", "-f", "/dev/null"]; // prevent container from exiting
+
         self.docker
             .create_container(
                 squashfs_image,
                 squashfs_cont,
-                Some(mounts.clone()),
+                None,
                 Some(start_cmd.iter().map(|s| s.to_string()).collect()),
             )
             .await?;
         self.docker.start_container(squashfs_cont).await?;
 
+        let path_in = "/work/in";
+        let path_out = "/work/out/image.squashfs";
+
         self.docker
-            .run_command(
-                squashfs_cont,
-                vec!["tar", "xf", "/work/in/img.tar"],
-                "/work/out",
-            )
+            .upload(squashfs_cont, path_in, img_as_tar.bytes.freeze())
             .await?;
 
         self.docker
@@ -162,8 +125,8 @@ impl ImageBuilder {
                 squashfs_cont,
                 vec![
                     "mksquashfs",
-                    "/work/in",
-                    "/work/out/image.squashfs",
+                    path_in,
+                    path_out,
                     "-info",
                     "-comp",
                     "lzo",
@@ -173,10 +136,15 @@ impl ImageBuilder {
             )
             .await?;
 
+        let final_img_tar = self.docker.download(squashfs_cont, path_out).await?;
+
+        let mut tar = tar::Archive::new(RWBuffer::from_bytes(&final_img_tar)?);
+        tar.unpack(dir_out)?;
+
         self.docker.stop_container(squashfs_cont).await?;
         self.docker.remove_container(squashfs_cont).await?;
 
-        Ok(work_dir_out.join("image.squashfs"))
+        Ok(dir_out.join(Path::new(path_out).file_name().unwrap()))
     }
 
     fn add_file(&mut self, path: &str, data: &[u8]) -> anyhow::Result<()> {

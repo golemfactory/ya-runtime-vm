@@ -1,4 +1,5 @@
-use bytes::{Buf, BytesMut};
+use anyhow::Result;
+use bytes::{Buf, Bytes, BytesMut};
 use std::io::{Read, Write};
 
 // wrapper for BytesMut so we can implement Read/Write
@@ -12,9 +13,14 @@ impl RWBuffer {
             bytes: BytesMut::new(),
         }
     }
-    /*fn slice<'a>(&'a self, x: usize, y: usize) -> &'a [u8] {
-        &self.bytes[x..y]
-    }*/
+
+    pub fn from_bytes(bytes: &Bytes) -> Result<RWBuffer> {
+        let mut buf = RWBuffer {
+            bytes: BytesMut::new(),
+        };
+        buf.write_all(bytes)?;
+        Ok(buf)
+    }
 }
 
 impl Write for RWBuffer {
