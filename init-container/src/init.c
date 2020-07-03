@@ -61,7 +61,12 @@ static void load_module(const char* path) {
     CHECK(close(fd));
 }
 
-static void send_process_died(uint64_t id, uint32_t reason) {
+struct ExitReason {
+    uint8_t status;
+    uint8_t type;
+};
+
+static void send_process_died(uint64_t id, struct ExitReason reason) {
     struct msg_hdr resp = {
         .msg_id = 0,
         .type = NOTIFY_PROCESS_DIED,
@@ -69,30 +74,31 @@ static void send_process_died(uint64_t id, uint32_t reason) {
 
     CHECK(writen(g_cmds_fd, &resp, sizeof(resp)));
     CHECK(writen(g_cmds_fd, &id, sizeof(id)));
-    CHECK(writen(g_cmds_fd, &reason, sizeof(reason)));
+    CHECK(writen(g_cmds_fd, &reason.status, sizeof(reason.status)));
+    CHECK(writen(g_cmds_fd, &reason.type, sizeof(reason.type)));
 }
 
-static uint32_t encode_status(int status, int type) {
-    uint32_t val = 0;
+static struct ExitReason encode_status(int status, int type) {
+    struct ExitReason exit_reason;
 
     switch (type) {
         case CLD_EXITED:
-            val = 0;
+            exit_reason.type = 0;
             break;
         case CLD_KILLED:
-            val = 1;
+            exit_reason.type = 1;
             break;
         case CLD_DUMPED:
-            val = 2;
+            exit_reason.type = 2;
             break;
         default:
             fprintf(stderr, "Invalid exit reason to encode: %d\n", type);
             die();
     }
 
-    val = (val << 30) | (status & 0xff);
+    exit_reason.status = (status & 0xff);
 
-    return val;
+    return exit_reason;
 }
 
 static void handle_sigchld(void) {
