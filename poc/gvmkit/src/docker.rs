@@ -23,7 +23,7 @@ impl DockerInstance {
     }
 
     pub async fn create_image(&mut self, image_name: &str) -> anyhow::Result<()> {
-        print!("Creating image '{}'...", image_name);
+        print!("Pulling image '{}'...", image_name);
         let options = image::CreateImageOptions {
             from_image: image_name,
             ..Default::default()
@@ -102,8 +102,9 @@ impl DockerInstance {
                     self.create_image(image_name).await?;
                     self.try_create_container(image_name, container_name, mounts, cmd)
                         .await?;
+                } else {
+                    return Err(err);
                 }
-                return Err(err);
             }
         }
         println!("OK");
