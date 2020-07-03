@@ -9,26 +9,32 @@ pub enum Response {
 }
 
 #[derive(Debug)]
-pub enum ExitReason {
-    Exited(u8),
-    Killed(u8),
-    Dumped(u8),
+pub enum ExitType {
+    Exited,
+    Killed,
+    Dumped,
 }
 
-impl TryFrom<u32> for ExitReason {
+impl TryFrom<u8> for ExitType {
     type Error = io::Error;
 
-    fn try_from(v: u32) -> Result<Self, Self::Error> {
-        match v >> 30 {
-            0 => Ok(ExitReason::Exited((v & 0xff) as u8)),
-            1 => Ok(ExitReason::Killed((v & 0xff) as u8)),
-            2 => Ok(ExitReason::Dumped((v & 0xff) as u8)),
+    fn try_from(v: u8) -> Result<Self, Self::Error> {
+        match v {
+            0 => Ok(ExitType::Exited),
+            1 => Ok(ExitType::Killed),
+            2 => Ok(ExitType::Dumped),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "Invalid exit reason",
+                "Invalid exit type",
             )),
         }
     }
+}
+
+#[derive(Debug)]
+pub struct ExitReason {
+    pub status: u8,
+    pub type_: ExitType,
 }
 
 pub enum Notification {
@@ -116,10 +122,14 @@ pub fn parse_one_response<T: io::Read>(stream: &mut T) -> io::Result<GuestAgentM
         5 => {
             if id == 0 {
                 let proc_id = recv_u64(stream)?;
-                let reason = ExitReason::try_from(recv_u32(stream)?)?;
+                let status = recv_u8(stream)?;
+                let type_ = ExitType::try_from(recv_u8(stream)?)?;
                 Ok(GuestAgentMessage::Notification(Notification::ProcessDied {
                     id: proc_id,
-                    reason: reason,
+                    reason: ExitReason {
+                        status: status,
+                        type_: type_,
+                    },
                 }))
             } else {
                 Err(io::Error::new(
