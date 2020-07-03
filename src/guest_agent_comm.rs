@@ -185,6 +185,8 @@ impl<T> AsRef<Vec<u8>> for Message<T> {
     }
 }
 
+type RemoteCommandResult<T> = Result<T, /* exit code */ u32>;
+
 impl<F> GuestAgent<F>
 where
     F: FnMut(Notification) -> (),
@@ -263,7 +265,7 @@ where
         }
     }
 
-    pub fn quit(&mut self) -> io::Result<Result<(), u32>> {
+    pub fn quit(&mut self) -> io::Result<RemoteCommandResult<()>> {
         let mut msg = Message::default();
         let msg_id = self.get_new_msg_id();
         msg.create_header(msg_id);
@@ -290,7 +292,7 @@ where
         uid: u32,
         gid: u32,
         fds: &[Option<RedirectFdType>; 3],
-    ) -> io::Result<Result<u64, u32>> {
+    ) -> io::Result<RemoteCommandResult<u64>> {
         let mut msg = Message::default();
         let msg_id = self.get_new_msg_id();
 
