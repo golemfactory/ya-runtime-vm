@@ -1,8 +1,12 @@
 use anyhow::anyhow;
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
-use serde_json::map::VacantEntry;
-use std::{env, fs, io, path::PathBuf, process::Command, str};
+use std::{
+    env, fs, io,
+    path::{Path, PathBuf},
+    process::Command,
+    str,
+};
 use structopt::StructOpt;
 use uuid::Uuid;
 
@@ -43,11 +47,11 @@ pub struct ContainerVolume {
     pub path: String,
 }
 
-fn get_gvmkit_path(current_exe: PathBuf) -> anyhow::Result<PathBuf> {
+fn get_runtime_path(current_exe: PathBuf) -> anyhow::Result<PathBuf> {
     let base_dir = current_exe
         .parent()
         .ok_or(anyhow!("exe path has no parent"))?;
-    Ok(base_dir.join("poc/gvmkit"))
+    Ok(base_dir.join("runtime"))
 }
 
 fn get_volumes<Input: io::Read + io::Seek>(
@@ -91,6 +95,88 @@ fn get_volumes<Input: io::Read + io::Seek>(
         .collect())
 }
 
+fn to_string_for_qemu(path: &Path) -> String {
+    // escape commas for qemu -drive file=path
+    path.display().to_string().replace(",", ",,")
+}
+
+fn make_vmrt_command(
+    runtime_path: &Path,
+    workdir: &Path,
+    task_package: &Path,
+    smp_cpus: usize,
+    volumes: Vec<ContainerVolume>,
+    entrypoint: String,
+    args: Vec<String>,
+) -> Command {
+    /*
+    special chars in paths to consider:
+      - " "
+      - "\""
+      - "," (see qemu -drive file=path)
+     */
+    
+    let mut append: Vec<String> = Vec::new();
+    let mut cmd = Command::new("./vmrt");
+    cmd.current_dir(runtime_path)
+        .arg("-m")
+        .arg("200m")
+        .arg("-nographic")
+        .arg("-vga")
+        .arg("none")
+        .arg("-kernel")
+        .arg("vmlinuz-virt")
+        .arg("-initrd")
+        .arg("initramfs-virt")
+        .arg("-net")
+        .arg("none")
+        .arg("-accel")
+        .arg("kvm")
+        .arg("-cpu")
+        .arg("host")
+        .arg("-smp")
+        .arg(smp_cpus.to_string())
+        .arg("-device")
+        .arg("virtio-serial,id=ser0")
+        .arg("-device")
+        .arg("virtserialport,chardev=foo,name=org.fedoraproject.port.0")
+        .arg("-chardev")
+        .arg("socket,path=/tmp/foo,server,nowait,id=foo")
+        .arg("-drive")
+        .arg(format!(
+            "file={},cache=none,readonly=on,format=raw,if=virtio",
+            to_string_for_qemu(&task_package)
+        ))
+        .arg("-no-reboot");
+
+    for (tag, vol) in volumes.iter().enumerate() {
+        let src = workdir.join(&vol.name);
+        let dst = &vol.path;
+        cmd.arg("-virtfs")
+            .arg(format!(
+                "local,path={src},id=vol{tag},mount_tag=vol{tag},security_model=none",
+                src = to_string_for_qemu(&src),
+                tag = tag
+            ))
+            .arg("-device")
+            .arg(format!(
+                "virtio-9p-pci,fsdev=vol{tag},mount_tag=vol{tag}",
+                tag = tag
+            ));
+        append.push(format!("volmnt=vol{}:{}", tag, dst));
+    }
+
+    append.push(format!("apparg=\"{}\"", entrypoint.replace("\"", "\\\"")));
+    for arg in args {
+        append.push(format!("apparg=\"{}\"", arg.replace("\"", "\\\"")));
+    }
+
+    cmd.arg("-append")
+        .arg(format!("console=ttyS0 panic=1 {}", append.join(" ")));
+
+    cmd
+}
+
 fn main() -> anyhow::Result<()> {
     env_logger::init();
     let cmdargs = CmdArgs::from_args();
@@ -125,22 +211,17 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Start {} => (),
         Commands::Run { entrypoint, args } => {
-            let volumes: Vec<ContainerVolume> =
-                { serde_json::from_str(&fs::read_to_string(cmdargs.workdir.join("vols.json"))?)? };
-            let mut cmd = Command::new(get_gvmkit_path(env::current_exe()?)?);
-
-            cmd.arg("run");
-            for vol in volumes {
-                let src = cmdargs.workdir.join(vol.name);
-                let dst = vol.path;
-                cmd.arg("-v").arg(format!("{}:{}", src.display(), dst));
-            }
-
-            cmd.arg(cmdargs.task_package)
-                .arg(entrypoint)
-                .args(args)
-                .spawn()?
-                .wait()?;
+            make_vmrt_command(
+                &get_runtime_path(env::current_exe()?)?,
+                &cmdargs.workdir,
+                &cmdargs.task_package,
+                num_cpus::get(),
+                serde_json::from_str(&fs::read_to_string(cmdargs.workdir.join("vols.json"))?)?,
+                entrypoint,
+                args,
+            )
+            .spawn()?
+            .wait()?;
         }
     };
     Ok(())
@@ -155,16 +236,16 @@ mod tests {
     }
 
     #[test]
-    fn test_get_gvmkit_path_absolute() -> anyhow::Result<()> {
-        let gvmkit_path = get_gvmkit_path(PathBuf::from("/foo/bar/ya-runtime-vm"))?;
-        assert_eq!(gvmkit_path, PathBuf::from("/foo/bar/poc/gvmkit"));
+    fn test_get_runtime_path_absolute() -> anyhow::Result<()> {
+        let runtime_path = get_runtime_path(PathBuf::from("/foo/bar/ya-runtime-vm"))?;
+        assert_eq!(runtime_path, PathBuf::from("/foo/bar/runtime"));
         Ok(())
     }
 
     #[test]
-    fn test_get_gvmkit_path_relative() -> anyhow::Result<()> {
-        let gvmkit_path = get_gvmkit_path(PathBuf::from("./ya-runtime-vm"))?;
-        assert_eq!(gvmkit_path, PathBuf::from("./poc/gvmkit"));
+    fn test_get_runtime_path_relative() -> anyhow::Result<()> {
+        let runtime_path = get_runtime_path(PathBuf::from("./ya-runtime-vm"))?;
+        assert_eq!(runtime_path, PathBuf::from("./runtime"));
         Ok(())
     }
 
@@ -220,5 +301,55 @@ mod tests {
         let volumes = get_volumes(data)?;
         assert!(volumes.is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn test_make_vmrt_command() {
+        let cmd = format!(
+            "{:?}",
+            make_vmrt_command(
+                // put " ", "\"", "," in paths
+                &PathBuf::from("/fo o/run\"ti,me"),
+                &PathBuf::from("/ba r/wo\"rk,dir"),
+                &PathBuf::from("/qu x/task_\"package,golem-app"),
+                4,
+                vec![
+                    ContainerVolume {
+                        name: "vol-a".to_string(),
+                        path: "/a".to_string(),
+                    },
+                    ContainerVolume {
+                        name: "vol-b".to_string(),
+                        path: "/b".to_string(),
+                    },
+                ],
+                "ls".to_string(),
+                vec!["/a".to_string(), "/b".to_string(),],
+            )
+        );
+        // one level of quotes and backslash escaping is added by debug formatting of Command
+        let expected_cmd = &[
+            r#""./vmrt""#,
+            r#""-m" "200m""#,
+            r#""-nographic""#,
+            r#""-vga" "none""#,
+            r#""-kernel" "vmlinuz-virt""#,
+            r#""-initrd" "initramfs-virt""#,
+            r#""-net" "none""#,
+            r#""-accel" "kvm""#,
+            r#""-cpu" "host""#,
+            r#""-smp" "4""#,
+            r#""-device" "virtio-serial,id=ser0""#,
+            r#""-device" "virtserialport,chardev=foo,name=org.fedoraproject.port.0""#,
+            r#""-chardev" "socket,path=/tmp/foo,server,nowait,id=foo""#,
+            r#""-drive" "file=/qu x/task_\"package,,golem-app,cache=none,readonly=on,format=raw,if=virtio""#,
+            r#""-no-reboot""#,
+            r#""-virtfs" "local,path=/ba r/wo\"rk,,dir/vol-a,id=vol0,mount_tag=vol0,security_model=none""#,
+            r#""-device" "virtio-9p-pci,fsdev=vol0,mount_tag=vol0""#,
+            r#""-virtfs" "local,path=/ba r/wo\"rk,,dir/vol-b,id=vol1,mount_tag=vol1,security_model=none""#,
+            r#""-device" "virtio-9p-pci,fsdev=vol1,mount_tag=vol1""#,
+            r#""-append" "console=ttyS0 panic=1 volmnt=vol0:/a volmnt=vol1:/b apparg=\"ls\" apparg=\"/a\" apparg=\"/b\"""#,
+        ].join(" ");
+        assert_eq!(&cmd, expected_cmd);
     }
 }
