@@ -18,7 +18,7 @@ pub struct ImageBuilder {
 }
 
 impl ImageBuilder {
-    pub async fn new() -> anyhow::Result<ImageBuilder> {
+    async fn new() -> anyhow::Result<ImageBuilder> {
         let buf = RWBuffer::new();
         Ok(ImageBuilder {
             tar: Some(tar::Builder::new(buf)),
@@ -26,22 +26,24 @@ impl ImageBuilder {
         })
     }
 
-    pub async fn build(&mut self, image_name: &str, output: &str) -> anyhow::Result<()> {
+    pub async fn build_image(image_name: &str, output: &Path) -> anyhow::Result<()> {
         info!("Building image from '{}'", image_name);
 
+        let mut builder = ImageBuilder::new().await?;
         let cont_name = "gvmkit-tmp";
-        self.docker
+        builder
+            .docker
             .create_container(image_name, cont_name, None, None)
             .await?;
 
-        let (hash, cfg) = self.docker.get_config(cont_name).await?;
+        let (hash, cfg) = builder.docker.get_config(cont_name).await?;
 
-        let tar_bytes = self.docker.download(cont_name, "/").await?;
+        let tar_bytes = builder.docker.download(cont_name, "/").await?;
         debug!("Docker image size: {}", tar_bytes.len());
 
-        self.tar_from_bytes(&tar_bytes)?;
+        builder.tar_from_bytes(&tar_bytes)?;
 
-        self.docker.remove_container(cont_name).await?;
+        builder.docker.remove_container(cont_name).await?;
 
         let mut work_dir = PathBuf::from(&format!("work-{}", hash));
         fs::create_dir_all(&work_dir)?; // path must exist for canonicalize()
@@ -49,18 +51,18 @@ impl ImageBuilder {
         let work_dir_out = work_dir.join("out");
         fs::create_dir_all(&work_dir_out)?;
 
-        self.add_metadata_inside(&cfg)?;
-        let squashfs_image_path = self.repack(&work_dir_out).await?;
-        self.add_metadata_outside(&squashfs_image_path, &cfg)?;
+        builder.add_metadata_inside(&cfg)?;
+        let squashfs_image_path = builder.repack(&work_dir_out).await?;
+        builder.add_metadata_outside(&squashfs_image_path, &cfg)?;
         fs::copy(&squashfs_image_path, output)?;
         fs::remove_dir_all(work_dir)?;
-        info!("Image built successfully: {}", output);
+        info!("Image built successfully: {}", output.display());
 
         Ok(())
     }
 
-    fn add_meta_file(&mut self, path: &str, strings: &Option<Vec<String>>) -> anyhow::Result<()> {
-        debug!("Adding metadata file '{}': {:?}", path, strings);
+    fn add_meta_file(&mut self, path: &Path, strings: &Option<Vec<String>>) -> anyhow::Result<()> {
+        debug!("Adding metadata file '{}': {:?}", path.display(), strings);
         match strings {
             Some(val) => self.add_file(path, val.join("\n").as_bytes())?,
             None => self.add_file(path, &[])?,
@@ -69,15 +71,15 @@ impl ImageBuilder {
     }
 
     fn add_metadata_inside(&mut self, config: &ContainerConfig) -> anyhow::Result<()> {
-        self.add_meta_file(".env", &config.env)?;
-        self.add_meta_file(".entrypoint", &config.entrypoint)?;
-        self.add_meta_file(".cmd", &config.cmd)?;
+        self.add_meta_file(Path::new(".env"), &config.env)?;
+        self.add_meta_file(Path::new(".entrypoint"), &config.entrypoint)?;
+        self.add_meta_file(Path::new(".cmd"), &config.cmd)?;
         Ok(())
     }
 
     fn add_metadata_outside(
         &mut self,
-        image_path: &PathBuf,
+        image_path: &Path,
         config: &ContainerConfig,
     ) -> anyhow::Result<()> {
         let mut json_buf = RWBuffer::new();
@@ -92,7 +94,7 @@ impl ImageBuilder {
         Ok(())
     }
 
-    async fn repack(&mut self, dir_out: &PathBuf) -> anyhow::Result<PathBuf> {
+    async fn repack(&mut self, dir_out: &Path) -> anyhow::Result<PathBuf> {
         let img_as_tar = self.finish_tar()?;
 
         let squashfs_image = "prekucki/squashfs-tools:latest";
@@ -143,7 +145,7 @@ impl ImageBuilder {
         Ok(dir_out.join(Path::new(path_out).file_name().unwrap()))
     }
 
-    fn add_file(&mut self, path: &str, data: &[u8]) -> anyhow::Result<()> {
+    fn add_file(&mut self, path: &Path, data: &[u8]) -> anyhow::Result<()> {
         let mut header = tar::Header::new_ustar();
         header.set_path(path)?;
         header.set_size(data.len() as u64);

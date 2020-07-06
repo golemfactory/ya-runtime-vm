@@ -2,6 +2,7 @@ mod docker;
 mod image_builder;
 mod rwbuf;
 use std::env;
+use std::path::Path;
 use structopt::StructOpt;
 
 use crate::image_builder::ImageBuilder;
@@ -32,7 +33,6 @@ async fn main() -> anyhow::Result<()> {
     env_logger::init();
 
     let cmdargs = CmdArgs::from_args();
-    let mut img = ImageBuilder::new().await?;
-    img.build(&cmdargs.image_name, &cmdargs.output).await?;
+    ImageBuilder::build_image(&cmdargs.image_name, Path::new(&cmdargs.output)).await?;
     Ok(())
 }
