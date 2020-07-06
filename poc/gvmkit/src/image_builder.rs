@@ -1,6 +1,7 @@
 use bollard::service::ContainerConfig;
 use bytes::Bytes;
 use crc::crc32;
+use log::{debug, info};
 use std::io::Write;
 use std::{
     fs,
@@ -26,7 +27,7 @@ impl ImageBuilder {
     }
 
     pub async fn build(&mut self, image_name: &str, output: &str) -> anyhow::Result<()> {
-        println!("Building image from '{}'...", image_name);
+        info!("Building image from '{}'", image_name);
 
         let cont_name = "gvmkit-tmp";
         self.docker
@@ -36,19 +37,16 @@ impl ImageBuilder {
         let (hash, cfg) = self.docker.get_config(cont_name).await?;
 
         let tar_bytes = self.docker.download(cont_name, "/").await?;
-        println!("Docker image size: {}", tar_bytes.len());
+        debug!("Docker image size: {}", tar_bytes.len());
 
         self.tar_from_bytes(&tar_bytes)?;
 
         self.docker.remove_container(cont_name).await?;
 
-        let mut work_dir_name = String::from("work-");
-        work_dir_name.push_str(&hash);
-        let mut work_dir = PathBuf::from(&work_dir_name);
+        let mut work_dir = PathBuf::from(&format!("work-{}", hash));
         fs::create_dir_all(&work_dir)?; // path must exist for canonicalize()
         work_dir = work_dir.canonicalize()?;
         let work_dir_out = work_dir.join("out");
-        dbg!(&work_dir_out);
         fs::create_dir_all(&work_dir_out)?;
 
         self.add_metadata_inside(&cfg)?;
@@ -56,12 +54,13 @@ impl ImageBuilder {
         self.add_metadata_outside(&squashfs_image_path, &cfg)?;
         fs::copy(&squashfs_image_path, output)?;
         fs::remove_dir_all(work_dir)?;
+        info!("Image built successfully: {}", output);
 
         Ok(())
     }
 
     fn add_meta_file(&mut self, path: &str, strings: &Option<Vec<String>>) -> anyhow::Result<()> {
-        dbg!(path, strings);
+        debug!("Adding metadata file '{}': {:?}", path, strings);
         match strings {
             Some(val) => self.add_file(path, val.join("\n").as_bytes())?,
             None => self.add_file(path, &[])?,
@@ -86,7 +85,7 @@ impl ImageBuilder {
         let mut file = fs::OpenOptions::new().append(true).open(image_path)?;
         let meta_size = json_buf.bytes.len();
         let crc = crc32::checksum_ieee(&json_buf.bytes);
-        println!("Image metadata checksum: 0x{:x}", crc);
+        info!("Image metadata checksum: 0x{:x}", crc);
         file.write(&crc.to_le_bytes())?;
         file.write(&json_buf.bytes)?;
         file.write(format!("{:08}", meta_size).as_bytes())?;
@@ -162,7 +161,10 @@ impl ImageBuilder {
         loop {
             if offset + 2 * 0x200 > bytes.len() {
                 // tar file is terminated by two zeroed chunks
-                println!("Break at offset 0x{:x}: EOF (incomplete file)", offset);
+                debug!(
+                    "reading tar: Break at offset 0x{:x}: EOF (incomplete file)",
+                    offset
+                );
                 break;
             }
 
@@ -173,7 +175,7 @@ impl ImageBuilder {
                 val
             }) == 0
             {
-                println!("Break at offset 0x{:x}: EOF", offset);
+                debug!("reading tar: Break at offset 0x{:x}: EOF", offset);
                 break;
             }
 
@@ -197,7 +199,7 @@ impl ImageBuilder {
 
     fn finish_tar(&mut self) -> anyhow::Result<RWBuffer> {
         let buf = self.tar.take().unwrap().into_inner()?;
-        println!("Bytes in tar archive: {}", buf.bytes.len());
+        debug!("Bytes in tar archive: {}", buf.bytes.len());
         Ok(buf)
     }
 }
