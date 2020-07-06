@@ -273,7 +273,8 @@ static bool redirect_fd_to_path(int fd, const char* path) {
 
 static noreturn void child_wrapper(int parent_pipe[2], char* bin, char** argv,
                                    char** envp, uid_t uid, gid_t gid,
-                                   struct redir_fd_desc fd_descs[3]) {
+                                   struct redir_fd_desc fd_descs[3],
+                                   char* cwd) {
     if (!envp) {
         envp = environ;
     }
@@ -288,6 +289,12 @@ static noreturn void child_wrapper(int parent_pipe[2], char* bin, char** argv,
     }
     if (sigprocmask(SIG_SETMASK, &set, NULL) < 0) {
         goto out;
+    }
+
+    if (cwd) {
+        if (chdir(cwd) < 0) {
+            goto out;
+        }
     }
 
     for (int fd = 0; fd < 3; ++fd) {
@@ -362,6 +369,7 @@ static char* construct_output_path(uint64_t id, unsigned int fd) {
 static uint32_t spawn_new_process(char* bin, char** argv, char** envp,
                                   uid_t uid, gid_t gid,
                                   struct redir_fd_desc fd_descs[3],
+                                  char* cwd,
                                   uint64_t* id) {
     uint32_t ret = 0;
 
@@ -427,7 +435,7 @@ static uint32_t spawn_new_process(char* bin, char** argv, char** envp,
         ret = errno;
         goto out;
     } else if (p == 0) {
-        child_wrapper(status_pipe, bin, argv, envp, uid, gid, proc_desc->redirs);
+        child_wrapper(status_pipe, bin, argv, envp, uid, gid, proc_desc->redirs, cwd);
     }
 
     CHECK(close(status_pipe[1]));
@@ -540,6 +548,7 @@ static void handle_run_process(msg_id_t msg_id) {
         DEFAULT_FD_DESC,
         DEFAULT_FD_DESC,
     };
+    char* cwd = NULL;
     uint64_t proc_id = 0;
 
     while (!done) {
@@ -552,8 +561,7 @@ static void handle_run_process(msg_id_t msg_id) {
                 done = true;
                 break;
             case SUB_MSG_RUN_PROCESS_BIN:
-                CHECK(recv_bytes(g_cmds_fd, &bin, NULL,
-                                 /*is_cstring=*/true));
+                CHECK(recv_bytes(g_cmds_fd, &bin, NULL, /*is_cstring=*/true));
                 break;
             case SUB_MSG_RUN_PROCESS_ARG:
                 CHECK(recv_strings_array(g_cmds_fd, &argv));
@@ -576,6 +584,9 @@ static void handle_run_process(msg_id_t msg_id) {
                     ret = tmp_ret;
                 }
                 break;
+            case SUB_MSG_RUN_PROCESS_CWD:
+                CHECK(recv_bytes(g_cmds_fd, &cwd, NULL, /*is_cstring=*/true));
+                break;
             default:
                 fprintf(stderr, "Unknown MSG_RUN_PROCESS subtype: %hhu\n",
                         subtype);
@@ -595,9 +606,10 @@ static void handle_run_process(msg_id_t msg_id) {
         goto out;
     }
 
-    ret = spawn_new_process(bin, argv, envp, uid, gid, fd_descs, &proc_id);
+    ret = spawn_new_process(bin, argv, envp, uid, gid, fd_descs, cwd, &proc_id);
 
 out:
+    free(cwd);
     for (size_t i = 0; i < 3; ++i) {
         cleanup_fd_desc(&fd_descs[i]);
     }

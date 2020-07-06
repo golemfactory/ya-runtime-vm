@@ -70,6 +70,7 @@ enum SUB_MSG_QUIT_TYPE {
     SUB_MSG_QUIT_END = 0,
 };
 
+/* All options except binary path and argv are optional. */
 enum SUB_MSG_RUN_PROCESS_TYPE {
     /* End of sub-messages. */
     SUB_MSG_RUN_PROCESS_END = 0,
@@ -86,6 +87,8 @@ enum SUB_MSG_RUN_PROCESS_TYPE {
     /* Redirect a fd to the given path. (u32 + REDIRECT_FD_TYPE (1-byte)
      * + type sepcific data). */
     SUB_MSG_RUN_PROCESS_RFD,
+    /* Path to set as current working directory. (BYTES) */
+    SUB_MSG_RUN_PROCESS_CWD,
 };
 
 enum SUB_MSG_KILL_PROCESS_TYPE {
