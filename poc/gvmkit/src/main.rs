@@ -20,16 +20,15 @@ struct CmdArgs {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    match env::var(env_logger::DEFAULT_FILTER_ENV) {
-        Err(_) => env::set_var(
-            env_logger::DEFAULT_FILTER_ENV,
-            format!("{},{}", INTERNAL_LOG_LEVEL, DEFAULT_LOG_LEVEL),
-        ),
-        Ok(var) => env::set_var(
-            env_logger::DEFAULT_FILTER_ENV,
-            format!("{},{}", var, INTERNAL_LOG_LEVEL),
-        ),
-    };
+    let mut log_level = String::from(DEFAULT_LOG_LEVEL);
+    if let Ok(level) = env::var(env_logger::DEFAULT_FILTER_ENV) {
+        log_level = level;
+    }
+
+    env::set_var(
+        env_logger::DEFAULT_FILTER_ENV,
+        format!("{},{}", INTERNAL_LOG_LEVEL, log_level),
+    );
     env_logger::init();
 
     let cmdargs = CmdArgs::from_args();
