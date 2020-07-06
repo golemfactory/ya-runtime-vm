@@ -47,25 +47,47 @@ fn main() -> io::Result<()> {
     ];
 
     let id = ga
-        .run_process("/bin/ls", &["ls", "-al", "/"], None, 0, 0, &no_redir)?
+        .run_process("/bin/ls", &["ls", "-al", "/"], None, 0, 0, &no_redir, None)?
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
     handle_notification(ga.get_one_notification()?);
 
     let id = ga
-        .run_process("/bin/echo", &["echo", "TEST TEST TEST"], None, 0, 0, &fds)?
+        .run_process(
+            "/bin/ls",
+            &["ls", "-al", "."],
+            None,
+            0,
+            0,
+            &no_redir,
+            Some("/etc"),
+        )?
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
     handle_notification(ga.get_one_notification()?);
 
     let id = ga
-        .run_process("/bin/ls", &["ls", "-al", "/"], None, 0, 0, &no_redir)?
+        .run_process(
+            "/bin/echo",
+            &["echo", "TEST TEST TEST"],
+            None,
+            0,
+            0,
+            &fds,
+            None,
+        )?
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
     handle_notification(ga.get_one_notification()?);
 
     let id = ga
-        .run_process("/bin/cat", &["cat", "/a"], None, 0, 0, &no_redir)?
+        .run_process("/bin/ls", &["ls", "-al", "/"], None, 0, 0, &no_redir, None)?
+        .expect("Run process failed");
+    println!("Spawned process with id: {}", id);
+    handle_notification(ga.get_one_notification()?);
+
+    let id = ga
+        .run_process("/bin/cat", &["cat", "/a"], None, 0, 0, &no_redir, None)?
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
     handle_notification(ga.get_one_notification()?);

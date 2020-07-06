@@ -24,6 +24,7 @@ enum SubMsgRunProcessType<'a> {
     SubMsgRunProcessUid(u32),
     SubMsgRunProcessGid(u32),
     SubMsgRunProcessRfd(u32, &'a RedirectFdType<'a>),
+    SubMsgRunProcessCwd(&'a [u8]),
 }
 
 pub enum RedirectFdType<'a> {
@@ -132,6 +133,10 @@ impl EncodeInto for SubMsgRunProcessType<'_> {
                 6u8.encode_into(buf);
                 fd.encode_into(buf);
                 redir_fd.encode_into(buf);
+            }
+            SubMsgRunProcessType::SubMsgRunProcessCwd(path) => {
+                7u8.encode_into(buf);
+                path.encode_into(buf);
             }
         }
     }
@@ -292,6 +297,7 @@ where
         uid: u32,
         gid: u32,
         fds: &[Option<RedirectFdType>; 3],
+        maybe_cwd: Option<&str>,
     ) -> io::Result<RemoteCommandResult<u64>> {
         let mut msg = Message::default();
         let msg_id = self.get_new_msg_id();
@@ -320,6 +326,10 @@ where
             .for_each(|(i, fdr)| {
                 msg.append_submsg(&SubMsgRunProcessType::SubMsgRunProcessRfd(i as u32, fdr))
             });
+
+        if let Some(cwd) = maybe_cwd {
+            msg.append_submsg(&SubMsgRunProcessType::SubMsgRunProcessCwd(cwd.as_bytes()));
+        }
 
         msg.append_submsg(&SubMsgRunProcessType::SubMsgEnd);
 
