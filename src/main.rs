@@ -47,7 +47,7 @@ fn main() -> io::Result<()> {
     println!("Spawned process with id: {}", id);
     handle_notification(ga.get_one_notification()?);
     let out = ga
-        .query_output(id, 0, 0x1000)?
+        .query_output(id, 0, u64::MAX)?
         .expect("Output query failed");
     println!("Output:");
     io::stdout().write_all(&out)?;
@@ -69,7 +69,7 @@ fn main() -> io::Result<()> {
     println!("Spawned process with id: {}", id);
     handle_notification(ga.get_one_notification()?);
     let out = ga
-        .query_output(id, 0, 0x1000)?
+        .query_output(id, 0, u64::MAX)?
         .expect("Output query failed");
     println!("Output:");
     io::stdout().write_all(&out)?;
@@ -80,7 +80,7 @@ fn main() -> io::Result<()> {
     println!("Spawned process with id: {}", id);
     handle_notification(ga.get_one_notification()?);
     let out = ga
-        .query_output(id, 0, 0x1000)?
+        .query_output(id, 0, u64::MAX)?
         .expect("Output query failed");
     println!("Output:");
     io::stdout().write_all(&out)?;

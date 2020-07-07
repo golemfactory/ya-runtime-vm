@@ -70,6 +70,7 @@ static void cleanup_fd_desc(struct redir_fd_desc* fd_desc) {
             break;
         case REDIRECT_FD_PIPE_BLOCKING:
         case REDIRECT_FD_PIPE_CYCLIC:
+            // TODO
             break;
         default:
             break;
@@ -298,6 +299,7 @@ static noreturn void child_wrapper(int parent_pipe[2], char* bin, char** argv,
                 break;
             case REDIRECT_FD_PIPE_BLOCKING:
             case REDIRECT_FD_PIPE_CYCLIC:
+                // TODO
                 fprintf(stderr,
                         "Redir type %d not yet supported, ignoring (fd: %d)\n",
                         fd_descs[fd].type, fd);
@@ -410,6 +412,10 @@ static uint32_t spawn_new_process(char* bin, char** argv, char** envp,
                         goto out;
                     }
                 }
+                break;
+            case REDIRECT_FD_PIPE_BLOCKING:
+            case REDIRECT_FD_PIPE_CYCLIC:
+                // TODO
                 break;
             default:
                 break;
