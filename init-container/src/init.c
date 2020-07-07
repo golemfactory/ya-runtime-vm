@@ -32,10 +32,22 @@
 
 #define OUTPUT_PATH_PREFIX "/var/tmp/guest_agent_private/fds"
 
+struct new_process_args {
+    char* bin;
+    char** argv;
+    char** envp;
+    uint32_t uid;
+    uint32_t gid;
+    char* cwd;
+    bool is_entrypoint;
+};
+
 extern char** environ;
 
 static int g_cmds_fd = -1;
 static int g_sig_fd = -1;
+
+static struct process_desc* g_entrypoint_desc = NULL;
 
 static noreturn void die(void) {
     sync();
@@ -164,6 +176,12 @@ static void handle_sigchld(void) {
 
     send_process_died(proc_desc->id, encode_status(siginfo.ssi_status,
                       siginfo.ssi_code));
+
+    if (proc_desc == g_entrypoint_desc) {
+        fprintf(stderr, "Entrypoint exited\n");
+        CHECK(kill(-1, SIGKILL));
+        die();
+    }
 }
 
 static void setup_sigfd(void) {
@@ -277,14 +295,9 @@ static bool redirect_fd_to_path(int fd, const char* path) {
     return true;
 }
 
-static noreturn void child_wrapper(int parent_pipe[2], char* bin, char** argv,
-                                   char** envp, uid_t uid, gid_t gid,
-                                   struct redir_fd_desc fd_descs[3],
-                                   char* cwd) {
-    if (!envp) {
-        envp = environ;
-    }
-
+static noreturn void child_wrapper(int parent_pipe[2],
+                                   struct new_process_args* new_proc_args,
+                                   struct redir_fd_desc fd_descs[3]) {
     if (close(parent_pipe[0]) < 0) {
         goto out;
     }
@@ -297,8 +310,8 @@ static noreturn void child_wrapper(int parent_pipe[2], char* bin, char** argv,
         goto out;
     }
 
-    if (cwd) {
-        if (chdir(cwd) < 0) {
+    if (new_proc_args->cwd) {
+        if (chdir(new_proc_args->cwd) < 0) {
             goto out;
         }
     }
@@ -324,16 +337,20 @@ static noreturn void child_wrapper(int parent_pipe[2], char* bin, char** argv,
         }
     }
 
+    gid_t gid = new_proc_args->gid;
     if (setresgid(gid, gid, gid) < 0) {
         goto out;
     }
 
+    uid_t uid = new_proc_args->uid;
     if (setresuid(uid, uid, uid) < 0) {
         goto out;
     }
 
     /* If execve returns we know an error happened. */
-    (void)execve(bin, argv, envp);
+    (void)execve(new_proc_args->bin,
+                 new_proc_args->argv,
+                 new_proc_args->envp ?: environ);
 
 out: ;
     int ecode = errno;
@@ -372,12 +389,14 @@ static char* construct_output_path(uint64_t id, unsigned int fd) {
     return path;
 }
 
-static uint32_t spawn_new_process(char* bin, char** argv, char** envp,
-                                  uid_t uid, gid_t gid,
+static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
                                   struct redir_fd_desc fd_descs[3],
-                                  char* cwd,
                                   uint64_t* id) {
     uint32_t ret = 0;
+
+    if (new_proc_args->is_entrypoint && g_entrypoint_desc) {
+        return EEXIST;
+    }
 
     struct process_desc* proc_desc = calloc(1, sizeof(*proc_desc));
     if (!proc_desc) {
@@ -441,7 +460,7 @@ static uint32_t spawn_new_process(char* bin, char** argv, char** envp,
         ret = errno;
         goto out;
     } else if (p == 0) {
-        child_wrapper(status_pipe, bin, argv, envp, uid, gid, proc_desc->redirs, cwd);
+        child_wrapper(status_pipe, new_proc_args, proc_desc->redirs);
     }
 
     CHECK(close(status_pipe[1]));
@@ -475,6 +494,9 @@ static uint32_t spawn_new_process(char* bin, char** argv, char** envp,
     *id = proc_desc->id;
 
     add_process(proc_desc);
+    if (new_proc_args->is_entrypoint) {
+        g_entrypoint_desc = proc_desc;
+    }
     proc_desc = NULL;
 
 out:
@@ -544,17 +566,20 @@ static uint32_t parse_fd_redir(struct redir_fd_desc fd_descs[3]) {
 static void handle_run_process(msg_id_t msg_id) {
     bool done = false;
     uint32_t ret = 0;
-    char* bin = NULL;
-    char** argv = NULL;
-    char** envp = NULL;
-    uint32_t uid = DEFAULT_UID;
-    uint32_t gid = DEFAULT_GID;
+    struct new_process_args new_proc_args = {
+        .bin = NULL,
+        .argv = NULL,
+        .envp = NULL,
+        .uid = DEFAULT_UID,
+        .gid = DEFAULT_GID,
+        .cwd = NULL,
+        .is_entrypoint = false,
+    };
     struct redir_fd_desc fd_descs[3] = {
         DEFAULT_FD_DESC,
         DEFAULT_FD_DESC,
         DEFAULT_FD_DESC,
     };
-    char* cwd = NULL;
     uint64_t proc_id = 0;
 
     while (!done) {
@@ -567,19 +592,20 @@ static void handle_run_process(msg_id_t msg_id) {
                 done = true;
                 break;
             case SUB_MSG_RUN_PROCESS_BIN:
-                CHECK(recv_bytes(g_cmds_fd, &bin, NULL, /*is_cstring=*/true));
+                CHECK(recv_bytes(g_cmds_fd, &new_proc_args.bin, NULL,
+                                 /*is_cstring=*/true));
                 break;
             case SUB_MSG_RUN_PROCESS_ARG:
-                CHECK(recv_strings_array(g_cmds_fd, &argv));
+                CHECK(recv_strings_array(g_cmds_fd, &new_proc_args.argv));
                 break;
             case SUB_MSG_RUN_PROCESS_ENV:
-                CHECK(recv_strings_array(g_cmds_fd, &envp));
+                CHECK(recv_strings_array(g_cmds_fd, &new_proc_args.envp));
                 break;
             case SUB_MSG_RUN_PROCESS_UID:
-                CHECK(recv_u32(g_cmds_fd, &uid));
+                CHECK(recv_u32(g_cmds_fd, &new_proc_args.uid));
                 break;
             case SUB_MSG_RUN_PROCESS_GID:
-                CHECK(recv_u32(g_cmds_fd, &gid));
+                CHECK(recv_u32(g_cmds_fd, &new_proc_args.gid));
                 break;
             case SUB_MSG_RUN_PROCESS_RFD: ;
                 /* This error is recoverable - we report the first one found. We
@@ -591,7 +617,10 @@ static void handle_run_process(msg_id_t msg_id) {
                 }
                 break;
             case SUB_MSG_RUN_PROCESS_CWD:
-                CHECK(recv_bytes(g_cmds_fd, &cwd, NULL, /*is_cstring=*/true));
+                CHECK(recv_bytes(g_cmds_fd, &new_proc_args.cwd, NULL, /*is_cstring=*/true));
+                break;
+            case SUB_MSG_RUN_PROCESS_ENT:
+                new_proc_args.is_entrypoint = true;
                 break;
             default:
                 fprintf(stderr, "Unknown MSG_RUN_PROCESS subtype: %hhu\n",
@@ -603,25 +632,25 @@ static void handle_run_process(msg_id_t msg_id) {
     if (ret) {
         goto out;
     }
-    if (!bin) {
+    if (!new_proc_args.bin) {
         ret = EFAULT;
         goto out;
     }
-    if (!argv) {
+    if (!new_proc_args.argv) {
         ret = EFAULT;
         goto out;
     }
 
-    ret = spawn_new_process(bin, argv, envp, uid, gid, fd_descs, cwd, &proc_id);
+    ret = spawn_new_process(&new_proc_args, fd_descs, &proc_id);
 
 out:
-    free(cwd);
+    free(new_proc_args.cwd);
     for (size_t i = 0; i < 3; ++i) {
         cleanup_fd_desc(&fd_descs[i]);
     }
-    free_strings_array(envp);
-    free_strings_array(argv);
-    free(bin);
+    free_strings_array(new_proc_args.envp);
+    free_strings_array(new_proc_args.argv);
+    free(new_proc_args.bin);
     if (ret) {
         send_response_err(msg_id, ret);
     } else {

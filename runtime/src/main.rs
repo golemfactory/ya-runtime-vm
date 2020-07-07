@@ -17,6 +17,24 @@ fn handle_notification(notification: Notification) {
     }
 }
 
+fn run_process_with_output<F>(ga: &mut GuestAgent<F>, bin: &str, argv: &[&str]) -> io::Result<()>
+where
+    F: FnMut(Notification) -> (),
+{
+    let id = ga
+        .run_process(bin, argv, None, 0, 0, &[None, None, None], None)?
+        .expect("Run process failed");
+    println!("Spawned process with id: {}", id);
+    /* Wait for process to exit. */
+    handle_notification(ga.get_one_notification()?);
+    let out = ga
+        .query_output(id, 0, u64::MAX)?
+        .expect("Output query failed");
+    println!("Output:");
+    io::stdout().write_all(&out)?;
+    Ok(())
+}
+
 fn main() -> io::Result<()> {
     let mut child = Command::new("qemu-system-x86_64")
         .args(&[
@@ -42,22 +60,6 @@ fn main() -> io::Result<()> {
     let no_redir = [None, None, None];
 
     let id = ga
-        .run_process("/bin/ls", &["ls", "-al", "/"], None, 0, 0, &no_redir, None)?
-        .expect("Run process failed");
-    println!("Spawned process with id: {}", id);
-    handle_notification(ga.get_one_notification()?);
-    let out = ga
-        .query_output(id, 0, u64::MAX)?
-        .expect("Output query failed");
-    println!("Output:");
-    io::stdout().write_all(&out)?;
-
-    let fds = [
-        None,
-        Some(RedirectFdType::RedirectFdFile("/a".as_bytes())),
-        None,
-    ];
-    let id = ga
         .run_process(
             "/bin/ls",
             &["ls", "-al", "."],
@@ -70,7 +72,19 @@ fn main() -> io::Result<()> {
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
     handle_notification(ga.get_one_notification()?);
+    let out = ga
+        .query_output(id, 0, u64::MAX)?
+        .expect("Output query failed");
+    println!("Output:");
+    io::stdout().write_all(&out)?;
 
+    run_process_with_output(&mut ga, "/bin/ls", &["ls", "-al", "/"])?;
+
+    let fds = [
+        None,
+        Some(RedirectFdType::RedirectFdFile("/a".as_bytes())),
+        None,
+    ];
     let id = ga
         .run_process(
             "/bin/echo",
@@ -90,22 +104,9 @@ fn main() -> io::Result<()> {
     println!("Output:");
     io::stdout().write_all(&out)?;
 
-    let id = ga
-        .run_process("/bin/ls", &["ls", "-al", "/"], None, 0, 0, &no_redir, None)?
-        .expect("Run process failed");
-    println!("Spawned process with id: {}", id);
-    handle_notification(ga.get_one_notification()?);
+    run_process_with_output(&mut ga, "/bin/ls", &["ls", "-al", "/"])?;
 
-    let id = ga
-        .run_process("/bin/cat", &["cat", "/a"], None, 0, 0, &no_redir, None)?
-        .expect("Run process failed");
-    println!("Spawned process with id: {}", id);
-    handle_notification(ga.get_one_notification()?);
-    let out = ga
-        .query_output(id, 0, u64::MAX)?
-        .expect("Output query failed");
-    println!("Output:");
-    io::stdout().write_all(&out)?;
+    run_process_with_output(&mut ga, "/bin/cat", &["cat", "/a"])?;
 
     let id = ga
         .run_process("/bin/sleep", &["sleep", "10"], None, 0, 0, &no_redir, None)?
@@ -115,8 +116,16 @@ fn main() -> io::Result<()> {
     ga.kill(id)?.expect("Kill failed");
     handle_notification(ga.get_one_notification()?);
 
-    ga.quit()?.expect("Quit failed");
+    // ga.quit()?.expect("Quit failed");
 
+    let id = ga
+        .run_entrypoint("/bin/sleep", &["sleep", "2"], None, 0, 0, &no_redir, None)?
+        .expect("Run process failed");
+    println!("Spawned process with id: {}", id);
+    /* Wait for entrypoint dying. */
+    handle_notification(ga.get_one_notification()?);
+
+    /* VM should quit now. */
     let e = child.wait().expect("failed to wait on child");
     println!("{:?}", e);
 

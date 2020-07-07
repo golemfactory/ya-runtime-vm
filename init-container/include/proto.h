@@ -89,6 +89,8 @@ enum SUB_MSG_RUN_PROCESS_TYPE {
     SUB_MSG_RUN_PROCESS_RFD,
     /* Path to set as current working directory. (BYTES) */
     SUB_MSG_RUN_PROCESS_CWD,
+    /* This process is an entrypoint. (No body) */
+    SUB_MSG_RUN_PROCESS_ENT,
 };
 
 enum SUB_MSG_KILL_PROCESS_TYPE {

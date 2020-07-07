@@ -29,6 +29,7 @@ enum SubMsgRunProcessType<'a> {
     SubMsgRunProcessGid(u32),
     SubMsgRunProcessRfd(u32, &'a RedirectFdType<'a>),
     SubMsgRunProcessCwd(&'a [u8]),
+    SubMsgRunProcessEnt,
 }
 
 enum SubMsgKillProcessType {
@@ -161,6 +162,9 @@ impl EncodeInto for SubMsgRunProcessType<'_> {
             SubMsgRunProcessType::SubMsgRunProcessCwd(path) => {
                 7u8.encode_into(buf);
                 path.encode_into(buf);
+            }
+            SubMsgRunProcessType::SubMsgRunProcessEnt => {
+                8u8.encode_into(buf);
             }
         }
     }
@@ -374,7 +378,7 @@ where
         self.get_ok_response(msg_id)
     }
 
-    pub fn run_process(
+    fn spawn_new_process(
         &mut self,
         bin: &str,
         argv: &[&str],
@@ -383,6 +387,7 @@ where
         gid: u32,
         fds: &[Option<RedirectFdType>; 3],
         maybe_cwd: Option<&str>,
+        is_entrypoint: bool,
     ) -> io::Result<RemoteCommandResult<u64>> {
         let mut msg = Message::default();
         let msg_id = self.get_new_msg_id();
@@ -416,11 +421,45 @@ where
             msg.append_submsg(&SubMsgRunProcessType::SubMsgRunProcessCwd(cwd.as_bytes()));
         }
 
+        if is_entrypoint {
+            msg.append_submsg(&SubMsgRunProcessType::SubMsgRunProcessEnt);
+        }
+
         msg.append_submsg(&SubMsgRunProcessType::SubMsgEnd);
 
         self.stream.write_all(msg.as_ref())?;
 
         self.get_u64_response(msg_id)
+    }
+
+    pub fn run_process(
+        &mut self,
+        bin: &str,
+        argv: &[&str],
+        maybe_env: Option<&[&str]>,
+        uid: u32,
+        gid: u32,
+        fds: &[Option<RedirectFdType>; 3],
+        maybe_cwd: Option<&str>,
+    ) -> io::Result<RemoteCommandResult<u64>> {
+        self.spawn_new_process(
+            bin, argv, maybe_env, uid, gid, fds, maybe_cwd, /*is_entrypoint=*/ false,
+        )
+    }
+
+    pub fn run_entrypoint(
+        &mut self,
+        bin: &str,
+        argv: &[&str],
+        maybe_env: Option<&[&str]>,
+        uid: u32,
+        gid: u32,
+        fds: &[Option<RedirectFdType>; 3],
+        maybe_cwd: Option<&str>,
+    ) -> io::Result<RemoteCommandResult<u64>> {
+        self.spawn_new_process(
+            bin, argv, maybe_env, uid, gid, fds, maybe_cwd, /*is_entrypoint=*/ true,
+        )
     }
 
     pub fn kill(&mut self, id: u64) -> io::Result<RemoteCommandResult<()>> {
