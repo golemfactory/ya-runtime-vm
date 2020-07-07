@@ -1,11 +1,9 @@
 mod docker;
 mod image_builder;
 mod rwbuf;
-use std::env;
-use std::path::Path;
-use structopt::StructOpt;
 
-use crate::image_builder::ImageBuilder;
+use std::{env, path::Path};
+use structopt::StructOpt;
 
 const INTERNAL_LOG_LEVEL: &str = "hyper=warn,bollard=warn";
 const DEFAULT_LOG_LEVEL: &str = "info";
@@ -33,6 +31,6 @@ async fn main() -> anyhow::Result<()> {
     env_logger::init();
 
     let cmdargs = CmdArgs::from_args();
-    ImageBuilder::build_image(&cmdargs.image_name, Path::new(&cmdargs.output)).await?;
+    image_builder::build_image(&cmdargs.image_name, Path::new(&cmdargs.output)).await?;
     Ok(())
 }

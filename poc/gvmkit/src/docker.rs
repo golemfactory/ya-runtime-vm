@@ -1,6 +1,9 @@
 use anyhow::anyhow;
-use bollard::service::{ContainerConfig, HostConfig, Mount, MountTypeEnum};
-use bollard::{container, exec, image, Docker};
+use bollard::{
+    container, exec, image,
+    service::{ContainerConfig, HostConfig, Mount, MountTypeEnum},
+    Docker,
+};
 use bytes::{Bytes, BytesMut};
 use futures_util::stream::TryStreamExt;
 use log::{debug, info};
