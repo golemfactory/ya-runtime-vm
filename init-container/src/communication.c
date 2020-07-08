@@ -114,7 +114,7 @@ out:
     return ret;
 }
 
-int writen(int fd, void* buf, size_t size) {
+int writen(int fd, const void* buf, size_t size) {
     while (size) {
         ssize_t ret = write(fd, buf, size);
         if (ret == 0) {
@@ -135,7 +135,7 @@ int writen(int fd, void* buf, size_t size) {
     return 0;
 }
 
-int send_bytes(int fd, char* buf, uint64_t size) {
+int send_bytes(int fd, const char* buf, uint64_t size) {
     if (writen(fd, &size, sizeof(size)) < 0) {
         return -1;
     }

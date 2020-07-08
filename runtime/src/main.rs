@@ -2,7 +2,7 @@ mod guest_agent_comm;
 mod response_parser;
 
 use std::io::{self, prelude::*};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
 use crate::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
 
@@ -27,37 +27,59 @@ where
     println!("Spawned process with id: {}", id);
     /* Wait for process to exit. */
     handle_notification(ga.get_one_notification()?);
-    let out = ga
-        .query_output(id, 0, u64::MAX)?
-        .expect("Output query failed");
-    println!("Output:");
-    io::stdout().write_all(&out)?;
+    match ga.query_output(id, 0, u64::MAX)? {
+        Ok(out) => {
+            println!("Output:");
+            io::stdout().write_all(&out)?;
+        }
+        Err(code) => println!("Output query failed with: {}", code),
+    }
     Ok(())
 }
 
+fn spawn_vm<'a>(mount_args: &'a [(&'a str, &'a str)]) -> Child {
+    let mut cmd = Command::new("qemu-system-x86_64");
+    cmd.args(&[
+        "-m", "256m",
+        "-nographic",
+        "-vga", "none",
+        "-kernel", "init-container/vmlinuz-virt",
+        "-initrd", "init-container/initramfs.cpio.gz",
+        "-no-reboot",
+        "-net", "none",
+        "-smp", "1",
+        "-append", "console=ttyS0 panic=1",
+        "-device", "virtio-serial",
+        "-chardev", "socket,path=./manager.sock,server,nowait,id=manager_cdev",
+        "-device", "virtserialport,chardev=manager_cdev,name=manager_port",
+        "-drive", "file=./squashfs_drive,cache=none,readonly=on,format=raw,if=virtio",
+    ]);
+    for (tag, path) in mount_args.iter() {
+        cmd.args(&[
+            "-virtfs",
+            &format!(
+                "local,id={tag},path={path},security_model=none,mount_tag={tag}",
+                tag = tag,
+                path = path
+            ),
+        ]);
+    }
+    cmd.stdin(Stdio::null());
+    cmd.spawn().expect("failed to spawn VM")
+}
+
 fn main() -> io::Result<()> {
-    let mut child = Command::new("qemu-system-x86_64")
-        .args(&[
-            "-m", "256m",
-            "-nographic",
-            "-vga", "none",
-            "-kernel", "init-container/vmlinuz-virt",
-            "-initrd", "init-container/initramfs.cpio.gz",
-            "-no-reboot",
-            "-net", "none",
-            "-smp", "1",
-            "-append", "console=ttyS0 panic=1",
-            "-device", "virtio-serial",
-            "-chardev", "socket,path=./manager.sock,server,nowait,id=manager_cdev",
-            "-device", "virtserialport,chardev=manager_cdev,name=manager_port",
-            "-drive", "file=./squashfs_drive,cache=none,readonly=on,format=raw,if=virtio"])
-        .stdin(Stdio::null())
-        .spawn()
-        .expect("failed to spawn VM");
+    let mount_args = [("tag0", "init-container"), ("tag1", "runtime")];
+    let mut child = spawn_vm(&mount_args);
 
     let mut ga = GuestAgent::connected("./manager.sock", 10, handle_notification)?;
 
     let no_redir = [None, None, None];
+
+    for (i, (tag, dir)) in mount_args.iter().enumerate() {
+        ga.mount(tag, &format!("/mnt/mnt{}/{}", i, dir))?
+            .expect("Mount failed");
+    }
 
     let id = ga
         .run_process(
@@ -67,7 +89,7 @@ fn main() -> io::Result<()> {
             0,
             0,
             &no_redir,
-            Some("/etc"),
+            Some("/mnt"),
         )?
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
@@ -78,35 +100,26 @@ fn main() -> io::Result<()> {
     println!("Output:");
     io::stdout().write_all(&out)?;
 
-    run_process_with_output(&mut ga, "/bin/ls", &["ls", "-al", "/"])?;
+    run_process_with_output(&mut ga, "/bin/ls", &["ls", "-al", "/mnt/mnt1/runtime"])?;
 
     let fds = [
         None,
-        Some(RedirectFdType::RedirectFdFile("/a".as_bytes())),
+        Some(RedirectFdType::RedirectFdFile(
+            "/mnt/mnt1/runtime/write_test".as_bytes(),
+        )),
         None,
     ];
     let id = ga
-        .run_process(
-            "/bin/echo",
-            &["echo", "TEST TEST TEST"],
-            None,
-            0,
-            0,
-            &fds,
-            None,
-        )?
+        .run_process("/bin/echo", &["echo", "WRITE TEST"], None, 0, 0, &fds, None)?
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
     handle_notification(ga.get_one_notification()?);
-    let out = ga
-        .query_output(id, 0, u64::MAX)?
-        .expect("Output query failed");
-    println!("Output:");
-    io::stdout().write_all(&out)?;
 
-    run_process_with_output(&mut ga, "/bin/ls", &["ls", "-al", "/"])?;
-
-    run_process_with_output(&mut ga, "/bin/cat", &["cat", "/a"])?;
+    run_process_with_output(
+        &mut ga,
+        "/bin/cat",
+        &["cat", "/mnt/mnt1/runtime/write_test"],
+    )?;
 
     let id = ga
         .run_process("/bin/sleep", &["sleep", "10"], None, 0, 0, &no_redir, None)?

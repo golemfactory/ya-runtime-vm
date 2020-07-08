@@ -37,6 +37,12 @@ enum SubMsgKillProcessType {
     SubMsgKillProcessId(u64),
 }
 
+enum SubMsgMountVolumeType<'a> {
+    SubMsgEnd,
+    SubMsgMountVolumeTag(&'a [u8]),
+    SubMsgMountVolumePath(&'a [u8]),
+}
+
 enum SubMsgQueryOutputType {
     SubMsgEnd,
     SubMsgQueryOutputId(u64),
@@ -82,6 +88,10 @@ impl SubMsgTrait<SubMsgRunProcessType<'_>> for SubMsgRunProcessType<'_> {
 
 impl SubMsgTrait<SubMsgKillProcessType> for SubMsgKillProcessType {
     const TYPE: u8 = MsgType::MsgKillProcess as u8;
+}
+
+impl SubMsgTrait<SubMsgMountVolumeType<'_>> for SubMsgMountVolumeType<'_> {
+    const TYPE: u8 = MsgType::MsgMountVolume as u8;
 }
 
 impl SubMsgTrait<SubMsgQueryOutputType> for SubMsgQueryOutputType {
@@ -198,6 +208,24 @@ impl EncodeInto for SubMsgKillProcessType {
             SubMsgKillProcessType::SubMsgKillProcessId(id) => {
                 1u8.encode_into(buf);
                 id.encode_into(buf);
+            }
+        }
+    }
+}
+
+impl EncodeInto for SubMsgMountVolumeType<'_> {
+    fn encode_into(&self, buf: &mut Vec<u8>) {
+        match self {
+            SubMsgMountVolumeType::SubMsgEnd => {
+                0u8.encode_into(buf);
+            }
+            SubMsgMountVolumeType::SubMsgMountVolumeTag(tag) => {
+                1u8.encode_into(buf);
+                tag.encode_into(buf);
+            }
+            SubMsgMountVolumeType::SubMsgMountVolumePath(path) => {
+                2u8.encode_into(buf);
+                path.encode_into(buf);
             }
         }
     }
@@ -471,6 +499,25 @@ where
         msg.append_submsg(&SubMsgKillProcessType::SubMsgKillProcessId(id));
 
         msg.append_submsg(&SubMsgKillProcessType::SubMsgEnd);
+
+        self.stream.write_all(msg.as_ref())?;
+
+        self.get_ok_response(msg_id)
+    }
+
+    pub fn mount(&mut self, tag: &str, path: &str) -> io::Result<RemoteCommandResult<()>> {
+        let mut msg = Message::default();
+        let msg_id = self.get_new_msg_id();
+
+        msg.create_header(msg_id);
+
+        msg.append_submsg(&SubMsgMountVolumeType::SubMsgMountVolumeTag(tag.as_bytes()));
+
+        msg.append_submsg(&SubMsgMountVolumeType::SubMsgMountVolumePath(
+            path.as_bytes(),
+        ));
+
+        msg.append_submsg(&SubMsgMountVolumeType::SubMsgEnd);
 
         self.stream.write_all(msg.as_ref())?;
 

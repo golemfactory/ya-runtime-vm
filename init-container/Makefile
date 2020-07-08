@@ -47,6 +47,10 @@ initramfs.cpio.gz: init $(UNPACKED_DIR)
 	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/drivers/block/virtio_blk.ko initramfs
 	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/fs/squashfs/squashfs.ko initramfs
 	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/fs/overlayfs/overlay.ko initramfs
+	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/fs/fscache/fscache.ko initramfs
+	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/net/9p/9pnet.ko initramfs
+	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/net/9p/9pnet_virtio.ko initramfs
+	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/fs/9p/9p.ko initramfs
 	cd initramfs && find . | cpio --quiet -o -H newc -R 0:0 | gzip -9 > ../$@
 	$(RM) -rf initramfs
 

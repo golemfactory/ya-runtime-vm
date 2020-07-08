@@ -16,8 +16,8 @@ int recv_strings_array(int fd, char*** array_ptr);
 
 void free_strings_array(char** array);
 
-int writen(int fd, void* buf, size_t size);
+int writen(int fd, const void* buf, size_t size);
 
-int send_bytes(int fd, char* buf, uint64_t size);
+int send_bytes(int fd, const char* buf, uint64_t size);
 
 #endif // _COMMUNICATION_H

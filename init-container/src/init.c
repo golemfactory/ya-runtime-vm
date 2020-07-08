@@ -29,6 +29,7 @@
 #define DEFAULT_UID 0
 #define DEFAULT_GID 0
 #define DEFAULT_OUT_FILE_PERM S_IRWXU
+#define DEFAULT_DIR_PERMS (S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH)
 
 #define OUTPUT_PATH_PREFIX "/var/tmp/guest_agent_private/fds"
 
@@ -192,20 +193,7 @@ static void setup_sigfd(void) {
     g_sig_fd = CHECK(signalfd(g_sig_fd, &set, SFD_CLOEXEC));
 }
 
-static void create_dir(const char* path, mode_t mode) {
-    if (mkdir(path, mode) < 0 && errno != EEXIST) {
-        fprintf(stderr, "mkdir(%s) failed with: %m\n", path);
-        die();
-    }
-}
-
-static void setup_agent_directories(void) {
-    char* path = strdup(OUTPUT_PATH_PREFIX);
-    if (!path) {
-        fprintf(stderr, "setup_agent_directories OOM\n");
-        die();
-    }
-
+static int create_dir_path(char* path) {
     assert(path[0] == '/');
 
     char* next = path;
@@ -215,11 +203,27 @@ static void setup_agent_directories(void) {
             break;
         }
         *next = '\0';
-        create_dir(path, S_IRWXU);
+        int ret = mkdir(path, DEFAULT_DIR_PERMS);
         *next = '/';
+        if (ret < 0 && errno != EEXIST) {
+            return -1;
+        }
     }
 
-    create_dir(path, S_IRWXU);
+    if (mkdir(path, DEFAULT_DIR_PERMS) < 0 && errno != EEXIST) {
+        return -1;
+    }
+    return 0;
+}
+
+static void setup_agent_directories(void) {
+    char* path = strdup(OUTPUT_PATH_PREFIX);
+    if (!path) {
+        fprintf(stderr, "setup_agent_directories OOM\n");
+        die();
+    }
+
+    CHECK(create_dir_path(path));
 
     free(path);
 }
@@ -246,7 +250,7 @@ static void send_response_u64(msg_id_t msg_id, uint64_t ret_val) {
     CHECK(writen(g_cmds_fd, &ret_val, sizeof(ret_val)));
 }
 
-static void send_response_bytes(msg_id_t msg_id, char* buf, size_t len) {
+static void send_response_bytes(msg_id_t msg_id, const char* buf, size_t len) {
     send_response_hdr(msg_id, RESP_OK_BYTES);
     CHECK(send_bytes(g_cmds_fd, buf, len));
 }
@@ -714,6 +718,61 @@ out:
     }
 }
 
+static uint32_t do_mount(const char* tag, char* path) {
+    if (create_dir_path(path) < 0) {
+        return errno;
+    }
+    if (mount(tag, path, "9p", 0, "trans=virtio,version=9p2000.L") < 0) {
+        return errno;
+    }
+    return 0;
+}
+
+static void handle_mount(msg_id_t msg_id) {
+    bool done = false;
+    uint32_t ret = 0;
+    char* tag = NULL;
+    char* path = NULL;
+
+    while (!done) {
+        uint8_t subtype = 0;
+
+        CHECK(recv_u8(g_cmds_fd, &subtype));
+
+        switch (subtype) {
+            case SUB_MSG_MOUNT_VOLUME_END:
+                done = true;
+                break;
+            case SUB_MSG_MOUNT_VOLUME_TAG:
+                CHECK(recv_bytes(g_cmds_fd, &tag, NULL, /*is_cstring=*/true));
+                break;
+            case SUB_MSG_MOUNT_VOLUME_PATH:
+                CHECK(recv_bytes(g_cmds_fd, &path, NULL, /*is_cstring=*/true));
+                break;
+            default:
+                fprintf(stderr, "Unknown MSG_MOUNT_VOLUME subtype: %hhu\n",
+                        subtype);
+                die();
+        }
+    }
+
+    if (!tag || !path) {
+        ret = EINVAL;
+        goto out;
+    }
+
+    ret = do_mount(tag, path);
+
+out:
+    free(path);
+    free(tag);
+    if (ret) {
+        send_response_err(msg_id, ret);
+    } else {
+        send_response_ok(msg_id);
+    }
+}
+
 static uint32_t do_query_output(uint64_t id, uint64_t off, char** buf_ptr,
                                 uint64_t* len_ptr) {
     uint32_t ret = 0;
@@ -849,11 +908,14 @@ static void handle_message(void) {
             fprintf(stderr, "MSG_KILL_PROCESS\n");
             handle_kill_process(msg_hdr.msg_id);
             break;
+        case MSG_MOUNT_VOLUME:
+            fprintf(stderr, "MSG_MOUNT_VOLUME\n");
+            handle_mount(msg_hdr.msg_id);
+            break;
         case MSG_QUERY_OUTPUT:
             fprintf(stderr, "MSG_QUERY_OUTPUT\n");
             handle_query_output(msg_hdr.msg_id);
             break;
-        case MSG_MOUNT_VOLUME:
         case MSG_UPLOAD_FILE:
         case MSG_PUT_INPUT:
         case MSG_SYNC_FS:
@@ -906,7 +968,11 @@ int main(void) {
     setbuf(stdout, NULL);
     setbuf(stderr, NULL);
 
-    create_dir("/dev", S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH);
+    if (mkdir("/dev", DEFAULT_DIR_PERMS) < 0
+            && errno != EEXIST) {
+        fprintf(stderr, "mkdir(/dev) failed with: %m\n");
+        die();
+    }
 
     CHECK(mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID,
                 "mode=0755,size=2M"));
@@ -918,6 +984,10 @@ int main(void) {
     load_module("/virtio_blk.ko");
     load_module("/squashfs.ko");
     load_module("/overlay.ko");
+    load_module("/fscache.ko");
+    load_module("/9pnet.ko");
+    load_module("/9pnet_virtio.ko");
+    load_module("/9p.ko");
 
     g_cmds_fd = CHECK(open("/dev/vport0p1", O_RDWR | O_CLOEXEC));
 
@@ -925,8 +995,7 @@ int main(void) {
     CHECK(mkdir("/mnt/ro", S_IRWXU));
     CHECK(mkdir("/mnt/rw", S_IRWXU));
     CHECK(mkdir("/mnt/work", S_IRWXU));
-    CHECK(mkdir("/mnt/newroot",
-                S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH));
+    CHECK(mkdir("/mnt/newroot", DEFAULT_DIR_PERMS));
 
     CHECK(mount("/dev/vda", "/mnt/ro", "squashfs", MS_RDONLY, ""));
 

@@ -103,8 +103,8 @@ enum SUB_MSG_KILL_PROCESS_TYPE {
 enum SUB_MSG_MOUNT_VOLUME_TYPE {
     /* End of sub-messages. */
     SUB_MSG_MOUNT_VOLUME_END = 0,
-    /* Path of device to be mounted. (BYTES) */
-    SUB_MSG_MOUNT_VOLUME_DEV,
+    /* Mount tag. (BYTES) */
+    SUB_MSG_MOUNT_VOLUME_TAG,
     /* Path to mount at. (BYTES) */
     SUB_MSG_MOUNT_VOLUME_PATH,
 };
