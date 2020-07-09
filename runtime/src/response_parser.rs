@@ -44,8 +44,14 @@ pub enum Notification {
     ProcessDied { id: u64, reason: ExitReason },
 }
 
+#[derive(Debug)]
+pub struct ResponseWithId {
+    pub id: u64,
+    pub resp: Response,
+}
+
 pub enum GuestAgentMessage {
-    Response { id: u64, resp: Response },
+    Response(ResponseWithId),
     Notification(Notification),
 }
 
@@ -81,30 +87,30 @@ pub async fn parse_one_response<T: AsyncRead + Unpin>(
 
     let typ = recv_u8(stream).await?;
     match typ {
-        0 => Ok(GuestAgentMessage::Response {
+        0 => Ok(GuestAgentMessage::Response(ResponseWithId {
             id: id,
             resp: Response::Ok,
-        }),
+        })),
         1 => {
             let val = recv_u64(stream).await?;
-            Ok(GuestAgentMessage::Response {
+            Ok(GuestAgentMessage::Response(ResponseWithId {
                 id: id,
                 resp: Response::OkU64(val),
-            })
+            }))
         }
         2 => {
             let buf = recv_bytes(stream).await?;
-            Ok(GuestAgentMessage::Response {
+            Ok(GuestAgentMessage::Response(ResponseWithId {
                 id: id,
                 resp: Response::OkBytes(buf),
-            })
+            }))
         }
         3 => {
             let code = recv_u32(stream).await?;
-            Ok(GuestAgentMessage::Response {
+            Ok(GuestAgentMessage::Response(ResponseWithId {
                 id: id,
                 resp: Response::Err(code),
-            })
+            }))
         }
         4 => {
             if id == 0 {

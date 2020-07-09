@@ -8,7 +8,7 @@ use tokio::{
 };
 
 pub use crate::response_parser::Notification;
-use crate::response_parser::{parse_one_response, GuestAgentMessage, Response};
+use crate::response_parser::{parse_one_response, GuestAgentMessage, Response, ResponseWithId};
 
 #[repr(u8)]
 enum MsgType {
@@ -61,7 +61,7 @@ struct Message<T> {
 pub struct GuestAgent {
     stream: WriteHalf<UnixStream>,
     last_msg_id: u64,
-    responses: mpsc::Receiver<(/*msg_id*/ u64, Response)>,
+    responses: mpsc::Receiver<ResponseWithId>,
 }
 
 trait EncodeInto {
@@ -256,8 +256,7 @@ type RemoteCommandResult<T> = Result<T, /* exit code */ u32>;
 async fn reader<F>(
     mut stream: ReadHalf<UnixStream>,
     mut notification_handler: F,
-    // TODO: instead of replicating GuestAgentMessage::Response as tuple, make it a proper type
-    mut responses: mpsc::Sender<(/*msg_id*/ u64, Response)>,
+    mut responses: mpsc::Sender<ResponseWithId>,
 ) where
     F: FnMut(Notification) -> () + Send + 'static,
 {
@@ -267,11 +266,8 @@ async fn reader<F>(
             .expect("failed to parse response")
         {
             GuestAgentMessage::Notification(notification) => notification_handler(notification),
-            GuestAgentMessage::Response { id, resp } => {
-                responses
-                    .send((id, resp))
-                    .await
-                    .expect("failed to send response");
+            GuestAgentMessage::Response(resp) => {
+                responses.send(resp).await.expect("failed to send response");
             }
         }
     }
@@ -325,7 +321,7 @@ impl GuestAgent {
     }
 
     async fn get_response(&mut self, msg_id: u64) -> io::Result<Response> {
-        let (id, resp) = self
+        let ResponseWithId { id, resp } = self
             .responses
             .recv()
             .await
