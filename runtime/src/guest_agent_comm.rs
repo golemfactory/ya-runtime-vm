@@ -1,7 +1,11 @@
-use std::io::{self, prelude::*};
-use std::marker::PhantomData;
-use std::os::unix::net::UnixStream;
-use std::{thread, time};
+use std::{io, marker::PhantomData};
+use tokio::{
+    io::{split, AsyncWriteExt, ReadHalf, WriteHalf},
+    net::UnixStream,
+    spawn,
+    sync::mpsc,
+    time,
+};
 
 pub use crate::response_parser::Notification;
 use crate::response_parser::{parse_one_response, GuestAgentMessage, Response};
@@ -54,13 +58,10 @@ struct Message<T> {
     phantom: PhantomData<T>,
 }
 
-pub struct GuestAgent<F>
-where
-    F: FnMut(Notification) -> (),
-{
-    stream: UnixStream,
+pub struct GuestAgent {
+    stream: WriteHalf<UnixStream>,
     last_msg_id: u64,
-    notification_handler: F,
+    responses: mpsc::Receiver<(/*msg_id*/ u64, Response)>,
 }
 
 trait EncodeInto {
@@ -252,30 +253,58 @@ impl<T> AsRef<Vec<u8>> for Message<T> {
 
 type RemoteCommandResult<T> = Result<T, /* exit code */ u32>;
 
-impl<F> GuestAgent<F>
-where
-    F: FnMut(Notification) -> (),
+async fn reader<F>(
+    mut stream: ReadHalf<UnixStream>,
+    mut notification_handler: F,
+    // TODO: instead of replicating GuestAgentMessage::Response as tuple, make it a proper type
+    mut responses: mpsc::Sender<(/*msg_id*/ u64, Response)>,
+) where
+    F: FnMut(Notification) -> () + Send + 'static,
 {
-    pub fn connected(
+    loop {
+        match parse_one_response(&mut stream)
+            .await
+            .expect("failed to parse response")
+        {
+            GuestAgentMessage::Notification(notification) => notification_handler(notification),
+            GuestAgentMessage::Response { id, resp } => {
+                responses
+                    .send((id, resp))
+                    .await
+                    .expect("failed to send response");
+            }
+        }
+    }
+}
+
+impl GuestAgent {
+    pub async fn connected<F>(
         path: &str,
         timeout: u32,
         notification_handler: F,
-    ) -> io::Result<GuestAgent<F>> {
+    ) -> io::Result<GuestAgent>
+    where
+        // TODO: 'static lifetime can be relaxed
+        F: FnMut(Notification) -> () + Send + 'static,
+    {
         let mut timeout_remaining = timeout;
         loop {
-            match UnixStream::connect(path) {
+            match UnixStream::connect(path).await {
                 Ok(s) => {
+                    let (stream_read, stream_write) = split(s);
+                    let (response_send, response_receive) = mpsc::channel(10);
+                    spawn(reader(stream_read, notification_handler, response_send));
                     break Ok(GuestAgent {
-                        stream: s,
+                        stream: stream_write,
                         last_msg_id: 0,
-                        notification_handler: notification_handler,
-                    })
+                        responses: response_receive,
+                    });
                 }
                 Err(err) => match err.kind() {
                     io::ErrorKind::NotFound => {
                         println!("Waiting for Guest Agent socket ...");
                         if timeout_remaining > 0 {
-                            thread::sleep(time::Duration::from_secs(1));
+                            time::delay_for(time::Duration::from_secs(1)).await;
                             timeout_remaining -= 1;
                         } else {
                             break Err(io::Error::new(
@@ -295,29 +324,19 @@ where
         self.last_msg_id
     }
 
-    fn get_one_response(&mut self) -> io::Result<GuestAgentMessage> {
-        parse_one_response(&mut self.stream)
-    }
-
-    fn get_response(&mut self, msg_id: u64) -> io::Result<Response> {
-        loop {
-            match self.get_one_response()? {
-                GuestAgentMessage::Notification(notification) => {
-                    (self.notification_handler)(notification)
-                }
-                GuestAgentMessage::Response { id, resp } => {
-                    break {
-                        if id != msg_id {
-                            return Err(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "Got response with different ID",
-                            ));
-                        }
-                        Ok(resp)
-                    }
-                }
-            }
+    async fn get_response(&mut self, msg_id: u64) -> io::Result<Response> {
+        let (id, resp) = self
+            .responses
+            .recv()
+            .await
+            .ok_or(io::Error::new(io::ErrorKind::NotConnected, "disconnected"))?;
+        if id != msg_id {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Got response with different ID",
+            ));
         }
+        Ok(resp)
     }
 
     fn match_error<T>(resp: Response) -> io::Result<RemoteCommandResult<T>> {
@@ -330,38 +349,31 @@ where
         }
     }
 
-    fn get_ok_response(&mut self, msg_id: u64) -> io::Result<RemoteCommandResult<()>> {
-        match self.get_response(msg_id)? {
+    async fn get_ok_response(&mut self, msg_id: u64) -> io::Result<RemoteCommandResult<()>> {
+        match self.get_response(msg_id).await? {
             Response::Ok => Ok(Ok(())),
-            x => GuestAgent::<F>::match_error(x),
+            x => GuestAgent::match_error(x),
         }
     }
 
-    fn get_u64_response(&mut self, msg_id: u64) -> io::Result<RemoteCommandResult<u64>> {
-        match self.get_response(msg_id)? {
+    async fn get_u64_response(&mut self, msg_id: u64) -> io::Result<RemoteCommandResult<u64>> {
+        match self.get_response(msg_id).await? {
             Response::OkU64(val) => Ok(Ok(val)),
-            x => GuestAgent::<F>::match_error(x),
+            x => GuestAgent::match_error(x),
         }
     }
 
-    fn get_bytes_response(&mut self, msg_id: u64) -> io::Result<RemoteCommandResult<Vec<u8>>> {
-        match self.get_response(msg_id)? {
+    async fn get_bytes_response(
+        &mut self,
+        msg_id: u64,
+    ) -> io::Result<RemoteCommandResult<Vec<u8>>> {
+        match self.get_response(msg_id).await? {
             Response::OkBytes(bytes) => Ok(Ok(bytes)),
-            x => GuestAgent::<F>::match_error(x),
+            x => GuestAgent::match_error(x),
         }
     }
 
-    pub fn get_one_notification(&mut self) -> io::Result<Notification> {
-        match self.get_one_response()? {
-            GuestAgentMessage::Notification(notification) => Ok(notification),
-            GuestAgentMessage::Response { .. } => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Unexptected response",
-            )),
-        }
-    }
-
-    pub fn quit(&mut self) -> io::Result<RemoteCommandResult<()>> {
+    pub async fn quit(&mut self) -> io::Result<RemoteCommandResult<()>> {
         let mut msg = Message::default();
         let msg_id = self.get_new_msg_id();
 
@@ -369,19 +381,19 @@ where
 
         msg.append_submsg(&SubMsgQuitType::SubMsgEnd);
 
-        self.stream.write_all(msg.as_ref())?;
+        self.stream.write_all(msg.as_ref()).await?;
 
-        self.get_ok_response(msg_id)
+        self.get_ok_response(msg_id).await
     }
 
-    pub fn run_process(
+    pub async fn run_process(
         &mut self,
         bin: &str,
         argv: &[&str],
         maybe_env: Option<&[&str]>,
         uid: u32,
         gid: u32,
-        fds: &[Option<RedirectFdType>; 3],
+        fds: &[Option<RedirectFdType<'_>>; 3],
         maybe_cwd: Option<&str>,
     ) -> io::Result<RemoteCommandResult<u64>> {
         let mut msg = Message::default();
@@ -418,12 +430,12 @@ where
 
         msg.append_submsg(&SubMsgRunProcessType::SubMsgEnd);
 
-        self.stream.write_all(msg.as_ref())?;
+        self.stream.write_all(msg.as_ref()).await?;
 
-        self.get_u64_response(msg_id)
+        self.get_u64_response(msg_id).await
     }
 
-    pub fn kill(&mut self, id: u64) -> io::Result<RemoteCommandResult<()>> {
+    pub async fn kill(&mut self, id: u64) -> io::Result<RemoteCommandResult<()>> {
         let mut msg = Message::default();
         let msg_id = self.get_new_msg_id();
 
@@ -433,12 +445,12 @@ where
 
         msg.append_submsg(&SubMsgKillProcessType::SubMsgEnd);
 
-        self.stream.write_all(msg.as_ref())?;
+        self.stream.write_all(msg.as_ref()).await?;
 
-        self.get_ok_response(msg_id)
+        self.get_ok_response(msg_id).await
     }
 
-    pub fn query_output(
+    pub async fn query_output(
         &mut self,
         id: u64,
         off: u64,
@@ -455,8 +467,8 @@ where
 
         msg.append_submsg(&SubMsgQueryOutputType::SubMsgEnd);
 
-        self.stream.write_all(msg.as_ref())?;
+        self.stream.write_all(msg.as_ref()).await?;
 
-        self.get_bytes_response(msg_id)
+        self.get_bytes_response(msg_id).await
     }
 }

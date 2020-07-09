@@ -1,8 +1,11 @@
 mod guest_agent_comm;
 mod response_parser;
 
-use std::io::{self, prelude::*};
-use std::process::{Command, Stdio};
+use std::{
+    io::{self, prelude::*},
+    process::Stdio,
+};
+use tokio::{process::Command, time};
 
 use crate::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
 
@@ -17,37 +20,52 @@ fn handle_notification(notification: Notification) {
     }
 }
 
-fn main() -> io::Result<()> {
-    let mut child = Command::new("qemu-system-x86_64")
+#[tokio::main]
+async fn main() -> io::Result<()> {
+    let child = Command::new("qemu-system-x86_64")
         .args(&[
-            "-m", "256m",
+            "-m",
+            "256m",
             "-nographic",
-            "-vga", "none",
-            "-kernel", "init-container/vmlinuz-virt",
-            "-initrd", "init-container/initramfs.cpio.gz",
+            "-vga",
+            "none",
+            "-kernel",
+            "init-container/vmlinuz-virt",
+            "-initrd",
+            "init-container/initramfs.cpio.gz",
             "-no-reboot",
-            "-net", "none",
-            "-smp", "1",
-            "-append", "console=ttyS0 panic=1",
-            "-device", "virtio-serial",
-            "-chardev", "socket,path=./manager.sock,server,nowait,id=manager_cdev",
-            "-device", "virtserialport,chardev=manager_cdev,name=manager_port",
-            "-drive", "file=./squashfs_drive,cache=none,readonly=on,format=raw,if=virtio"])
+            "-net",
+            "none",
+            "-smp",
+            "1",
+            "-append",
+            "console=ttyS0 panic=1",
+            "-device",
+            "virtio-serial",
+            "-chardev",
+            "socket,path=./manager.sock,server,nowait,id=manager_cdev",
+            "-device",
+            "virtserialport,chardev=manager_cdev,name=manager_port",
+            "-drive",
+            "file=./squashfs_drive,cache=none,readonly=on,format=raw,if=virtio",
+        ])
         .stdin(Stdio::null())
         .spawn()
         .expect("failed to spawn VM");
 
-    let mut ga = GuestAgent::connected("./manager.sock", 10, handle_notification)?;
+    let mut ga = GuestAgent::connected("./manager.sock", 10, handle_notification).await?;
 
     let no_redir = [None, None, None];
 
     let id = ga
-        .run_process("/bin/ls", &["ls", "-al", "/"], None, 0, 0, &no_redir, None)?
+        .run_process("/bin/ls", &["ls", "-al", "/"], None, 0, 0, &no_redir, None)
+        .await?
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
-    handle_notification(ga.get_one_notification()?);
+    time::delay_for(time::Duration::from_millis(500)).await;
     let out = ga
-        .query_output(id, 0, u64::MAX)?
+        .query_output(id, 0, u64::MAX)
+        .await?
         .expect("Output query failed");
     println!("Output:");
     io::stdout().write_all(&out)?;
@@ -66,10 +84,10 @@ fn main() -> io::Result<()> {
             0,
             &no_redir,
             Some("/etc"),
-        )?
+        )
+        .await?
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
-    handle_notification(ga.get_one_notification()?);
 
     let id = ga
         .run_process(
@@ -80,44 +98,48 @@ fn main() -> io::Result<()> {
             0,
             &fds,
             None,
-        )?
+        )
+        .await?
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
-    handle_notification(ga.get_one_notification()?);
+    time::delay_for(time::Duration::from_millis(500)).await;
     let out = ga
-        .query_output(id, 0, u64::MAX)?
+        .query_output(id, 0, u64::MAX)
+        .await?
         .expect("Output query failed");
     println!("Output:");
     io::stdout().write_all(&out)?;
 
     let id = ga
-        .run_process("/bin/ls", &["ls", "-al", "/"], None, 0, 0, &no_redir, None)?
+        .run_process("/bin/ls", &["ls", "-al", "/"], None, 0, 0, &no_redir, None)
+        .await?
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
-    handle_notification(ga.get_one_notification()?);
 
     let id = ga
-        .run_process("/bin/cat", &["cat", "/a"], None, 0, 0, &no_redir, None)?
+        .run_process("/bin/cat", &["cat", "/a"], None, 0, 0, &no_redir, None)
+        .await?
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
-    handle_notification(ga.get_one_notification()?);
+    time::delay_for(time::Duration::from_millis(500)).await;
     let out = ga
-        .query_output(id, 0, u64::MAX)?
+        .query_output(id, 0, u64::MAX)
+        .await?
         .expect("Output query failed");
     println!("Output:");
     io::stdout().write_all(&out)?;
 
     let id = ga
-        .run_process("/bin/sleep", &["sleep", "10"], None, 0, 0, &no_redir, None)?
+        .run_process("/bin/sleep", &["sleep", "10"], None, 0, 0, &no_redir, None)
+        .await?
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
 
-    ga.kill(id)?.expect("Kill failed");
-    handle_notification(ga.get_one_notification()?);
+    ga.kill(id).await?.expect("Kill failed");
 
-    ga.quit()?.expect("Quit failed");
+    ga.quit().await?.expect("Quit failed");
 
-    let e = child.wait().expect("failed to wait on child");
+    let e = child.await.expect("failed to wait on child");
     println!("{:?}", e);
 
     Ok(())
