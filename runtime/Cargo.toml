@@ -7,7 +7,20 @@ license = "GPL-3.0"
 
 [dependencies]
 anyhow = "1.0"
+env_logger = "0.7.1"
+futures = "0.3"
+log = "0.4.8"
 serde = { version = "^1.0", features = ["derive"] }
 serde_json = "1.0"
+strip-ansi-escapes = "0.1.0"
 structopt = "0.3"
-tokio = { version = "0.2", features = ["io-util", "macros", "process", "rt-core", "rt-threaded", "sync", "time", "uds"] }
+tokio = { version = "0.2", features = ["io-std", "io-util", "macros", "process", "rt-core", "rt-threaded", "sync", "time", "uds"] }
+ya-runtime-api = { version = "0.1", features = ["codec"] }
+
+[lib]
+name = "ya_runtime_vm"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ya_runtime_vm"
+path = "src/main.rs"
