@@ -1,33 +1,55 @@
 mod guest_agent_comm;
 mod response_parser;
 
-use std::io::{self, prelude::*};
-use std::process::{Child, Command, Stdio};
+use std::{
+    io::{self, prelude::*},
+    process::Stdio,
+    sync::Arc,
+};
+use tokio::{
+    process::{Child, Command},
+    sync,
+};
 
 use crate::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
 
-fn handle_notification(notification: Notification) {
-    match notification {
-        Notification::OutputAvailable { id, fd } => {
-            println!("Process {} has output available on fd {}", id, fd);
+struct Notifications {
+    process_died: sync::Notify,
+}
+
+impl Notifications {
+    fn new() -> Self {
+        Notifications {
+            process_died: sync::Notify::new(),
         }
-        Notification::ProcessDied { id, reason } => {
-            println!("Process {} died with {:?}", id, reason);
+    }
+
+    fn handle(&self, notification: Notification) {
+        match notification {
+            Notification::OutputAvailable { id, fd } => {
+                println!("Process {} has output available on fd {}", id, fd);
+            }
+            Notification::ProcessDied { id, reason } => {
+                println!("Process {} died with {:?}", id, reason);
+                self.process_died.notify();
+            }
         }
     }
 }
 
-fn run_process_with_output<F>(ga: &mut GuestAgent<F>, bin: &str, argv: &[&str]) -> io::Result<()>
-where
-    F: FnMut(Notification) -> (),
-{
+async fn run_process_with_output(
+    ga: &mut GuestAgent,
+    notifications: &Notifications,
+    bin: &str,
+    argv: &[&str],
+) -> io::Result<()> {
     let id = ga
-        .run_process(bin, argv, None, 0, 0, &[None, None, None], None)?
+        .run_process(bin, argv, None, 0, 0, &[None, None, None], None)
+        .await?
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
-    /* Wait for process to exit. */
-    handle_notification(ga.get_one_notification()?);
-    match ga.query_output(id, 0, u64::MAX)? {
+    notifications.process_died.notified().await;
+    match ga.query_output(id, 0, u64::MAX).await? {
         Ok(out) => {
             println!("Output:");
             io::stdout().write_all(&out)?;
@@ -40,19 +62,30 @@ where
 fn spawn_vm<'a>(mount_args: &'a [(&'a str, &'a str)]) -> Child {
     let mut cmd = Command::new("qemu-system-x86_64");
     cmd.args(&[
-        "-m", "256m",
+        "-m",
+        "256m",
         "-nographic",
-        "-vga", "none",
-        "-kernel", "init-container/vmlinuz-virt",
-        "-initrd", "init-container/initramfs.cpio.gz",
+        "-vga",
+        "none",
+        "-kernel",
+        "init-container/vmlinuz-virt",
+        "-initrd",
+        "init-container/initramfs.cpio.gz",
         "-no-reboot",
-        "-net", "none",
-        "-smp", "1",
-        "-append", "console=ttyS0 panic=1",
-        "-device", "virtio-serial",
-        "-chardev", "socket,path=./manager.sock,server,nowait,id=manager_cdev",
-        "-device", "virtserialport,chardev=manager_cdev,name=manager_port",
-        "-drive", "file=./squashfs_drive,cache=none,readonly=on,format=raw,if=virtio",
+        "-net",
+        "none",
+        "-smp",
+        "1",
+        "-append",
+        "console=ttyS0 panic=1",
+        "-device",
+        "virtio-serial",
+        "-chardev",
+        "socket,path=./manager.sock,server,nowait,id=manager_cdev",
+        "-device",
+        "virtserialport,chardev=manager_cdev,name=manager_port",
+        "-drive",
+        "file=./squashfs_drive,cache=none,readonly=on,format=raw,if=virtio",
     ]);
     for (tag, path) in mount_args.iter() {
         cmd.args(&[
@@ -68,16 +101,25 @@ fn spawn_vm<'a>(mount_args: &'a [(&'a str, &'a str)]) -> Child {
     cmd.spawn().expect("failed to spawn VM")
 }
 
-fn main() -> io::Result<()> {
-    let mount_args = [("tag0", "init-container"), ("tag1", "runtime")];
-    let mut child = spawn_vm(&mount_args);
+#[tokio::main]
+async fn main() -> io::Result<()> {
+    let notifications = Arc::new(Notifications::new());
 
-    let mut ga = GuestAgent::connected("./manager.sock", 10, handle_notification)?;
+    let mount_args = [("tag0", "init-container"), ("tag1", "runtime")];
+    let child = spawn_vm(&mount_args);
+
+    let mut ga = GuestAgent::connected("./manager.sock", 10, {
+        let notifications = notifications.clone();
+        move |n| {
+            notifications.handle(n);
+        }
+    })
+    .await?;
 
     let no_redir = [None, None, None];
 
     for (i, (tag, dir)) in mount_args.iter().enumerate() {
-        ga.mount(tag, &format!("/mnt/mnt{}/{}", i, dir))?
+        ga.mount(tag, &format!("/mnt/mnt{}/{}", i, dir)).await?
             .expect("Mount failed");
     }
 
@@ -90,17 +132,25 @@ fn main() -> io::Result<()> {
             0,
             &no_redir,
             Some("/mnt"),
-        )?
+        )
+        .await?
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
-    handle_notification(ga.get_one_notification()?);
+    notifications.process_died.notified().await;
     let out = ga
-        .query_output(id, 0, u64::MAX)?
+        .query_output(id, 0, u64::MAX)
+        .await?
         .expect("Output query failed");
     println!("Output:");
     io::stdout().write_all(&out)?;
 
-    run_process_with_output(&mut ga, "/bin/ls", &["ls", "-al", "/mnt/mnt1/runtime"])?;
+    run_process_with_output(
+        &mut ga,
+        &notifications,
+        "/bin/ls",
+        &["ls", "-al", "/mnt/mnt1/runtime"],
+    )
+    .await?;
 
     let fds = [
         None,
@@ -110,36 +160,40 @@ fn main() -> io::Result<()> {
         None,
     ];
     let id = ga
-        .run_process("/bin/echo", &["echo", "WRITE TEST"], None, 0, 0, &fds, None)?
+        .run_process("/bin/echo", &["echo", "WRITE TEST"], None, 0, 0, &fds, None)
+        .await?
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
-    handle_notification(ga.get_one_notification()?);
+    notifications.process_died.notified().await;
 
     run_process_with_output(
         &mut ga,
+        &notifications,
         "/bin/cat",
         &["cat", "/mnt/mnt1/runtime/write_test"],
-    )?;
+    )
+    .await?;
 
     let id = ga
-        .run_process("/bin/sleep", &["sleep", "10"], None, 0, 0, &no_redir, None)?
+        .run_process("/bin/sleep", &["sleep", "10"], None, 0, 0, &no_redir, None)
+        .await?
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
 
-    ga.kill(id)?.expect("Kill failed");
-    handle_notification(ga.get_one_notification()?);
+    ga.kill(id).await?.expect("Kill failed");
+    notifications.process_died.notified().await;
 
-    // ga.quit()?.expect("Quit failed");
+    // ga.quit().await?.expect("Quit failed");
 
     let id = ga
-        .run_entrypoint("/bin/sleep", &["sleep", "2"], None, 0, 0, &no_redir, None)?
+        .run_entrypoint("/bin/sleep", &["sleep", "2"], None, 0, 0, &no_redir, None)
+        .await?
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
-    /* Wait for entrypoint dying. */
-    handle_notification(ga.get_one_notification()?);
+    notifications.process_died.notified().await;
 
     /* VM should quit now. */
-    let e = child.wait().expect("failed to wait on child");
+    let e = child.await.expect("failed to wait on child");
     println!("{:?}", e);
 
     Ok(())
