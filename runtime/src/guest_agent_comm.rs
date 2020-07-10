@@ -284,7 +284,7 @@ impl<T> AsRef<Vec<u8>> for Message<T> {
     }
 }
 
-type RemoteCommandResult<T> = Result<T, /* exit code */ u32>;
+pub type RemoteCommandResult<T> = Result<T, /* exit code */ u32>;
 
 async fn reader<F>(
     mut stream: ReadHalf<UnixStream>,
@@ -333,7 +333,7 @@ impl GuestAgent {
                 }
                 Err(err) => match err.kind() {
                     io::ErrorKind::NotFound => {
-                        println!("Waiting for Guest Agent socket ...");
+                        log::info!("Waiting for Guest Agent socket ...");
                         if timeout_remaining > 0 {
                             time::delay_for(time::Duration::from_secs(1)).await;
                             timeout_remaining -= 1;

@@ -1,6 +1,8 @@
 [workspace]
-
 members = [
     "runtime",
     "gvmkit",
 ]
+
+[patch.crates-io]
+ya-runtime-api = { git = "https://github.com/golemfactory/yagna.git", rev = "8e8e0a9a322f46a2e675fb523567bd515dc239c6" }
