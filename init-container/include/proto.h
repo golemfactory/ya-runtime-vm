@@ -145,6 +145,8 @@ enum SUB_MSG_PUT_INPUT_TYPE {
 };
 
 enum REDIRECT_FD_TYPE {
+    /* Invalid type (useful only internally). */
+    REDIRECT_FD_INVALID = -1,
     /* Path to the file. (BYTES) */
     REDIRECT_FD_FILE = 0,
     /* Buffer size. (u64) */
@@ -164,7 +166,7 @@ enum GUEST_MSG_TYPE {
     RESP_ERR,
     /* ID of process and a file descriptor. (u64 + u32) */
     NOTIFY_OUTPUT_AVAILABLE,
-    /* ID of process and exit reason. (u64 + u32) */
+    /* ID of process and exit reason (two bytes). (u64 + u8 + u8) */
     NOTIFY_PROCESS_DIED,
 };
 

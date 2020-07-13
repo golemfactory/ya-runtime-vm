@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include "communication.h"
+#include "cyclic_buffer.h"
 
 int readn(int fd, void* buf, size_t size) {
     while (size) {
@@ -141,4 +142,29 @@ int send_bytes(int fd, const char* buf, uint64_t size) {
     }
 
     return writen(fd, buf, size);
+}
+
+int send_bytes_cyclic_buffer(int fd, struct cyclic_buffer* cb, uint64_t size) {
+    size_t cb_data_size = cyclic_buffer_data_size(cb);
+    if (size > cb_data_size) {
+        size = cb_data_size;
+    }
+
+    if (writen(fd, &size, sizeof(size)) < 0) {
+        return -1;
+    }
+
+    while (size) {
+        ssize_t ret = cyclic_buffer_write(fd, cb, size);
+        if (ret == 0) {
+            puts("Waiting for host connection ...");
+            sleep(1);
+            continue;
+        }
+        if (ret < 0) {
+            return -1;
+        }
+        size -= ret;
+    }
+    return 0;
 }
