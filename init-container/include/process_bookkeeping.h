@@ -1,9 +1,11 @@
 #ifndef _PROCESS_BOOKKEEPING_H
 #define _PROCESS_BOOKKEEPING_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <sys/types.h>
 
+#include "cyclic_buffer.h"
 #include "proto.h"
 
 struct redir_fd_desc {
@@ -13,9 +15,8 @@ struct redir_fd_desc {
         char* path;
         /* For REDIRECT_FD_PIPE_* */
         struct {
-            char* buf;
-            size_t size;
-            int fd;
+            struct cyclic_buffer cb;
+            int fds[2];
         } buffer;
     };
 };

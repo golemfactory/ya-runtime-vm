@@ -2,13 +2,13 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdnoreturn.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/reboot.h>
@@ -20,6 +20,7 @@
 #include <unistd.h>
 
 #include "communication.h"
+#include "cyclic_buffer.h"
 #include "process_bookkeeping.h"
 #include "proto.h"
 
@@ -30,6 +31,10 @@
 #define DEFAULT_GID 0
 #define DEFAULT_OUT_FILE_PERM S_IRWXU
 #define DEFAULT_DIR_PERMS (S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH)
+#define DEFAULT_FD_DESC {           \
+        .type = REDIRECT_FD_FILE,   \
+        .path = NULL,               \
+    }
 
 #define OUTPUT_PATH_PREFIX "/var/tmp/guest_agent_private/fds"
 
@@ -43,15 +48,30 @@ struct new_process_args {
     bool is_entrypoint;
 };
 
+enum epoll_fd_type {
+    EPOLL_FD_CMDS,
+    EPOLL_FD_SIG,
+    EPOLL_FD_OUT,
+    EPOLL_FD_IN,
+};
+
+struct epoll_fd_desc {
+    enum epoll_fd_type type;
+    int fd;
+    struct redir_fd_desc* data;
+};
+
 extern char** environ;
 
 static int g_cmds_fd = -1;
 static int g_sig_fd = -1;
+static int g_epoll_fd = -1;
 
 static struct process_desc* g_entrypoint_desc = NULL;
 
 static noreturn void die(void) {
     sync();
+    (void)close(g_epoll_fd);
     (void)close(g_sig_fd);
     (void)close(g_cmds_fd);
 
@@ -76,6 +96,32 @@ static void load_module(const char* path) {
     CHECK(close(fd));
 }
 
+int make_nonblocking(int fd) {
+    errno = 0;
+    int flags = fcntl(fd, F_GETFL);
+    if (flags == -1 && errno) {
+        return -1;
+    }
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
+/*
+int make_cloexec(int fd) {
+    errno = 0;
+    int flags = fcntl(fd, F_GETFD);
+    if (flags == -1 && errno) {
+        return -1;
+    }
+    if (fcntl(fd, F_SETFD, flags | FD_CLOEXEC) < 0) {
+        return -1;
+    }
+    return 0;
+}
+*/
+
 static void cleanup_fd_desc(struct redir_fd_desc* fd_desc) {
     switch (fd_desc->type) {
         case REDIRECT_FD_FILE:
@@ -83,11 +129,18 @@ static void cleanup_fd_desc(struct redir_fd_desc* fd_desc) {
             break;
         case REDIRECT_FD_PIPE_BLOCKING:
         case REDIRECT_FD_PIPE_CYCLIC:
-            // TODO
+            if (fd_desc->buffer.fds[0] != -1) {
+                CHECK(close(fd_desc->buffer.fds[0]));
+            }
+            if (fd_desc->buffer.fds[1] != -1) {
+                CHECK(close(fd_desc->buffer.fds[1]));
+            }
+            CHECK(cyclic_buffer_deinit(&fd_desc->buffer.cb));
             break;
         default:
             break;
     }
+    fd_desc->type = REDIRECT_FD_INVALID;
 }
 
 __attribute__((unused)) static void delete_proc(struct process_desc* proc_desc) {
@@ -152,7 +205,7 @@ static void handle_sigchld(void) {
         die();
     }
 
-    uint32_t child_pid = siginfo.ssi_pid;
+    pid_t child_pid = (pid_t)siginfo.ssi_pid;
 
     if (siginfo.ssi_code != CLD_EXITED
             && siginfo.ssi_code != CLD_KILLED
@@ -255,15 +308,55 @@ static void send_response_bytes(msg_id_t msg_id, const char* buf, size_t len) {
     CHECK(send_bytes(g_cmds_fd, buf, len));
 }
 
+static void send_response_cyclic_buffer(msg_id_t msg_id, struct cyclic_buffer* cb, size_t len) {
+    send_response_hdr(msg_id, RESP_OK_BYTES);
+    CHECK(send_bytes_cyclic_buffer(g_cmds_fd, cb, len));
+}
+
 static noreturn void handle_quit(msg_id_t msg_id) {
     send_response_ok(msg_id);
     die();
 }
 
-#define DEFAULT_FD_DESC {           \
-        .type = REDIRECT_FD_FILE,   \
-        .path = NULL,               \
+static int add_epoll_fd_desc(struct redir_fd_desc* redir_fd_desc,
+                             int fd,
+                             bool in,
+                             struct epoll_fd_desc** epoll_fd_desc_ptr) {
+    struct epoll_fd_desc* epoll_fd_desc = malloc(sizeof(*epoll_fd_desc));
+    if (!epoll_fd_desc) {
+        return -1;
     }
+
+    epoll_fd_desc->type = in ? EPOLL_FD_IN : EPOLL_FD_OUT;
+    epoll_fd_desc->fd = fd;
+    epoll_fd_desc->data = redir_fd_desc;
+
+    struct epoll_event event = {
+        .events = in ? EPOLLIN : EPOLLOUT,
+        .data.ptr = epoll_fd_desc,
+    };
+
+    if (epoll_ctl(g_epoll_fd, EPOLL_CTL_ADD, fd, &event) < 0) {
+        int tmp = errno;
+        free(epoll_fd_desc);
+        errno = tmp;
+        return -1;
+    }
+
+    if (epoll_fd_desc_ptr) {
+        *epoll_fd_desc_ptr = epoll_fd_desc;
+    }
+    return 0;
+
+}
+
+static int del_epoll_fd_desc(struct epoll_fd_desc* epoll_fd_desc) {
+    if (epoll_ctl(g_epoll_fd, EPOLL_CTL_DEL, epoll_fd_desc->fd, NULL) < 0) {
+        return -1;
+    }
+    free(epoll_fd_desc);
+    return 0;
+}
 
 /* Assumes fd is either 0, 1 or 2.
  * Returns whether call was successful (setting errno on failures). */
@@ -329,15 +422,17 @@ static noreturn void child_wrapper(int parent_pipe[2],
                 break;
             case REDIRECT_FD_PIPE_BLOCKING:
             case REDIRECT_FD_PIPE_CYCLIC:
-                // TODO
-                fprintf(stderr,
-                        "Redir type %d not yet supported, ignoring (fd: %d)\n",
-                        fd_descs[fd].type, fd);
+                if (dup2(fd_descs[fd].buffer.fds[fd ? 1 : 0], fd) < 0) {
+                    goto out;
+                }
+                if (close(fd_descs[fd].buffer.fds[0]) < 0
+                        || close(fd_descs[fd].buffer.fds[1]) < 0) {
+                    goto out;
+                }
                 break;
             default:
-                fprintf(stderr, "Unknown type in child_wrapper (BUG): %u\n",
-                        fd_descs[fd].type);
-                die();
+                errno = ENOTRECOVERABLE;
+                goto out;
         }
     }
 
@@ -377,7 +472,9 @@ static int create_process_fds_dir(uint64_t id) {
     }
 
     if (mkdir(path, S_IRWXU) < 0) {
+        int tmp = errno;
         free(path);
+        errno = tmp;
         return -1;
     }
 
@@ -397,6 +494,8 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
                                   struct redir_fd_desc fd_descs[3],
                                   uint64_t* id) {
     uint32_t ret = 0;
+    pid_t p = 0;
+    struct epoll_fd_desc* epoll_fd_descs[3] = { NULL };
 
     if (new_proc_args->is_entrypoint && g_entrypoint_desc) {
         return EEXIST;
@@ -407,13 +506,13 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
         return ENOMEM;
     }
     for (size_t fd = 0; fd < 3; ++fd) {
-        proc_desc->redirs[fd].type = -1; // Invalid type
+        proc_desc->redirs[fd].type = REDIRECT_FD_INVALID;
     }
 
     proc_desc->id = get_next_id();
     if (create_process_fds_dir(proc_desc->id) < 0) {
         ret = errno;
-        goto out;
+        goto out_err;
     }
 
     /* All these shenanigans with pipes are so that we can distinguish internal
@@ -421,7 +520,7 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
     int status_pipe[2] = { -1, -1 };
     if (pipe2(status_pipe, O_CLOEXEC | O_DIRECT) < 0) {
         ret = errno;
-        goto out;
+        goto out_err;
     }
 
     for (size_t fd = 0; fd < 3; ++fd) {
@@ -432,37 +531,48 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
                     proc_desc->redirs[fd].path = strdup(fd_descs[fd].path);
                     if (!proc_desc->redirs[fd].path) {
                         ret = errno;
-                        goto out;
+                        goto out_err;
                     }
                 } else {
                     proc_desc->redirs[fd].path =
                         construct_output_path(proc_desc->id, fd);
                     if (!proc_desc->redirs[fd].path) {
                         ret = errno;
-                        goto out;
+                        goto out_err;
                     }
                     int tmp_fd = open(proc_desc->redirs[fd].path,
                                       O_RDWR | O_CREAT | O_EXCL,
                                       S_IRWXU);
                     if (tmp_fd < 0 || close(tmp_fd) < 0) {
                         ret = errno;
-                        goto out;
+                        goto out_err;
                     }
                 }
                 break;
             case REDIRECT_FD_PIPE_BLOCKING:
             case REDIRECT_FD_PIPE_CYCLIC:
-                // TODO
+                proc_desc->redirs[fd].buffer.fds[0] = -1;
+                proc_desc->redirs[fd].buffer.fds[1] = -1;
+
+                if (cyclic_buffer_init(&proc_desc->redirs[fd].buffer.cb, fd_descs[fd].buffer.cb.size) < 0) {
+                    ret = errno;
+                    goto out_err;
+                }
+
+                if (pipe2(proc_desc->redirs[fd].buffer.fds, O_CLOEXEC) < 0) {
+                    ret = errno;
+                    goto out_err;
+                }
                 break;
             default:
                 break;
         }
     }
 
-    pid_t p = fork();
+    p = fork();
     if (p < 0) {
         ret = errno;
-        goto out;
+        goto out_err;
     } else if (p == 0) {
         child_wrapper(status_pipe, new_proc_args, proc_desc->redirs);
     }
@@ -474,7 +584,7 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
     ssize_t x = read(status_pipe[0], &c, sizeof(c));
     if (x < 0) {
         ret = errno;
-        goto out;
+        goto out_err;
     } else if (x > 0) {
         /* Process failed to spawn. */
         int status = 0;
@@ -486,11 +596,33 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
         } else {
             ret = ENOTRECOVERABLE;
         }
-        goto out;
+        goto out_err;
     } // else x == 0, which means successful process spawn.
 
     CHECK(close(status_pipe[0]));
     status_pipe[0] = -1;
+
+
+    for (size_t fd = 0; fd < 3; ++fd) {
+        if (proc_desc->redirs[fd].type == REDIRECT_FD_PIPE_BLOCKING
+                || proc_desc->redirs[fd].type == REDIRECT_FD_PIPE_CYCLIC) {
+            CHECK(close(proc_desc->redirs[fd].buffer.fds[fd ? 1 : 0]));
+            proc_desc->redirs[fd].buffer.fds[fd ? 1 : 0] = -1;
+
+            if (add_epoll_fd_desc(&proc_desc->redirs[fd],
+                                  proc_desc->redirs[fd].buffer.fds[fd ? 0 : 1],
+                                  /*in=*/!!fd,
+                                  &epoll_fd_descs[fd]) < 0) {
+                if (errno == ENOMEM || errno == ENOSPC) {
+                    ret = errno;
+                    goto out_err;
+                }
+                CHECK(-1);
+            }
+
+            CHECK(make_nonblocking(epoll_fd_descs[fd]->fd));
+        }
+    }
 
     proc_desc->pid = p;
     proc_desc->is_alive = true;
@@ -501,14 +633,23 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
     if (new_proc_args->is_entrypoint) {
         g_entrypoint_desc = proc_desc;
     }
-    proc_desc = NULL;
 
-out:
+    return ret;
+
+out_err:
+    if (p > 0) {
+        (void)kill(p, SIGKILL);
+    }
     if (status_pipe[0] != -1) {
         CHECK(close(status_pipe[0]));
     }
     if (status_pipe[1] != -1) {
         CHECK(close(status_pipe[1]));
+    }
+    for (size_t fd = 0; fd < 3; ++fd) {
+        if (epoll_fd_descs[fd]) {
+            CHECK(del_epoll_fd_desc(epoll_fd_descs[fd]));
+        }
     }
     if (proc_desc) {
         for (size_t fd = 0; fd < 3; ++fd) {
@@ -539,8 +680,10 @@ static uint32_t parse_fd_redir(struct redir_fd_desc fd_descs[3]) {
             break;
         case REDIRECT_FD_PIPE_BLOCKING:
         case REDIRECT_FD_PIPE_CYCLIC:
-            CHECK(recv_u64(g_cmds_fd, &fd_desc.buffer.size));
-            fd_desc.buffer.buf = NULL;
+            CHECK(recv_u64(g_cmds_fd, &fd_desc.buffer.cb.size));
+            fd_desc.buffer.cb.buf = MAP_FAILED;
+            fd_desc.buffer.fds[0] = -1;
+            fd_desc.buffer.fds[1] = -1;
             break;
         default:
             fprintf(stderr, "Unknown REDIRECT_FD_TYPE: %hhu\n", type);
@@ -555,7 +698,7 @@ static uint32_t parse_fd_redir(struct redir_fd_desc fd_descs[3]) {
 
     if (fd_desc.type == REDIRECT_FD_PIPE_BLOCKING
             || fd_desc.type == REDIRECT_FD_PIPE_CYCLIC) {
-        if (!is_fd_buf_size_valid(fd_desc.buffer.size)) {
+        if (!is_fd_buf_size_valid(fd_desc.buffer.cb.size)) {
             return EINVAL;
         }
     }
@@ -621,7 +764,8 @@ static void handle_run_process(msg_id_t msg_id) {
                 }
                 break;
             case SUB_MSG_RUN_PROCESS_CWD:
-                CHECK(recv_bytes(g_cmds_fd, &new_proc_args.cwd, NULL, /*is_cstring=*/true));
+                CHECK(recv_bytes(g_cmds_fd, &new_proc_args.cwd, NULL,
+                                 /*is_cstring=*/true));
                 break;
             case SUB_MSG_RUN_PROCESS_ENT:
                 new_proc_args.is_entrypoint = true;
@@ -773,31 +917,23 @@ out:
     }
 }
 
-static uint32_t do_query_output(uint64_t id, uint64_t off, char** buf_ptr,
-                                uint64_t* len_ptr) {
+static uint32_t do_query_output_path(char* path, uint64_t off, char** buf_ptr,
+                                     uint64_t* len_ptr) {
     uint32_t ret = 0;
     char* buf = MAP_FAILED;
-    off_t len = 0;
+    size_t len = 0;
 
-    struct process_desc* proc_desc = find_process_by_id(id);
-    if (!proc_desc) {
-        return ESRCH;
-    }
-
-    if (proc_desc->redirs[1].type != REDIRECT_FD_FILE) {
-        return EOPNOTSUPP;
-    }
-
-    int fd = open(proc_desc->redirs[1].path, O_RDONLY);
+    int fd = open(path, O_RDONLY);
     if (fd < 0) {
         return errno;
     }
 
-    len = lseek(fd, 0, SEEK_END);
-    if (len == (off_t)-1) {
+    off_t ls = lseek(fd, 0, SEEK_END);
+    if (ls == (off_t)-1) {
         ret = errno;
         goto out;
     }
+    len = (size_t)ls;
 
     if (off >= len) {
         ret = ENXIO;
@@ -877,17 +1013,79 @@ static void handle_query_output(msg_id_t msg_id) {
 
     if (!id || !len) {
         ret = EINVAL;
-        goto out;
+        goto out_err;
     }
 
-    ret = do_query_output(id, off, &buf, &len);
+    struct process_desc* proc_desc = find_process_by_id(id);
+    if (!proc_desc) {
+        ret = ESRCH;
+        goto out_err;
+    }
 
-out:
-    if (ret) {
-        send_response_err(msg_id, ret);
-    } else {
-        send_response_bytes(msg_id, buf, len);
-        CHECK(munmap(buf, len));
+    switch (proc_desc->redirs[1].type) {
+        case REDIRECT_FD_FILE:
+            ret = do_query_output_path(proc_desc->redirs[1].path, off, &buf, &len);
+            if (ret) {
+                goto out_err;
+            }
+            send_response_bytes(msg_id, buf, len);
+            CHECK(munmap(buf, len));
+            break;
+        case REDIRECT_FD_PIPE_BLOCKING:
+        case REDIRECT_FD_PIPE_CYCLIC:
+            if (off) {
+                ret = EINVAL;
+                goto out_err;
+            }
+            bool was_full = cyclic_buffer_free_size(&proc_desc->redirs[1].buffer.cb) == 0;
+            send_response_cyclic_buffer(msg_id, &proc_desc->redirs[1].buffer.cb, len);
+            if (was_full) {
+                if (add_epoll_fd_desc(&proc_desc->redirs[1],
+                                      proc_desc->redirs[1].buffer.fds[0],
+                                      /*in=*/true,
+                                      NULL) < 0) {
+                    if (errno != EEXIST) {
+                        CHECK(-1);
+                    }
+                }
+            }
+            break;
+        default:
+            die();
+    }
+
+    return;
+
+out_err:
+    send_response_err(msg_id, ret);
+}
+
+static void handle_output_available(struct epoll_fd_desc** epoll_fd_desc_ptr) {
+    struct epoll_fd_desc* epoll_fd_desc = *epoll_fd_desc_ptr;
+    struct cyclic_buffer* cb = &epoll_fd_desc->data->buffer.cb;
+    size_t to_read = cyclic_buffer_free_size(cb);
+
+    if (to_read == 0) {
+        /* Buffer is full, deregister `epoll_fd_desc` untill it get's emptied. */
+        CHECK(del_epoll_fd_desc(epoll_fd_desc));
+        *epoll_fd_desc_ptr = NULL;
+        return;
+    }
+
+    ssize_t ret = cyclic_buffer_read(epoll_fd_desc->fd, cb, to_read);
+    if (ret < 0) {
+        if (errno == EAGAIN) {
+            /* This was a spurious wakeup. */
+            return;
+        } else {
+            fprintf(stderr, "Unexpected error while reading in handle_output_available: %m\n");
+            die();
+        }
+    } else if (ret == 0) {
+        /* EOF */
+        CHECK(del_epoll_fd_desc(epoll_fd_desc));
+        *epoll_fd_desc_ptr = NULL;
+        return;
     }
 }
 
@@ -930,35 +1128,83 @@ static void handle_message(void) {
 }
 
 static noreturn void main_loop(void) {
-    while (1) {
-        struct pollfd fds[] = {
-            { .fd = g_cmds_fd, .events = POLLIN },
-            { .fd = g_sig_fd, .events = POLLIN },
-        };
+    g_epoll_fd = CHECK(epoll_create1(EPOLL_CLOEXEC));
+    struct epoll_event event;
 
-        int ret = poll(fds, sizeof(fds) / sizeof(fds[0]), -1);
-        if (ret < 0) {
+    struct epoll_fd_desc* epoll_fd_desc = malloc(sizeof(*epoll_fd_desc));
+    if (!epoll_fd_desc) {
+        fprintf(stderr, "epoll_fd_desc malloc failed: %m\n");
+        die();
+    }
+
+    epoll_fd_desc->type = EPOLL_FD_CMDS;
+    epoll_fd_desc->fd = g_cmds_fd;
+    epoll_fd_desc->data = NULL;
+    event.events = EPOLLIN;
+    event.data.ptr = epoll_fd_desc;
+    CHECK(epoll_ctl(g_epoll_fd, EPOLL_CTL_ADD, g_cmds_fd, &event));
+
+    epoll_fd_desc = malloc(sizeof(*epoll_fd_desc));
+    if (!epoll_fd_desc) {
+        fprintf(stderr, "epoll_fd_desc malloc failed: %m\n");
+        die();
+    }
+
+    epoll_fd_desc->type = EPOLL_FD_SIG;
+    epoll_fd_desc->fd = g_sig_fd;
+    epoll_fd_desc->data = NULL;
+    event.events = EPOLLIN;
+    event.data.ptr = epoll_fd_desc;
+    CHECK(epoll_ctl(g_epoll_fd, EPOLL_CTL_ADD, g_sig_fd, &event));
+
+    while (1) {
+        if (epoll_wait(g_epoll_fd, &event, 1, -1) < 0) {
             if (errno == EINTR || errno == EAGAIN) {
                 continue;
             }
-            fprintf(stderr, "poll failed: %m\n");
+            fprintf(stderr, "epoll failed: %m\n");
             die();
         }
 
-        if (fds[0].revents & (POLLNVAL | POLLERR)) {
-            fprintf(stderr, "poll error event: 0x%04hx\n", fds[0].revents);
-            die();
-        }
-        if (fds[1].revents & (POLLNVAL | POLLERR)) {
-            fprintf(stderr, "poll error event: 0x%04hx\n", fds[1].revents);
+        if (event.events & EPOLLNVAL) {
+            fprintf(stderr, "epoll error event: 0x%04hx\n", event.events);
             die();
         }
 
-        if (fds[0].revents & POLLIN) {
-            handle_message();
+        if ((event.events & EPOLLERR) && epoll_fd_desc->type != EPOLL_FD_OUT) {
+            fprintf(stderr, "Got EPOLLERR on fd: %d, type: %d\n",
+                    epoll_fd_desc->fd, epoll_fd_desc->type);
+            die();
         }
-        if (fds[1].revents & POLLIN) {
-            handle_sigchld();
+
+        epoll_fd_desc = event.data.ptr;
+        switch (epoll_fd_desc->type) {
+            case EPOLL_FD_CMDS:
+                if (event.events & EPOLLIN) {
+                    handle_message();
+                }
+                break;
+            case EPOLL_FD_SIG:
+                if (event.events & EPOLLIN) {
+                    handle_sigchld();
+                }
+                break;
+            case EPOLL_FD_OUT:
+                /* Need to handle EPOLLOUT and EPOLLERR here. */
+                fprintf(stderr, "EPOLL_FD_OUT is not implemented yet\n");
+                die();
+            case EPOLL_FD_IN:
+                if (event.events & EPOLLIN) {
+                    assert(epoll_fd_desc->data);
+                    handle_output_available(&epoll_fd_desc);
+                } else if (event.events & EPOLLHUP) {
+                    CHECK(del_epoll_fd_desc(epoll_fd_desc));
+                }
+                break;
+            default:
+                fprintf(stderr, "epoll_wait: invalid fd type: %d\n",
+                        epoll_fd_desc->type);
+                die();
         }
     }
 }

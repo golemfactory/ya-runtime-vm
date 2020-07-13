@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "cyclic_buffer.h"
+
 int readn(int fd, void* buf, size_t size);
 
 int recv_u64(int fd, uint64_t* res);
@@ -19,5 +21,7 @@ void free_strings_array(char** array);
 int writen(int fd, const void* buf, size_t size);
 
 int send_bytes(int fd, const char* buf, uint64_t size);
+
+int send_bytes_cyclic_buffer(int fd, struct cyclic_buffer* cb, uint64_t size);
 
 #endif // _COMMUNICATION_H

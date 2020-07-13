@@ -145,6 +145,8 @@ enum SUB_MSG_PUT_INPUT_TYPE {
 };
 
 enum REDIRECT_FD_TYPE {
+    /* Invalid type (useful only internally). */
+    REDIRECT_FD_INVALID = -1,
     /* Path to the file. (BYTES) */
     REDIRECT_FD_FILE = 0,
     /* Buffer size. (u64) */

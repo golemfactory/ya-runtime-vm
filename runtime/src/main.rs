@@ -44,7 +44,19 @@ async fn run_process_with_output(
     argv: &[&str],
 ) -> io::Result<()> {
     let id = ga
-        .run_process(bin, argv, None, 0, 0, &[None, None, None], None)
+        .run_process(
+            bin,
+            argv,
+            None,
+            0,
+            0,
+            &[
+                None,
+                Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
+                Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
+            ],
+            None,
+        )
         .await?
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
@@ -183,6 +195,47 @@ async fn main() -> io::Result<()> {
 
     ga.kill(id).await?.expect("Kill failed");
     notifications.process_died.notified().await;
+
+    let id = ga
+        .run_process(
+            "/bin/bash",
+            &[
+                "bash",
+                "-c",
+                "for i in {1..8000}; do echo -ne a >> /big; done; cat /big",
+            ],
+            None,
+            0,
+            0,
+            &[
+                None,
+                Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
+                None,
+            ],
+            None,
+        )
+        .await?
+        .expect("Run process failed");
+    println!("Spawned process with id: {}", id);
+    notifications.process_died.notified().await;
+    let out = ga
+        .query_output(id, 0, u64::MAX)
+        .await?
+        .expect("Output query failed");
+    println!(
+        "Big output 1: {} {}",
+        out.len(),
+        out.iter().filter(|x| **x != 0x61).count()
+    );
+    let out = ga
+        .query_output(id, 0, u64::MAX)
+        .await?
+        .expect("Output query failed");
+    println!(
+        "Big output 2: {} {}",
+        out.len(),
+        out.iter().filter(|x| **x != 0x61).count()
+    );
 
     // ga.quit().await?.expect("Quit failed");
 

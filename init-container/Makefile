@@ -1,6 +1,6 @@
 CC := musl-gcc
 
-CFLAGS := -std=c11 -O2 -Wall -Werror -fPIE -pie -Iinclude/
+CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror -fPIE -pie -Iinclude/
 
 ifneq ($(DEBUG), "")
 CFLAGS += -DNDEBUG
@@ -20,7 +20,7 @@ all: vmlinuz-virt initramfs.cpio.gz
 %.o: %.c
 	$(CC) $(CFLAGS) -o $@ -c $^
 
-init: $(addprefix $(SRC_DIR)/,init.o communication.o process_bookkeeping.o)
+init: $(addprefix $(SRC_DIR)/,init.o communication.o process_bookkeeping.o cyclic_buffer.o)
 	$(CC) $(CFLAGS) -static -o $@ $^
 	@# default musl libs on some distros have debug symbols, lets strip them (and everythig else)
 	strip $@
