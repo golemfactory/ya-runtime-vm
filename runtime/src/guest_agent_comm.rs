@@ -69,6 +69,7 @@ pub struct GuestAgent {
     stream: WriteHalf<UnixStream>,
     last_msg_id: u64,
     responses: mpsc::Receiver<ResponseWithId>,
+    responses_reader_handle: Option<tokio::task::JoinHandle<io::Error>>,
 }
 
 trait EncodeInto {
@@ -289,18 +290,19 @@ async fn reader<F>(
     mut stream: ReadHalf<UnixStream>,
     mut notification_handler: F,
     mut responses: mpsc::Sender<ResponseWithId>,
-) where
+) -> io::Error
+where
     F: FnMut(Notification) -> () + Send + 'static,
 {
     loop {
-        match parse_one_response(&mut stream)
-            .await
-            .expect("failed to parse response")
-        {
-            GuestAgentMessage::Notification(notification) => notification_handler(notification),
-            GuestAgentMessage::Response(resp) => {
-                responses.send(resp).await.expect("failed to send response");
-            }
+        match parse_one_response(&mut stream).await {
+            Ok(msg) => match msg {
+                GuestAgentMessage::Notification(notification) => notification_handler(notification),
+                GuestAgentMessage::Response(resp) => {
+                    responses.send(resp).await.expect("failed to send response");
+                }
+            },
+            Err(err) => return err,
         }
     }
 }
@@ -320,11 +322,13 @@ impl GuestAgent {
                 Ok(s) => {
                     let (stream_read, stream_write) = split(s);
                     let (response_send, response_receive) = mpsc::channel(10);
-                    spawn(reader(stream_read, notification_handler, response_send));
+                    let reader_handle =
+                        spawn(reader(stream_read, notification_handler, response_send));
                     break Ok(GuestAgent {
                         stream: stream_write,
                         last_msg_id: 0,
                         responses: response_receive,
+                        responses_reader_handle: Some(reader_handle),
                     });
                 }
                 Err(err) => match err.kind() {
@@ -352,11 +356,23 @@ impl GuestAgent {
     }
 
     async fn get_response(&mut self, msg_id: u64) -> io::Result<Response> {
-        let ResponseWithId { id, resp } = self
-            .responses
-            .recv()
-            .await
-            .ok_or(io::Error::new(io::ErrorKind::NotConnected, "disconnected"))?;
+        let ResponseWithId { id, resp } = match self.responses.recv().await {
+            Some(x) => x,
+            None => {
+                return Err(self
+                    .responses_reader_handle
+                    .take()
+                    .unwrap()
+                    .await
+                    .unwrap_or_else(|join_error| {
+                        io::Error::new(
+                            io::ErrorKind::Other,
+                            format!("Unexpected error in reader task: {}", join_error),
+                        )
+                    }))
+            }
+        };
+
         if id != msg_id {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

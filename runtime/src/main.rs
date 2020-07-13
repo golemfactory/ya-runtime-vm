@@ -119,7 +119,8 @@ async fn main() -> io::Result<()> {
     let no_redir = [None, None, None];
 
     for (i, (tag, dir)) in mount_args.iter().enumerate() {
-        ga.mount(tag, &format!("/mnt/mnt{}/{}", i, dir)).await?
+        ga.mount(tag, &format!("/mnt/mnt{}/{}", i, dir))
+            .await?
             .expect("Mount failed");
     }
 
