@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use anyhow::anyhow;
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,12 @@ struct CmdArgs {
     workdir: PathBuf,
     #[structopt(short, long)]
     task_package: PathBuf,
+    #[structopt(long)]
+    cpu_cores: Option<usize>,
+    #[structopt(long)]
+    mem_gib: Option<f64>,
+    #[structopt(long)]
+    storage_gib: Option<f64>,
     #[structopt(subcommand)]
     command: Commands,
 }
@@ -104,7 +111,8 @@ fn make_vmrt_command(
     runtime_path: &Path,
     workdir: &Path,
     task_package: &Path,
-    smp_cpus: usize,
+    smp_cpus: Option<usize>,
+    mem_gib: Option<f64>,
     volumes: Vec<ContainerVolume>,
     entrypoint: String,
     args: Vec<String>,
@@ -116,11 +124,16 @@ fn make_vmrt_command(
       - "," (see qemu -drive file=path)
      */
     
+    let mem = mem_gib
+        .map(|gib| (gib * 1024.0).round() as u32)
+        .unwrap_or(200);
+
     let mut append: Vec<String> = Vec::new();
     let mut cmd = Command::new("./vmrt");
+
     cmd.current_dir(runtime_path)
         .arg("-m")
-        .arg("200m")
+        .arg(format!("{}m", mem))
         .arg("-nographic")
         .arg("-vga")
         .arg("none")
@@ -133,10 +146,13 @@ fn make_vmrt_command(
         .arg("-accel")
         .arg("kvm")
         .arg("-cpu")
-        .arg("host")
-        .arg("-smp")
-        .arg(smp_cpus.to_string())
-        .arg("-device")
+        .arg("host");
+
+    if let Some(cores) = smp_cpus {
+        let _ = cmd.arg("-smp").arg(cores.to_string());
+    }
+
+    cmd.arg("-device")
         .arg("virtio-serial,id=ser0")
         .arg("-device")
         .arg("virtserialport,chardev=foo,name=org.fedoraproject.port.0")
@@ -215,7 +231,8 @@ fn main() -> anyhow::Result<()> {
                 &get_runtime_path(env::current_exe()?)?,
                 &cmdargs.workdir,
                 &cmdargs.task_package,
-                num_cpus::get(),
+                cmdargs.cpu_cores,
+                cmdargs.mem_gib,
                 serde_json::from_str(&fs::read_to_string(cmdargs.workdir.join("vols.json"))?)?,
                 entrypoint,
                 args,

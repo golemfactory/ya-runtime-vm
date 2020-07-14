@@ -4,6 +4,7 @@
         "version": "0.1.0",
         "supervisor-path": "exe-unit",
         "runtime-path": "ya-runtime-vm/ya-runtime-vm",
-        "description": "vm runtime"
+        "description": "vm runtime",
+        "extra-args": ["--cap-handoff"]
     }
 ]
