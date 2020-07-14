@@ -1,6 +1,5 @@
 use std::{io, marker::PhantomData};
 use tokio::{
-    self,
     io::{split, AsyncWriteExt, ReadHalf, WriteHalf},
     net::UnixStream,
     spawn,
