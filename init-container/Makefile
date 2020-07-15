@@ -7,6 +7,7 @@ CFLAGS += -DNDEBUG
 endif
 
 SRC_DIR ?= src
+TEST_DIR ?= tests
 
 KERNEL_URL ?= "https://nl.alpinelinux.org/alpine/v3.11/main/x86_64/linux-virt-5.4.34-r0.apk"
 KERNEL_SHA256 ?= "a6b32dc0ba8a52604b2adc9f9ae5035dc1d7936d81324911b9ee089eca81b2e3"
@@ -54,9 +55,21 @@ initramfs.cpio.gz: init $(UNPACKED_DIR)
 	cd initramfs && find . | cpio --quiet -o -H newc -R 0:0 | gzip -9 > ../$@
 	$(RM) -rf initramfs
 
+TESTS_NAMES := cyclic_buffer
+TESTS := $(addprefix $(TEST_DIR)/,$(TESTS_NAMES))
+
+$(TESTS): %: %.o $(addprefix $(SRC_DIR)/,cyclic_buffer.o)
+	$(CC) $(CFLAGS) -static -o $@ $^
+
+.PHONY: test
+test: $(TESTS)
+	for t in $(TESTS) ; do \
+		$$t ; \
+	done
+
 .PHONY: clean
 clean:
-	$(RM) init $(SRC_DIR)/*.o
+	$(RM) init $(SRC_DIR)/*.o $(TEST_DIR)/*.o $(TESTS)
 	$(RM) vmlinuz-virt initramfs.cpio.gz
 
 .PHONY: distclean
