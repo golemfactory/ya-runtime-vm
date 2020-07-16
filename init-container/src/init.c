@@ -5,6 +5,7 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <stdnoreturn.h>
 #include <string.h>
@@ -1039,7 +1040,7 @@ static void handle_query_output(msg_id_t msg_id) {
             }
             bool was_full = cyclic_buffer_free_size(&proc_desc->redirs[1].buffer.cb) == 0;
             send_response_cyclic_buffer(msg_id, &proc_desc->redirs[1].buffer.cb, len);
-            if (was_full) {
+            if (was_full && proc_desc->redirs[1].type != REDIRECT_FD_PIPE_CYCLIC) {
                 if (add_epoll_fd_desc(&proc_desc->redirs[1],
                                       proc_desc->redirs[1].buffer.fds[0],
                                       /*in=*/true,
@@ -1064,6 +1065,12 @@ static void handle_output_available(struct epoll_fd_desc** epoll_fd_desc_ptr) {
     struct epoll_fd_desc* epoll_fd_desc = *epoll_fd_desc_ptr;
     struct cyclic_buffer* cb = &epoll_fd_desc->data->buffer.cb;
     size_t to_read = cyclic_buffer_free_size(cb);
+
+    if (epoll_fd_desc->data->type == REDIRECT_FD_PIPE_CYCLIC) {
+        /* Since fd is marked as non-blocking, it will return EAGAIN once we
+         * drain all available data. */
+        to_read = SIZE_MAX;
+    }
 
     if (to_read == 0) {
         /* Buffer is full, deregister `epoll_fd_desc` untill it get's emptied. */
