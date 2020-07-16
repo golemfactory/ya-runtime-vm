@@ -1,0 +1,112 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - master
+      - release/*
+  pull_request:
+    branches:
+      - master
+      - release/*
+
+jobs:
+  build:
+    name: Build
+    env:
+      RUSTFLAGS: "-D warnings -C opt-level=z -C target-cpu=x86-64 -C debuginfo=1"
+      X86_64_PC_WINDOWS_MSVC_OPENSSL_DIR: c:/vcpkg/installed/x64-windows
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        #commented bc of too much spend on Macos which is counted 10x, Windows is 2x
+        # os: [macos-latest, windows-latest, ubuntu-latest]
+        os: [ubuntu-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v1
+
+      - name: Install Last Stable Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v1
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo index
+        uses: actions/cache@v1
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-index-
+
+      - name: Cache cargo build
+        uses: actions/cache@v1
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target1-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: cargo fmt
+        uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --all -- --check
+
+      - name: Cache vcpkg's artifacts
+        uses: actions/cache@v1
+        if: matrix.os == 'windows-latest'
+        with:
+          path: c:/vcpkg/installed
+          key: vcpkg-${{ runner.os }}-v0
+          restore-keys: |
+            vcpkg-${{ runner.os }}-
+
+      - name: Install openssl
+        if: matrix.os == 'windows-latest'
+        run: |
+          vcpkg install openssl:x64-windows openssl:x64-windows-static
+          vcpkg list
+          vcpkg integrate install
+
+      - name: cargo test
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --workspace
+
+      - name: cargo test bins with decentralized market
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --bins --workspace --features market-decentralized --no-default-features
+
+      - name: cargo build
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --workspace
+
+      - name: Copy binaries Unix
+        if: runner.os != 'Windows'
+        run: |
+          mkdir build
+          cp target/debug/{yagna,ya-provider,ya-requestor,exe-unit} build
+          strip -x build/*
+
+      - name: Copy binaries Windows
+        if: runner.os == 'Windows'
+        run: |
+          mkdir build
+          copy target\debug\yagna.exe build
+          copy target\debug\ya-provider.exe build
+          copy target\debug\ya-requestor.exe build
+          copy target\debug\exe-unit.exe build
+

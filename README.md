@@ -1,25 +1,11 @@
-# ya-runtime-vm
+# Golem Runtime VM
 
-## Prepare
+[![GitHub Workflow Status](https://img.shields.io/github/workflow/status/golemfactory/ya-runtime-vm/Build)](https://github.com/golemfactory/ya-runtime-vm/actions?query=workflow%3ABuild)
+![GitHub commit activity](https://img.shields.io/github/commit-activity/w/golemfactory/ya-runtime-vm)
+![GitHub](https://img.shields.io/github/license/golemfactory/ya-runtime-vm)
+![runtime vm](https://img.shields.io/badge/module-runtime--vm-yellowgreen)
+[![Pending Specs](https://img.shields.io/github/issues-raw/golemfactory/ya-net-p2p/needs-spec?label=specs%20needed)](https://github.com/golemfactory/ya-runtime-vm/labels/needs-spec)
 
-### Image
+## Description
 
-```sh
-docker pull alpine
-cd poc
-./gvmkit build alpine
-mv out-*.golem-app alpine.golem-app
-```
-
-### Path to poc
-
-```sh
-ln -s ../../poc target/debug/
-```
-
-## Run
-
-```sh
-cargo run -- --task-package poc/alpine.golem-app --workdir . \
-    run --entrypoint ls /
-```
+**runtime vm** 
