@@ -166,7 +166,7 @@ enum GUEST_MSG_TYPE {
     RESP_ERR,
     /* ID of process and a file descriptor. (u64 + u32) */
     NOTIFY_OUTPUT_AVAILABLE,
-    /* ID of process and exit reason. (u64 + u32) */
+    /* ID of process and exit reason (two bytes). (u64 + u8 + u8) */
     NOTIFY_PROCESS_DIED,
 };
 

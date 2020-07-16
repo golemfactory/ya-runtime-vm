@@ -15,12 +15,14 @@ use crate::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
 
 struct Notifications {
     process_died: sync::Notify,
+    output_available: sync::Notify,
 }
 
 impl Notifications {
     fn new() -> Self {
         Notifications {
             process_died: sync::Notify::new(),
+            output_available: sync::Notify::new(),
         }
     }
 
@@ -28,6 +30,7 @@ impl Notifications {
         match notification {
             Notification::OutputAvailable { id, fd } => {
                 println!("Process {} has output available on fd {}", id, fd);
+                self.output_available.notify();
             }
             Notification::ProcessDied { id, reason } => {
                 println!("Process {} died with {:?}", id, reason);
@@ -61,6 +64,7 @@ async fn run_process_with_output(
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
     notifications.process_died.notified().await;
+    notifications.output_available.notified().await;
     match ga.query_output(id, 0, u64::MAX).await? {
         Ok(out) => {
             println!("Output:");
@@ -217,7 +221,7 @@ async fn main() -> io::Result<()> {
         .await?
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
-    notifications.process_died.notified().await;
+    notifications.output_available.notified().await;
     let out = ga
         .query_output(id, 0, u64::MAX)
         .await?
@@ -227,6 +231,7 @@ async fn main() -> io::Result<()> {
         out.len(),
         out.iter().filter(|x| **x != 0x61).count()
     );
+    notifications.output_available.notified().await;
     let out = ga
         .query_output(id, 0, u64::MAX)
         .await?
@@ -259,6 +264,7 @@ async fn main() -> io::Result<()> {
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
     notifications.process_died.notified().await;
+    notifications.output_available.notified().await;
     let out = ga
         .query_output(id, 0, u64::MAX)
         .await?

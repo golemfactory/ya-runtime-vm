@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -24,6 +25,8 @@
 #include "cyclic_buffer.h"
 #include "process_bookkeeping.h"
 #include "proto.h"
+
+#define CONTAINER_OF(ptr, type, member) (type*)((char*)(ptr) - offsetof(type, member))
 
 // XXX: maybe obtain this with sysconf?
 #define PAGE_SIZE 0x1000
@@ -1059,12 +1062,24 @@ static void handle_query_output(msg_id_t msg_id) {
 
 out_err:
     send_response_err(msg_id, ret);
+
+}
+static void send_output_available_notification(uint64_t id, uint32_t fd) {
+    struct msg_hdr resp = {
+        .msg_id = 0,
+        .type = NOTIFY_OUTPUT_AVAILABLE,
+    };
+
+    CHECK(writen(g_cmds_fd, &resp, sizeof(resp)));
+    CHECK(writen(g_cmds_fd, &id, sizeof(id)));
+    CHECK(writen(g_cmds_fd, &fd, sizeof(fd)));
 }
 
 static void handle_output_available(struct epoll_fd_desc** epoll_fd_desc_ptr) {
     struct epoll_fd_desc* epoll_fd_desc = *epoll_fd_desc_ptr;
     struct cyclic_buffer* cb = &epoll_fd_desc->data->buffer.cb;
     size_t to_read = cyclic_buffer_free_size(cb);
+    bool needs_notification = cyclic_buffer_data_size(cb) == 0;
 
     if (epoll_fd_desc->data->type == REDIRECT_FD_PIPE_CYCLIC) {
         /* Since fd is marked as non-blocking, it will return EAGAIN once we
@@ -1089,10 +1104,17 @@ static void handle_output_available(struct epoll_fd_desc** epoll_fd_desc_ptr) {
             die();
         }
     } else if (ret == 0) {
-        /* EOF */
+        /* EOF. This actually cannot happen, since if we came here, there must
+         * have been some output available. Maybe just print an error and die()
+         * here? */
         CHECK(del_epoll_fd_desc(epoll_fd_desc));
         *epoll_fd_desc_ptr = NULL;
-        return;
+    }
+
+    if (needs_notification) {
+        /* XXX: this is ugly, but for now there is no other way of obtaining process id here. */
+        struct process_desc* process_desc = CONTAINER_OF(epoll_fd_desc->data, struct process_desc, redirs[1]);
+        send_output_available_notification(process_desc->id, 1);
     }
 }
 
