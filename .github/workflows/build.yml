@@ -20,8 +20,7 @@ jobs:
     strategy:
       matrix:
         #commented bc of too much spend on Macos which is counted 10x, Windows is 2x
-        # os: [macos-latest, windows-latest, ubuntu-latest]
-        os: [ubuntu-latest]
+        os: [macos-latest, windows-latest, ubuntu-latest]
 
     steps:
       - name: Checkout
@@ -56,6 +55,7 @@ jobs:
 
       - name: cargo fmt
         uses: actions-rs/cargo@v1
+        if: matrix.os == 'ubuntu-latest'
         with:
           command: fmt
           args: --all -- --check
@@ -82,31 +82,9 @@ jobs:
           command: test
           args: --workspace
 
-      - name: cargo test bins with decentralized market
-        uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --bins --workspace --features market-decentralized --no-default-features
-
       - name: cargo build
         uses: actions-rs/cargo@v1
         with:
           command: build
           args: --workspace
-
-      - name: Copy binaries Unix
-        if: runner.os != 'Windows'
-        run: |
-          mkdir build
-          cp target/debug/{yagna,ya-provider,ya-requestor,exe-unit} build
-          strip -x build/*
-
-      - name: Copy binaries Windows
-        if: runner.os == 'Windows'
-        run: |
-          mkdir build
-          copy target\debug\yagna.exe build
-          copy target\debug\ya-provider.exe build
-          copy target\debug\ya-requestor.exe build
-          copy target\debug\exe-unit.exe build
 

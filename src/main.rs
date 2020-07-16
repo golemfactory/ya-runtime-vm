@@ -329,7 +329,8 @@ mod tests {
                 &PathBuf::from("/fo o/run\"ti,me"),
                 &PathBuf::from("/ba r/wo\"rk,dir"),
                 &PathBuf::from("/qu x/task_\"package,golem-app"),
-                4,
+                Some(4),
+                Some(0.2),
                 vec![
                     ContainerVolume {
                         name: "vol-a".to_string(),
@@ -347,7 +348,7 @@ mod tests {
         // one level of quotes and backslash escaping is added by debug formatting of Command
         let expected_cmd = &[
             r#""./vmrt""#,
-            r#""-m" "200m""#,
+            r#""-m" "205m""#,
             r#""-nographic""#,
             r#""-vga" "none""#,
             r#""-kernel" "vmlinuz-virt""#,
