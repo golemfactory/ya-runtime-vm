@@ -117,6 +117,10 @@ int main(void) {
         errx(1, "got wrong data from cyclic buffer");
     }
 
+    if (cyclic_buffer_deinit(&cb) != 0) {
+        err(1, "cyclic_buffer_deinit failed");
+    }
+
     puts("Test OK");
     return 0;
 }

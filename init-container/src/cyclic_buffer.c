@@ -19,12 +19,12 @@ int cyclic_buffer_init(struct cyclic_buffer* cb, size_t size) {
 }
 
 int cyclic_buffer_deinit(struct cyclic_buffer* cb) {
-    if (cb->buf != MAP_FAILED && cb->size) {
-        int ret = munmap(cb->buf, cb->size);
-        cb->buf = MAP_FAILED;
-        return ret;
+    if (cb->buf == MAP_FAILED || !cb->size) {
+        return 0;
     }
-    return 0;
+    int ret = munmap(cb->buf, cb->size);
+    cb->buf = MAP_FAILED;
+    return ret;
 }
 
 size_t cyclic_buffer_data_size(struct cyclic_buffer* cb) {
