@@ -1,0 +1,120 @@
+name: Release
+on:
+  push:
+    tags:
+      - v*
+      - pre-rel-*
+
+jobs:
+  build:
+    name: Build Release
+    runs-on: ${{ matrix.os }}-latest
+    strategy:
+      matrix:
+        os:
+          - ubuntu
+          - windows
+          - macos
+    env:
+      X86_64_PC_WINDOWS_MSVC_OPENSSL_DIR: c:/vcpkg/installed/x64-windows-static
+      OPENSSL_STATIC: 1
+
+    steps:
+      - uses: actions/checkout@v1
+      - name: Musl
+        if: matrix.os == 'ubuntu'
+        run: |
+          sudo apt-get install musl musl-tools
+
+          musl-gcc -v
+
+      - name: Get upload url
+        id: release_upload_url
+        uses: actions/github-script@0.9.0
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          result-encoding: string
+          script: |
+              let tag = context.payload.ref.replace(/.*\//, '');
+              let release =  await github.request("GET /repos/:owner/:repo/releases/tags/:tag", {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: tag
+              });
+              console.log(release.data.upload_url);
+              return release.data.upload_url
+
+      - uses: actions-rs/toolchain@v1
+        if: matrix.os != 'ubuntu'
+        with:
+          toolchain: stable
+      - uses: actions-rs/toolchain@v1
+        if: matrix.os == 'ubuntu'
+        with:
+          toolchain: stable
+          target: x86_64-unknown-linux-musl
+          override: true
+      - name: Build macos
+        if: matrix.os == 'macos'
+        run: |
+          cd golemcli && cargo build --release --features openssl/vendored
+      - name: Build windows
+        if: matrix.os == 'windows'
+        run: |
+          vcpkg install openssl:x64-windows-static
+          vcpkg integrate install
+
+          cd golemcli && cargo build --release
+      - name: Build linux
+        if: matrix.os == 'ubuntu'
+        run: |
+
+          cd golemcli && cargo build --release --features openssl/vendored --target x86_64-unknown-linux-musl
+
+      - name: Pack
+        id: pack
+        shell: bash
+        env:
+          OS_NAME: ${{ matrix.os }}
+          GITHUB_REF: ${{ github.ref }}
+        run: |
+          TAG_NAME="${GITHUB_REF##*/}"
+          target=
+          if [ "$OS_NAME" = "ubuntu" ]; then
+            OS_NAME=linux
+            target=x86_64-unknown-linux-musl/
+          elif [ "$OS_NAME" == "macos" ]; then
+            OS_NAME=osx
+          fi
+          TARGET_DIR=releases/golemcli-${OS_NAME}-${TAG_NAME}
+
+          mkdir -p "$TARGET_DIR"
+          if [ "$OS_NAME" = "windows" ]; then
+              cp target/release/golemcli.exe "$TARGET_DIR/"
+              strip "$TARGET_DIR/golemcli.exe"
+          else
+              cp target/${target}release/golemcli "$TARGET_DIR/"
+              strip "$TARGET_DIR/golemcli"
+          fi
+          ls -al "$TARGET_DIR"
+          if [ "$OS_NAME" = "windows" ]; then
+              echo "::set-output name=artifact::golemcli-${OS_NAME}-${TAG_NAME}.zip"
+              echo "::set-output name=media::application/zip"
+              (cd "$TARGET_DIR" && 7z a "../golemcli-${OS_NAME}-${TAG_NAME}.zip" * )
+          else
+              echo "::set-output name=artifact::golemcli-${OS_NAME}-${TAG_NAME}.tar.gz"
+              echo "::set-output name=media::application/tar+gzip"
+              (cd releases && tar czvf "golemcli-${OS_NAME}-${TAG_NAME}.tar.gz" "golemcli-${OS_NAME}-${TAG_NAME}")
+          fi
+      - name: Upload
+        run: echo todo upload ${{ steps.pack.outputs.artifact }}
+      - name: Upload Release Asset
+        id: upload-release-asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.release_upload_url.outputs.result }}
+          asset_path: ./releases/${{ steps.pack.outputs.artifact }}
+          asset_name: ${{ steps.pack.outputs.artifact }}
+          asset_content_type: ${{ steps.pack.outputs.media }}

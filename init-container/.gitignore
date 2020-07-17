@@ -1,0 +1,6 @@
+unpacked_kernel
+*.o
+
+init 
+initramfs.cpio.gz 
+vmlinuz-virt
