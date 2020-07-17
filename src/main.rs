@@ -245,6 +245,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
 

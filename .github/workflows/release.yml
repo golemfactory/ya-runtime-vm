@@ -6,28 +6,27 @@ on:
       - pre-rel-*
 
 jobs:
+  create-release:
+    steps:
+      - name: Create Release
+        uses: actions/github-script@0.9.0
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          script: |
+            let tag = context.payload.ref.replace(/.*\//, '');
+            let release =  await github.request("GET /repos/:owner/:repo/releases/tags/:tag", {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag: tag
+            });
+
   build:
     name: Build Release
-    runs-on: ${{ matrix.os }}-latest
-    strategy:
-      matrix:
-        os:
-          - ubuntu
-          - windows
-          - macos
+    runs-on: ubuntu-latest
     env:
-      X86_64_PC_WINDOWS_MSVC_OPENSSL_DIR: c:/vcpkg/installed/x64-windows-static
       OPENSSL_STATIC: 1
-
     steps:
       - uses: actions/checkout@v1
-      - name: Musl
-        if: matrix.os == 'ubuntu'
-        run: |
-          sudo apt-get install musl musl-tools
-
-          musl-gcc -v
-
       - name: Get upload url
         id: release_upload_url
         uses: actions/github-script@0.9.0
