@@ -1,6 +1,7 @@
 #ifndef _PROCESS_BOOKKEEPING_H
 #define _PROCESS_BOOKKEEPING_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <sys/types.h>
 
