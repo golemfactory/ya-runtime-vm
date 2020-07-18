@@ -7,6 +7,8 @@ on:
 
 jobs:
   create-release:
+    name: "Create Release"
+    runs-on: ubuntu-latest
     steps:
       - name: Create Release
         uses: actions/github-script@0.9.0
@@ -14,11 +16,23 @@ jobs:
           github-token: ${{secrets.GITHUB_TOKEN}}
           script: |
             let tag = context.payload.ref.replace(/.*\//, '');
-            let release =  await github.request("GET /repos/:owner/:repo/releases/tags/:tag", {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              tag: tag
-            });
+            try {
+              let release =  await github.request("GET /repos/:owner/:repo/releases/tags/:tag", {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: tag
+              });
+            }
+            catch(e) {
+              await github.request("POST /repos/:owner/:repo/releases", {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                data: {
+                  tag_name: tag,
+                  prerelease: true
+                }
+              });
+            }
 
   build:
     name: Build Release
