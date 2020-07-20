@@ -1,6 +1,3 @@
-mod guest_agent_comm;
-mod response_parser;
-
 use std::{
     io::{self, prelude::*},
     process::Stdio,
@@ -11,7 +8,7 @@ use tokio::{
     sync,
 };
 
-use crate::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
+use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
 
 struct Notifications {
     process_died: sync::Notify,
