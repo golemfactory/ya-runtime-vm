@@ -22,5 +22,5 @@ name = "ya_runtime_vm"
 path = "src/lib.rs"
 
 [[bin]]
-name = "ya_runtime_vm"
+name = "ya-runtime-vm"
 path = "src/main.rs"
