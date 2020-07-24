@@ -1,20 +1,20 @@
 use futures::future::FutureExt;
-use std::{io, path::PathBuf, process::Stdio};
+use std::{path::PathBuf, process::Stdio};
 use structopt::StructOpt;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt},
+    fs,
+    io::{self, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt},
     process, spawn,
     sync::Mutex,
 };
-
-use tokio::io::AsyncReadExt;
-use ya_runtime_api::deploy::ContainerVolume;
 use ya_runtime_api::{
-    deploy::{DeployResult, StartMode},
+    deploy::{ContainerVolume, DeployResult, StartMode},
     server,
 };
-use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RemoteCommandResult};
-use ya_runtime_vm::volume::get_volumes;
+use ya_runtime_vm::{
+    guest_agent_comm::{GuestAgent, Notification, RemoteCommandResult},
+    volume::get_volumes,
+};
 
 #[derive(StructOpt)]
 enum Commands {
@@ -34,9 +34,7 @@ struct CmdArgs {
 }
 
 async fn deploy(cmdargs: &CmdArgs) -> anyhow::Result<()> {
-    tokio::fs::create_dir_all(&cmdargs.workdir).await?;
-
-    let package_file = tokio::fs::File::open(&cmdargs.task_package).await?;
+    let package_file = fs::File::open(&cmdargs.task_package).await?;
     let volumes = match get_volumes(package_file).await {
         Ok(volumes) => volumes,
         Err(err) => {
@@ -44,8 +42,10 @@ async fn deploy(cmdargs: &CmdArgs) -> anyhow::Result<()> {
             Vec::new()
         }
     };
+
+    fs::create_dir_all(&cmdargs.workdir).await?;
     for vol in &volumes {
-        tokio::fs::create_dir_all(cmdargs.workdir.join(&vol.name)).await?;
+        fs::create_dir_all(cmdargs.workdir.join(&vol.name)).await?;
     }
 
     let res = DeployResult {
@@ -54,18 +54,17 @@ async fn deploy(cmdargs: &CmdArgs) -> anyhow::Result<()> {
         start_mode: StartMode::Blocking,
     };
     let json = format!("{}\n", serde_json::to_string(&res)?);
-    {
-        tokio::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(cmdargs.workdir.join("vols.json"))
-            .await?
-            .write_all(json.as_bytes())
-            .await?;
-    }
 
-    let mut stdout = tokio::io::stdout();
+    fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(cmdargs.workdir.join("vols.json"))
+        .await?
+        .write_all(json.as_bytes())
+        .await?;
+
+    let mut stdout = io::stdout();
     stdout.write_all(json.as_bytes()).await?;
     stdout.flush().await?;
     Ok(())
@@ -73,7 +72,7 @@ async fn deploy(cmdargs: &CmdArgs) -> anyhow::Result<()> {
 
 async fn volumes(cmdargs: &CmdArgs) -> anyhow::Result<Vec<ContainerVolume>> {
     let mut json = String::new();
-    tokio::fs::OpenOptions::new()
+    fs::OpenOptions::new()
         .read(true)
         .open(cmdargs.workdir.join("vols.json"))
         .await?
@@ -132,8 +131,8 @@ fn notification_into_status(notification: Notification) -> server::ProcessStatus
     }
 }
 
-async fn reader_to_log<T: tokio::io::AsyncRead + Unpin>(reader: T) {
-    let mut reader = tokio::io::BufReader::new(reader);
+async fn reader_to_log<T: io::AsyncRead + Unpin>(reader: T) {
+    let mut reader = io::BufReader::new(reader);
     let mut buf = Vec::new();
     loop {
         match reader.read_until(b'\n', &mut buf).await {
@@ -160,7 +159,7 @@ impl Runtime {
     async fn started<'a, E: server::RuntimeEvent + Send + 'static>(
         volumes: Vec<ContainerVolume>,
         event_emitter: E,
-    ) -> std::io::Result<Self> {
+    ) -> io::Result<Self> {
         let mut cmd = process::Command::new("qemu-system-x86_64");
         cmd.args(&[
             "-m",

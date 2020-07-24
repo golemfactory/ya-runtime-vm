@@ -1,5 +1,5 @@
 use anyhow::anyhow;
-use std::io;
+use std::io::SeekFrom;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 use uuid::Uuid;
 use ya_runtime_api::deploy::ContainerVolume;
@@ -9,7 +9,7 @@ pub async fn get_volumes<Input: AsyncRead + AsyncSeek + Unpin>(
 ) -> anyhow::Result<Vec<ContainerVolume>> {
     let json_len: u32 = {
         let mut buf = [0; 8];
-        input.seek(io::SeekFrom::End(-8)).await?;
+        input.seek(SeekFrom::End(-8)).await?;
         input.read_exact(&mut buf).await?;
         log::debug!("raw json length: {:?}", buf);
         let buf_str = std::str::from_utf8(&buf)?;
@@ -20,7 +20,7 @@ pub async fn get_volumes<Input: AsyncRead + AsyncSeek + Unpin>(
     let json: serde_json::Value = {
         let mut buf = String::new();
         input
-            .seek(io::SeekFrom::End(-1 * (json_len + 8) as i64))
+            .seek(SeekFrom::End(-1 * (json_len + 8) as i64))
             .await?;
         input.take(json_len as u64).read_to_string(&mut buf).await?;
         log::debug!("json: {:?}", buf);
