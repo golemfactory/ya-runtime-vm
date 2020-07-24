@@ -6,12 +6,15 @@ use tokio::{
     process, spawn,
     sync::Mutex,
 };
+
+use tokio::io::AsyncReadExt;
+use ya_runtime_api::deploy::ContainerVolume;
 use ya_runtime_api::{
     deploy::{DeployResult, StartMode},
     server,
 };
-
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RemoteCommandResult};
+use ya_runtime_vm::volume::get_volumes;
 
 #[derive(StructOpt)]
 enum Commands {
@@ -23,25 +26,60 @@ enum Commands {
 #[structopt(rename_all = "kebab-case")]
 struct CmdArgs {
     #[structopt(short, long)]
-    workdir: PathBuf, // TODO: use it
+    workdir: PathBuf,
     #[structopt(short, long)]
-    task_package: PathBuf, // TODO: use it
+    task_package: PathBuf,
     #[structopt(subcommand)]
     command: Commands,
 }
 
-async fn deploy() -> std::io::Result<()> {
+async fn deploy(cmdargs: &CmdArgs) -> anyhow::Result<()> {
+    tokio::fs::create_dir_all(&cmdargs.workdir).await?;
+
+    let package_file = tokio::fs::File::open(&cmdargs.task_package).await?;
+    let volumes = match get_volumes(package_file).await {
+        Ok(volumes) => volumes,
+        Err(err) => {
+            log::warn!("failed to get volumes: {}", err);
+            Vec::new()
+        }
+    };
+    for vol in &volumes {
+        tokio::fs::create_dir_all(cmdargs.workdir.join(&vol.name)).await?;
+    }
+
     let res = DeployResult {
         valid: Ok(Default::default()),
-        vols: Default::default(),
+        vols: volumes,
         start_mode: StartMode::Blocking,
     };
+    let json = format!("{}\n", serde_json::to_string(&res)?);
+    {
+        tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(cmdargs.workdir.join("vols.json"))
+            .await?
+            .write_all(json.as_bytes())
+            .await?;
+    }
 
     let mut stdout = tokio::io::stdout();
-    let json = format!("{}\n", serde_json::to_string(&res)?);
     stdout.write_all(json.as_bytes()).await?;
     stdout.flush().await?;
     Ok(())
+}
+
+async fn volumes(cmdargs: &CmdArgs) -> anyhow::Result<Vec<ContainerVolume>> {
+    let mut json = String::new();
+    tokio::fs::OpenOptions::new()
+        .read(true)
+        .open(cmdargs.workdir.join("vols.json"))
+        .await?
+        .read_to_string(&mut json)
+        .await?;
+    Ok(serde_json::from_str(&json)?)
 }
 
 struct RuntimeData {
@@ -119,41 +157,53 @@ async fn reader_to_log<T: tokio::io::AsyncRead + Unpin>(reader: T) {
 }
 
 impl Runtime {
-    async fn started<E: server::RuntimeEvent + Send + 'static>(
+    async fn started<'a, E: server::RuntimeEvent + Send + 'static>(
+        volumes: Vec<ContainerVolume>,
         event_emitter: E,
     ) -> std::io::Result<Self> {
-        let mut qemu = process::Command::new("qemu-system-x86_64")
-            .args(&[
-                "-m",
-                "256m",
-                "-nographic",
-                "-vga",
-                "none",
-                "-kernel",
-                "init-container/vmlinuz-virt",
-                "-initrd",
-                "init-container/initramfs.cpio.gz",
-                "-no-reboot",
-                "-net",
-                "none",
-                "-smp",
-                "1",
-                "-append",
-                "console=ttyS0 panic=1",
-                "-device",
-                "virtio-serial",
-                "-chardev",
-                "socket,path=./manager.sock,server,nowait,id=manager_cdev",
-                "-device",
-                "virtserialport,chardev=manager_cdev,name=manager_port",
-                "-drive",
-                "file=./squashfs_drive,cache=none,readonly=on,format=raw,if=virtio",
-            ])
+        let mut cmd = process::Command::new("qemu-system-x86_64");
+        cmd.args(&[
+            "-m",
+            "256m",
+            "-nographic",
+            "-vga",
+            "none",
+            "-kernel",
+            "init-container/vmlinuz-virt",
+            "-initrd",
+            "init-container/initramfs.cpio.gz",
+            "-no-reboot",
+            "-net",
+            "none",
+            "-smp",
+            "1",
+            "-append",
+            "console=ttyS0 panic=1",
+            "-device",
+            "virtio-serial",
+            "-chardev",
+            "socket,path=./manager.sock,server,nowait,id=manager_cdev",
+            "-device",
+            "virtserialport,chardev=manager_cdev,name=manager_port",
+            "-drive",
+            "file=./squashfs_drive,cache=none,readonly=on,format=raw,if=virtio",
+        ]);
+        for volume in volumes.iter() {
+            cmd.arg("-virtfs");
+            cmd.arg(format!(
+                "local,id={tag},path={path},security_model=none,mount_tag={tag}",
+                tag = volume.name,
+                path = volume.path
+            ));
+        }
+
+        let mut qemu = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .kill_on_drop(true)
             .spawn()?;
         spawn(reader_to_log(qemu.stdout.take().unwrap()));
+
         let ga = GuestAgent::connected("./manager.sock", 10, move |notification| {
             event_emitter.on_process_status(notification_into_status(notification));
         })
@@ -215,7 +265,10 @@ impl server::RuntimeService for Runtime {
         log::debug!("got shutdown");
         async move {
             let mut data = self.0.lock().await;
-            let qemu = data.qemu.take().ok_or(server::ErrorResponse::msg("not running"))?;
+            let qemu = data
+                .qemu
+                .take()
+                .ok_or(server::ErrorResponse::msg("not running"))?;
 
             {
                 let result = data.ga.quit().await;
@@ -242,11 +295,14 @@ impl server::RuntimeService for Runtime {
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
     let cmdargs = CmdArgs::from_args();
-    match cmdargs.command {
-        Commands::Deploy { .. } => deploy().await?,
+    match &cmdargs.command {
+        Commands::Deploy { .. } => deploy(&cmdargs).await?,
         Commands::Start { .. } => {
             server::run_async(|e| async {
-                Runtime::started(e).await.expect("failed to start runtime")
+                let volumes = volumes(&cmdargs).await.expect("failed to read volumes");
+                Runtime::started(volumes, e)
+                    .await
+                    .expect("failed to start runtime")
             })
             .await
         }
