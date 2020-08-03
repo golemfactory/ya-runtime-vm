@@ -1,5 +1,7 @@
 use futures::future::FutureExt;
-use std::{path::PathBuf, process::Stdio};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use structopt::StructOpt;
 use tokio::{
     fs,
@@ -15,6 +17,9 @@ use ya_runtime_vm::{
     guest_agent_comm::{GuestAgent, Notification, RemoteCommandResult},
     volume::get_volumes,
 };
+
+static ASSET_VMLINUZ: &'static [u8] = include_bytes!("../../init-container/vmlinuz-virt");
+static ASSET_INITRAMFS: &'static [u8] = include_bytes!("../../init-container/initramfs.cpio.gz");
 
 #[derive(StructOpt)]
 enum Commands {
@@ -33,9 +38,24 @@ struct CmdArgs {
     command: Commands,
 }
 
+struct RuntimeData {
+    qemu: Option<process::Child>,
+    ga: GuestAgent,
+}
+
+struct Runtime(Mutex<RuntimeData>);
+
+#[derive(Debug, Deserialize, Serialize)]
+struct Deployment {
+    workdir: PathBuf,
+    task_package: PathBuf,
+    vols: Vec<ContainerVolume>,
+}
+
 async fn deploy(cmdargs: &CmdArgs) -> anyhow::Result<()> {
+    let workdir = &cmdargs.workdir;
     let package_file = fs::File::open(&cmdargs.task_package).await?;
-    let volumes = match get_volumes(package_file).await {
+    let vols = match get_volumes(package_file).await {
         Ok(volumes) => volumes,
         Err(err) => {
             log::warn!("failed to get volumes: {}", err);
@@ -43,50 +63,56 @@ async fn deploy(cmdargs: &CmdArgs) -> anyhow::Result<()> {
         }
     };
 
-    fs::create_dir_all(&cmdargs.workdir).await?;
-    for vol in &volumes {
-        fs::create_dir_all(cmdargs.workdir.join(&vol.name)).await?;
+    fs::create_dir_all(&workdir).await?;
+    for vol in &vols {
+        fs::create_dir_all(workdir.join(&vol.name)).await?;
     }
+    write_file(workdir.join("vmlinuz-virt"), ASSET_VMLINUZ).await?;
+    write_file(workdir.join("initramfs.cpio.gz"), ASSET_INITRAMFS).await?;
 
-    let res = DeployResult {
+    let result = DeployResult {
         valid: Ok(Default::default()),
-        vols: volumes,
+        vols,
         start_mode: StartMode::Blocking,
     };
-    let json = format!("{}\n", serde_json::to_string(&res)?);
+    let result_json = format!("{}\n", serde_json::to_string(&result)?);
 
-    fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(cmdargs.workdir.join("vols.json"))
-        .await?
-        .write_all(json.as_bytes())
-        .await?;
+    let deployment = Deployment {
+        workdir: cmdargs.workdir.clone(),
+        task_package: cmdargs.task_package.clone(),
+        vols: result.vols,
+    };
+    let deployment_json = serde_json::to_string_pretty(&deployment)?;
+    write_file(workdir.join("deployment.json"), deployment_json.as_bytes()).await?;
 
     let mut stdout = io::stdout();
-    stdout.write_all(json.as_bytes()).await?;
+    stdout.write_all(result_json.as_bytes()).await?;
     stdout.flush().await?;
     Ok(())
 }
 
-async fn volumes(cmdargs: &CmdArgs) -> anyhow::Result<Vec<ContainerVolume>> {
+async fn deployment(cmdargs: &CmdArgs) -> anyhow::Result<Deployment> {
     let mut json = String::new();
     fs::OpenOptions::new()
         .read(true)
-        .open(cmdargs.workdir.join("vols.json"))
+        .open(cmdargs.workdir.join("deployment.json"))
         .await?
         .read_to_string(&mut json)
         .await?;
     Ok(serde_json::from_str(&json)?)
 }
 
-struct RuntimeData {
-    qemu: Option<process::Child>,
-    ga: GuestAgent,
+async fn write_file<P: AsRef<Path>>(path: P, bytes: &[u8]) -> anyhow::Result<()> {
+    fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path.as_ref())
+        .await?
+        .write_all(bytes)
+        .await?;
+    Ok(())
 }
-
-struct Runtime(Mutex<RuntimeData>);
 
 fn convert_result<T>(
     result: io::Result<RemoteCommandResult<T>>,
@@ -157,7 +183,7 @@ async fn reader_to_log<T: io::AsyncRead + Unpin>(reader: T) {
 
 impl Runtime {
     async fn started<'a, E: server::RuntimeEvent + Send + 'static>(
-        volumes: Vec<ContainerVolume>,
+        deployment: Deployment,
         event_emitter: E,
     ) -> io::Result<Self> {
         let mut cmd = process::Command::new("qemu-system-x86_64");
@@ -168,9 +194,9 @@ impl Runtime {
             "-vga",
             "none",
             "-kernel",
-            "init-container/vmlinuz-virt",
+            "./vmlinuz-virt",
             "-initrd",
-            "init-container/initramfs.cpio.gz",
+            "./initramfs.cpio.gz",
             "-no-reboot",
             "-net",
             "none",
@@ -185,14 +211,18 @@ impl Runtime {
             "-device",
             "virtserialport,chardev=manager_cdev,name=manager_port",
             "-drive",
-            "file=./squashfs_drive,cache=none,readonly=on,format=raw,if=virtio",
         ]);
-        for volume in volumes.iter() {
+        cmd.arg(format!(
+            "file={},cache=none,readonly=on,format=raw,if=virtio",
+            deployment.task_package.display()
+        ));
+
+        for (idx, volume) in deployment.vols.iter().enumerate() {
             cmd.arg("-virtfs");
             cmd.arg(format!(
                 "local,id={tag},path={path},security_model=none,mount_tag={tag}",
-                tag = volume.name,
-                path = volume.path
+                tag = format!("mnt{}", idx),
+                path = deployment.workdir.join(&volume.name).to_string_lossy(),
             ));
         }
 
@@ -203,10 +233,17 @@ impl Runtime {
             .spawn()?;
         spawn(reader_to_log(qemu.stdout.take().unwrap()));
 
-        let ga = GuestAgent::connected("./manager.sock", 10, move |notification| {
+        let mut ga = GuestAgent::connected("./manager.sock", 10, move |notification| {
             event_emitter.on_process_status(notification_into_status(notification));
         })
         .await?;
+
+        for (idx, volume) in deployment.vols.iter().enumerate() {
+            ga.mount(format!("mnt{}", idx).as_str(), volume.path.as_str())
+                .await?
+                .expect("Mount failed");
+        }
+
         Ok(Self(Mutex::new(RuntimeData {
             qemu: Some(qemu),
             ga,
@@ -298,8 +335,10 @@ async fn main() -> anyhow::Result<()> {
         Commands::Deploy { .. } => deploy(&cmdargs).await?,
         Commands::Start { .. } => {
             server::run_async(|e| async {
-                let volumes = volumes(&cmdargs).await.expect("failed to read volumes");
-                Runtime::started(volumes, e)
+                let deployment = deployment(&cmdargs)
+                    .await
+                    .expect("failed to read the deployment file");
+                Runtime::started(deployment, e)
                     .await
                     .expect("failed to start runtime")
             })
