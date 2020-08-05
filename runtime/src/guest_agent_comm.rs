@@ -1,3 +1,7 @@
+use futures::future::{BoxFuture, FutureExt};
+use futures::lock::Mutex;
+use std::path::Path;
+use std::sync::Arc;
 use std::{io, marker::PhantomData};
 use tokio::{
     io::{split, AsyncWriteExt, ReadHalf, WriteHalf},
@@ -16,6 +20,7 @@ enum MsgType {
     MsgRunProcess,
     MsgKillProcess,
     MsgMountVolume,
+    #[allow(unused)]
     MsgUploadFile,
     MsgQueryOutput,
 }
@@ -286,50 +291,66 @@ impl<T> AsRef<Vec<u8>> for Message<T> {
 
 pub type RemoteCommandResult<T> = Result<T, /* exit code */ u32>;
 
-async fn reader<F>(
+fn reader<'f, F>(
+    agent: Arc<Mutex<GuestAgent>>,
     mut stream: ReadHalf<UnixStream>,
     mut notification_handler: F,
     mut responses: mpsc::Sender<ResponseWithId>,
-) -> io::Error
+) -> BoxFuture<'f, io::Error>
 where
-    F: FnMut(Notification) -> () + Send + 'static,
+    F: FnMut(Notification, Arc<Mutex<GuestAgent>>) -> BoxFuture<'static, ()> + Send + 'static,
 {
-    loop {
-        match parse_one_response(&mut stream).await {
-            Ok(msg) => match msg {
-                GuestAgentMessage::Notification(notification) => notification_handler(notification),
-                GuestAgentMessage::Response(resp) => {
-                    responses.send(resp).await.expect("failed to send response");
-                }
-            },
-            Err(err) => return err,
+    async move {
+        loop {
+            match parse_one_response(&mut stream).await {
+                Ok(msg) => match msg {
+                    GuestAgentMessage::Notification(notification) => {
+                        spawn(notification_handler(notification, agent.clone()));
+                    }
+                    GuestAgentMessage::Response(resp) => {
+                        responses.send(resp).await.expect("failed to send response");
+                    }
+                },
+                Err(err) => return err,
+            }
         }
     }
+    .boxed()
 }
 
 impl GuestAgent {
-    pub async fn connected<F>(
-        path: &str,
+    pub async fn connected<F, P>(
+        path: P,
         timeout: u32,
         notification_handler: F,
-    ) -> io::Result<GuestAgent>
+    ) -> io::Result<Arc<Mutex<GuestAgent>>>
     where
-        F: FnMut(Notification) -> () + Send + 'static,
+        F: FnMut(Notification, Arc<Mutex<GuestAgent>>) -> BoxFuture<'static, ()> + Send + 'static,
+        P: AsRef<Path>,
     {
         let mut timeout_remaining = timeout;
         loop {
-            match UnixStream::connect(path).await {
+            match UnixStream::connect(&path).await {
                 Ok(s) => {
                     let (stream_read, stream_write) = split(s);
                     let (response_send, response_receive) = mpsc::channel(10);
-                    let reader_handle =
-                        spawn(reader(stream_read, notification_handler, response_send));
-                    break Ok(GuestAgent {
+                    let ga = Arc::new(Mutex::new(GuestAgent {
                         stream: stream_write,
                         last_msg_id: 0,
                         responses: response_receive,
-                        responses_reader_handle: Some(reader_handle),
-                    });
+                        responses_reader_handle: None,
+                    }));
+                    let reader_handle = spawn(reader(
+                        ga.clone(),
+                        stream_read,
+                        notification_handler,
+                        response_send,
+                    ));
+                    ga.lock()
+                        .await
+                        .responses_reader_handle
+                        .replace(reader_handle);
+                    break Ok(ga);
                 }
                 Err(err) => match err.kind() {
                     io::ErrorKind::NotFound => {

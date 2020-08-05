@@ -39,6 +39,7 @@ pub struct ExitReason {
     pub type_: ExitType,
 }
 
+#[derive(Debug)]
 pub enum Notification {
     OutputAvailable { id: u64, fd: u32 },
     ProcessDied { id: u64, reason: ExitReason },
@@ -50,6 +51,7 @@ pub struct ResponseWithId {
     pub resp: Response,
 }
 
+#[derive(Debug)]
 pub enum GuestAgentMessage {
     Response(ResponseWithId),
     Notification(Notification),
