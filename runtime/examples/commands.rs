@@ -81,17 +81,28 @@ impl Clone for Events {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let dir = tempdir::TempDir::new("ya-runtime-vm")?;
+    let args = [
+        "run",
+        "--package",
+        "ya-runtime-vm",
+        "--",
+        "--task-package",
+        "./squashfs_drive",
+        "--workdir",
+    ];
+
     let mut cmd = Command::new("cargo");
     cmd.env("RUST_LOG", "debug");
-    cmd.arg("run")
-        .arg("--package")
-        .arg("ya-runtime-vm")
-        .arg("--")
-        .arg("--task-package")
-        .arg(".")
-        .arg("--workdir")
-        .arg(".")
-        .arg("start");
+    cmd.args(&args);
+    cmd.arg(dir.path()).arg("deploy");
+    let child = cmd.spawn()?;
+    child.await?;
+
+    let mut cmd = Command::new("cargo");
+    cmd.env("RUST_LOG", "debug");
+    cmd.args(&args);
+    cmd.arg(dir.path()).arg("start");
 
     let events = Events::new();
 
