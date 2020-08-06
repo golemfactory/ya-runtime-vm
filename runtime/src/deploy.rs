@@ -1,9 +1,11 @@
 use bollard_stubs::models::ContainerConfig;
+use crc::crc32;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::path::PathBuf;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
+use tokio_byteorder::LittleEndian;
 use uuid::Uuid;
 use ya_runtime_api::deploy::ContainerVolume;
 
@@ -36,13 +38,24 @@ impl Deployment {
             input.read_exact(&mut buf).await?;
             std::str::from_utf8(&buf)?.parse()?
         };
-        let config: ContainerConfig = {
+        let crc: u32 = {
+            let offset = 4 + json_len as i64 + 8;
+            input.seek(SeekFrom::End(-offset)).await?;
+            tokio_byteorder::AsyncReadBytesExt::read_u32::<LittleEndian>(&mut input).await?
+        };
+        let json = {
             let mut buf = String::new();
             let pos = -1 * (json_len + 8) as i64;
             input.seek(SeekFrom::End(pos)).await?;
             input.take(json_len as u64).read_to_string(&mut buf).await?;
-            serde_json::from_str(&buf)?
+            buf
         };
+
+        if crc32::checksum_ieee(json.as_bytes()) != crc {
+            return Err(anyhow::anyhow!("Invalid ContainerConfig crc32 sum"));
+        }
+
+        let config: ContainerConfig = serde_json::from_str(&json)?;
         Ok(Deployment {
             cpu_cores,
             mem_mib,
