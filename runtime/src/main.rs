@@ -1,17 +1,47 @@
 use futures::future::FutureExt;
-use std::{io, path::PathBuf, process::Stdio};
+use futures::lock::Mutex;
+use std::path::{Component, Path, PathBuf};
+use std::process::Stdio;
+use std::sync::Arc;
 use structopt::StructOpt;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt},
+    fs,
+    io::{self, AsyncBufReadExt, AsyncWriteExt},
     process, spawn,
-    sync::Mutex,
 };
 use ya_runtime_api::{
     deploy::{DeployResult, StartMode},
     server,
 };
+use ya_runtime_vm::{
+    deploy::Deployment,
+    guest_agent_comm::{GuestAgent, Notification, RedirectFdType, RemoteCommandResult},
+};
 
-use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RemoteCommandResult};
+static ASSET_VMLINUZ: &'static [u8] = include_bytes!("../../init-container/vmlinuz-virt");
+static ASSET_INITRAMFS: &'static [u8] = include_bytes!("../../init-container/initramfs.cpio.gz");
+
+const FILE_VMLINUZ: &'static str = "vmlinuz-virt";
+const FILE_INITRAMFS: &'static str = "initramfs.cpio.gz";
+const FILE_DEPLOYMENT: &'static str = "deployment.json";
+
+#[derive(StructOpt)]
+#[structopt(rename_all = "kebab-case")]
+struct CmdArgs {
+    #[structopt(short, long)]
+    workdir: PathBuf,
+    #[structopt(short, long)]
+    task_package: PathBuf,
+    #[structopt(long, default_value = "1")]
+    cpu_cores: usize,
+    #[structopt(long, default_value = "0.25")]
+    mem_gib: f64,
+    #[allow(unused)]
+    #[structopt(long, default_value = "0.25")]
+    storage_gib: f64,
+    #[structopt(subcommand)]
+    command: Commands,
+}
 
 #[derive(StructOpt)]
 enum Commands {
@@ -19,37 +49,78 @@ enum Commands {
     Start {},
 }
 
-#[derive(StructOpt)]
-#[structopt(rename_all = "kebab-case")]
-struct CmdArgs {
-    #[structopt(short, long)]
-    workdir: PathBuf, // TODO: use it
-    #[structopt(short, long)]
-    task_package: PathBuf, // TODO: use it
-    #[structopt(subcommand)]
-    command: Commands,
+struct RuntimeData {
+    qemu: Option<process::Child>,
+    ga: Arc<Mutex<GuestAgent>>,
 }
 
-async fn deploy() -> std::io::Result<()> {
-    let res = DeployResult {
+struct Runtime {
+    data: Mutex<RuntimeData>,
+    deployment: Deployment,
+}
+
+async fn deploy(cmdargs: &CmdArgs) -> anyhow::Result<()> {
+    let workdir = normalize_path(&cmdargs.workdir).await?;
+    let task_package = normalize_path(&cmdargs.task_package).await?;
+    let package_file = fs::File::open(&task_package).await?;
+    let deployment = Deployment::try_from_input(
+        package_file,
+        cmdargs.cpu_cores,
+        (cmdargs.mem_gib * 1024.) as usize,
+        task_package,
+    )
+    .await
+    .expect("Error reading package metadata");
+
+    fs::create_dir_all(&workdir).await?;
+    for vol in &deployment.volumes {
+        fs::create_dir_all(workdir.join(&vol.name)).await?;
+    }
+
+    write_file(workdir.join(FILE_VMLINUZ), ASSET_VMLINUZ).await?;
+    write_file(workdir.join(FILE_INITRAMFS), ASSET_INITRAMFS).await?;
+    write_file(
+        workdir.join(FILE_DEPLOYMENT),
+        serde_json::to_string(&deployment)?.as_bytes(),
+    )
+    .await?;
+
+    let result = DeployResult {
         valid: Ok(Default::default()),
-        vols: Default::default(),
+        vols: deployment.volumes,
         start_mode: StartMode::Blocking,
     };
+    let result_json = format!("{}\n", serde_json::to_string(&result)?);
 
-    let mut stdout = tokio::io::stdout();
-    let json = format!("{}\n", serde_json::to_string(&res)?);
-    stdout.write_all(json.as_bytes()).await?;
+    let mut stdout = io::stdout();
+    stdout.write_all(result_json.as_bytes()).await?;
     stdout.flush().await?;
     Ok(())
 }
 
-struct RuntimeData {
-    qemu: Option<process::Child>,
-    ga: GuestAgent,
+async fn write_file<P: AsRef<Path>>(path: P, bytes: &[u8]) -> anyhow::Result<()> {
+    fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path.as_ref())
+        .await?
+        .write_all(bytes)
+        .await?;
+    Ok(())
 }
 
-struct Runtime(Mutex<RuntimeData>);
+async fn normalize_path<P: AsRef<Path>>(path: P) -> anyhow::Result<PathBuf> {
+    Ok(fs::canonicalize(path)
+        .await?
+        .components()
+        .into_iter()
+        .filter(|c| match c {
+            Component::Prefix(_) => false,
+            _ => true,
+        })
+        .collect::<PathBuf>())
+}
 
 fn convert_result<T>(
     result: io::Result<RemoteCommandResult<T>>,
@@ -68,16 +139,45 @@ fn convert_result<T>(
     }
 }
 
-fn notification_into_status(notification: Notification) -> server::ProcessStatus {
+async fn notification_into_status(
+    notification: Notification,
+    ga: Arc<Mutex<GuestAgent>>,
+) -> server::ProcessStatus {
     match notification {
         Notification::OutputAvailable { id, fd } => {
             log::debug!("Process {} has output available on fd {}", id, fd);
+            let output = {
+                let result = {
+                    let mut guard = ga.lock().await;
+                    guard.query_output(id, 0, u64::MAX).await
+                };
+                match result {
+                    Ok(output) => match output {
+                        Ok(vec) => vec,
+                        Err(e) => {
+                            log::error!("Remote error while querying output: {:?}", e);
+                            Vec::new()
+                        }
+                    },
+                    Err(e) => {
+                        log::error!("Error querying output: {:?}", e);
+                        Vec::new()
+                    }
+                }
+            };
+
+            let (stdout, stderr) = if fd == 1 {
+                (output, Vec::new())
+            } else {
+                (Vec::new(), output)
+            };
+
             server::ProcessStatus {
                 pid: id,
                 running: true,
                 return_code: 0,
-                stdout: Vec::new(),
-                stderr: Vec::new(),
+                stdout,
+                stderr,
             }
         }
         Notification::ProcessDied { id, reason } => {
@@ -94,8 +194,8 @@ fn notification_into_status(notification: Notification) -> server::ProcessStatus
     }
 }
 
-async fn reader_to_log<T: tokio::io::AsyncRead + Unpin>(reader: T) {
-    let mut reader = tokio::io::BufReader::new(reader);
+async fn reader_to_log<T: io::AsyncRead + Unpin>(reader: T) {
+    let mut reader = io::BufReader::new(reader);
     let mut buf = Vec::new();
     loop {
         match reader.read_until(b'\n', &mut buf).await {
@@ -119,49 +219,96 @@ async fn reader_to_log<T: tokio::io::AsyncRead + Unpin>(reader: T) {
 }
 
 impl Runtime {
-    async fn started<E: server::RuntimeEvent + Send + 'static>(
+    async fn started<'a, E: server::RuntimeEvent + Send + Sync + 'static, P: AsRef<Path>>(
+        workdir: P,
+        deployment: Deployment,
         event_emitter: E,
-    ) -> std::io::Result<Self> {
-        let mut qemu = process::Command::new("qemu-system-x86_64")
-            .args(&[
-                "-m",
-                "256m",
-                "-nographic",
-                "-vga",
-                "none",
-                "-kernel",
-                "init-container/vmlinuz-virt",
-                "-initrd",
-                "init-container/initramfs.cpio.gz",
-                "-no-reboot",
-                "-net",
-                "none",
-                "-smp",
-                "1",
-                "-append",
-                "console=ttyS0 panic=1",
-                "-device",
-                "virtio-serial",
-                "-chardev",
-                "socket,path=./manager.sock,server,nowait,id=manager_cdev",
-                "-device",
-                "virtserialport,chardev=manager_cdev,name=manager_port",
-                "-drive",
-                "file=./squashfs_drive,cache=none,readonly=on,format=raw,if=virtio",
-            ])
+    ) -> io::Result<Self> {
+        let workdir = workdir.as_ref();
+        let socket_path = std::env::temp_dir().join(format!(
+            "{}.sock",
+            uuid::Uuid::new_v4().to_simple().to_string()
+        ));
+        let mut cmd = process::Command::new("qemu-system-x86_64");
+        cmd.args(&[
+            "-m",
+            format!("{}M", deployment.mem_mib).as_str(),
+            "-nographic",
+            "-vga",
+            "none",
+            "-kernel",
+            workdir.join(FILE_VMLINUZ).display().to_string().as_str(),
+            "-initrd",
+            workdir.join(FILE_INITRAMFS).display().to_string().as_str(),
+            "-no-reboot",
+            "-net",
+            "none",
+            "-smp",
+            deployment.cpu_cores.to_string().as_str(),
+            "-append",
+            "console=ttyS0 panic=1",
+            "-device",
+            "virtio-serial",
+            "-chardev",
+            format!(
+                "socket,path={},server,nowait,id=manager_cdev",
+                socket_path.display()
+            )
+            .as_str(),
+            "-device",
+            "virtserialport,chardev=manager_cdev,name=manager_port",
+            "-drive",
+            format!(
+                "file={},cache=none,readonly=on,format=raw,if=virtio",
+                deployment.task_package.display()
+            )
+            .as_str(),
+        ]);
+
+        for (idx, volume) in deployment.volumes.iter().enumerate() {
+            cmd.arg("-virtfs");
+            cmd.arg(format!(
+                "local,id={tag},path={path},security_model=none,mount_tag={tag}",
+                tag = format!("mnt{}", idx),
+                path = workdir.join(&volume.name).to_string_lossy(),
+            ));
+        }
+
+        let mut qemu = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .kill_on_drop(true)
             .spawn()?;
         spawn(reader_to_log(qemu.stdout.take().unwrap()));
-        let ga = GuestAgent::connected("./manager.sock", 10, move |notification| {
-            event_emitter.on_process_status(notification_into_status(notification));
+
+        let emitter = Arc::new(event_emitter);
+        let ga = GuestAgent::connected(socket_path, 10, move |notification, ga| {
+            let emitter = emitter.clone();
+            async move {
+                let status = notification_into_status(notification, ga).await;
+                emitter.on_process_status(status);
+            }
+            .boxed()
         })
         .await?;
-        Ok(Self(Mutex::new(RuntimeData {
-            qemu: Some(qemu),
-            ga,
-        })))
+
+        {
+            let mut ga_guard = ga.lock().await;
+            for (idx, volume) in deployment.volumes.iter().enumerate() {
+                ga_guard
+                    .mount(format!("mnt{}", idx).as_str(), volume.path.as_str())
+                    .await?
+                    .expect("Mount failed");
+            }
+        }
+
+        Ok(Runtime {
+            data: Mutex::new(RuntimeData {
+                qemu: Some(qemu),
+                ga,
+            }),
+            deployment,
+        })
     }
 }
 
@@ -176,12 +323,15 @@ impl server::RuntimeService for Runtime {
         run: server::RunProcess,
     ) -> server::AsyncResponse<server::RunProcessResp> {
         log::debug!("got run process: {:?}", run);
+        let (uid, gid) = self.deployment.user;
+        let env = self.deployment.env();
+
         async move {
-            let result = self
-                .0
+            let data = self.data.lock().await;
+            let result = data
+                .ga
                 .lock()
                 .await
-                .ga
                 .run_process(
                     &run.bin,
                     run.args
@@ -189,10 +339,14 @@ impl server::RuntimeService for Runtime {
                         .map(|s| s.as_ref())
                         .collect::<Vec<&str>>()
                         .as_slice(),
-                    /*maybe_env*/ None, // TODO
-                    /*uid*/ 0, // TODO
-                    /*gid*/ 0, // TODO
-                    /*fds*/ &[None, None, None], // TODO
+                    Some(&env[..]),
+                    uid,
+                    gid,
+                    &[
+                        None,
+                        Some(RedirectFdType::RedirectFdPipeCyclic(0x1000)),
+                        Some(RedirectFdType::RedirectFdPipeCyclic(0x1000)),
+                    ],
                     /*maybe_cwd*/ None, // TODO
                 )
                 .await;
@@ -205,7 +359,8 @@ impl server::RuntimeService for Runtime {
         log::debug!("got kill: {:?}", kill);
         async move {
             // TODO: send signal
-            let result = self.0.lock().await.ga.kill(kill.pid).await;
+            let data = self.data.lock().await;
+            let result = data.ga.lock().await.kill(kill.pid).await;
             convert_result(result, &format!("Killing process {}", kill.pid))
         }
         .boxed_local()
@@ -214,15 +369,18 @@ impl server::RuntimeService for Runtime {
     fn shutdown(&self) -> server::AsyncResponse<'_, ()> {
         log::debug!("got shutdown");
         async move {
-            let mut data = self.0.lock().await;
-            let qemu = data.qemu.take().ok_or(server::ErrorResponse::msg("not running"))?;
+            let mut data = self.data.lock().await;
+            let qemu = data
+                .qemu
+                .take()
+                .ok_or(server::ErrorResponse::msg("not running"))?;
 
-            {
-                let result = data.ga.quit().await;
-                let result = convert_result(result, "Sending quit");
-                if result.is_err() {
-                    return result;
-                }
+            let result = {
+                let mut ga = data.ga.lock().await;
+                convert_result(ga.quit().await, "Sending quit")
+            };
+            if result.is_err() {
+                return result;
             }
 
             if let Err(e) = qemu.await {
@@ -242,11 +400,18 @@ impl server::RuntimeService for Runtime {
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
     let cmdargs = CmdArgs::from_args();
-    match cmdargs.command {
-        Commands::Deploy { .. } => deploy().await?,
+    match &cmdargs.command {
+        Commands::Deploy { .. } => deploy(&cmdargs).await?,
         Commands::Start { .. } => {
             server::run_async(|e| async {
-                Runtime::started(e).await.expect("failed to start runtime")
+                let deployment: Deployment = serde_json::from_reader(
+                    std::fs::File::open(cmdargs.workdir.join(FILE_DEPLOYMENT))
+                        .expect("deployment file not found"),
+                )
+                .expect("failed to read the deployment file");
+                Runtime::started(&cmdargs.workdir, deployment, e)
+                    .await
+                    .expect("failed to start runtime")
             })
             .await
         }

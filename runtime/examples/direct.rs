@@ -1,3 +1,4 @@
+use futures::FutureExt;
 use std::{
     io::{self, prelude::*},
     process::Stdio,
@@ -7,7 +8,6 @@ use tokio::{
     process::{Child, Command},
     sync,
 };
-
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
 
 struct Notifications {
@@ -121,13 +121,13 @@ async fn main() -> io::Result<()> {
     let mount_args = [("tag0", "init-container"), ("tag1", "runtime")];
     let child = spawn_vm(&mount_args);
 
-    let mut ga = GuestAgent::connected("./manager.sock", 10, {
-        let notifications = notifications.clone();
-        move |n| {
-            notifications.handle(n);
-        }
+    let ns = notifications.clone();
+    let ga_mutex = GuestAgent::connected("./manager.sock", 10, move |n, _g| {
+        let notifications = ns.clone();
+        async move { notifications.clone().handle(n) }.boxed()
     })
     .await?;
+    let mut ga = ga_mutex.lock().await;
 
     let no_redir = [None, None, None];
 
