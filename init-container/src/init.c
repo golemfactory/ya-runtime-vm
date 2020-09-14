@@ -1256,6 +1256,8 @@ int main(void) {
     load_module("/virtio_ring.ko");
     load_module("/virtio_pci.ko");
     load_module("/virtio_console.ko");
+    load_module("/rng-core.ko");
+    load_module("/virtio-rng.ko");
     load_module("/virtio_blk.ko");
     load_module("/squashfs.ko");
     load_module("/overlay.ko");
@@ -1274,10 +1276,15 @@ int main(void) {
 
     CHECK(mount("/dev/vda", "/mnt/ro", "squashfs", MS_RDONLY, ""));
 
-    CHECK(umount2("/dev", MNT_DETACH));
-
     CHECK(mount("overlay", "/mnt/newroot", "overlay", 0,
                 "lowerdir=/mnt/ro,upperdir=/mnt/rw,workdir=/mnt/work"));
+
+    CHECK(creat("/mnt/newroot/dev/random", S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH));
+    CHECK(creat("/mnt/newroot/dev/urandom", S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH));
+    CHECK(mount("/dev/random", "/mnt/newroot/dev/random", "none", MS_BIND, NULL));
+    CHECK(mount("/dev/urandom", "/mnt/newroot/dev/urandom", "none", MS_BIND, NULL));
+
+    CHECK(umount2("/dev", MNT_DETACH));
 
     CHECK(chdir("/mnt/newroot"));
     CHECK(mount(".", "/", "none", MS_MOVE, NULL));
