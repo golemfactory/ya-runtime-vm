@@ -249,6 +249,8 @@ impl Runtime {
             "console=ttyS0 panic=1",
             "-device",
             "virtio-serial",
+            "-device",
+            "virtio-rng-pci",
             "-chardev",
             format!(
                 "socket,path={},server,nowait,id=manager_cdev",

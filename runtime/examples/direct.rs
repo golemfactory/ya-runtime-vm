@@ -93,6 +93,8 @@ fn spawn_vm<'a>(mount_args: &'a [(&'a str, &'a str)]) -> Child {
         "console=ttyS0 panic=1",
         "-device",
         "virtio-serial",
+        "-device",
+        "virtio-rng-pci",
         "-chardev",
         "socket,path=./manager.sock,server,nowait,id=manager_cdev",
         "-device",
