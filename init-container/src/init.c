@@ -1279,17 +1279,21 @@ int main(void) {
     CHECK(mount("overlay", "/mnt/newroot", "overlay", 0,
                 "lowerdir=/mnt/ro,upperdir=/mnt/rw,workdir=/mnt/work"));
 
-    CHECK(creat("/mnt/newroot/dev/random", S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH));
-    CHECK(creat("/mnt/newroot/dev/urandom", S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH));
-    CHECK(mount("/dev/random", "/mnt/newroot/dev/random", "none", MS_BIND, NULL));
-    CHECK(mount("/dev/urandom", "/mnt/newroot/dev/urandom", "none", MS_BIND, NULL));
-
     CHECK(umount2("/dev", MNT_DETACH));
 
     CHECK(chdir("/mnt/newroot"));
     CHECK(mount(".", "/", "none", MS_MOVE, NULL));
     CHECK(chroot("."));
     CHECK(chdir("/"));
+
+    if (mkdir("/dev", DEFAULT_DIR_PERMS) < 0
+            && errno != EEXIST) {
+        fprintf(stderr, "mkdir(/dev) in new root failed with: %m\n");
+        die();
+    }
+
+    CHECK(mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID,
+                "mode=0755,size=2M"));
 
     setup_agent_directories();
 
