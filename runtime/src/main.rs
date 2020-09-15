@@ -249,6 +249,8 @@ impl Runtime {
             "console=ttyS0 panic=1",
             "-device",
             "virtio-serial",
+            "-device",
+            "virtio-rng-pci",
             "-chardev",
             format!(
                 "socket,path={},server,nowait,id=manager_cdev",
@@ -323,8 +325,16 @@ impl server::RuntimeService for Runtime {
         run: server::RunProcess,
     ) -> server::AsyncResponse<server::RunProcessResp> {
         log::debug!("got run process: {:?}", run);
+        log::debug!("work dir: {:?}", self.deployment.config.working_dir);
+
         let (uid, gid) = self.deployment.user;
         let env = self.deployment.env();
+        let cwd = self
+            .deployment
+            .config
+            .working_dir
+            .as_ref()
+            .map(|s| s.as_str());
 
         async move {
             let data = self.data.lock().await;
@@ -347,7 +357,7 @@ impl server::RuntimeService for Runtime {
                         Some(RedirectFdType::RedirectFdPipeCyclic(0x1000)),
                         Some(RedirectFdType::RedirectFdPipeCyclic(0x1000)),
                     ],
-                    /*maybe_cwd*/ None, // TODO
+                    cwd,
                 )
                 .await;
             convert_result(result, "Running process").map(|pid| server::RunProcessResp { pid })

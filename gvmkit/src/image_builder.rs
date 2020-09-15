@@ -77,6 +77,11 @@ fn add_metadata_inside(
     add_meta_file(tar, Path::new(".env"), &config.env)?;
     add_meta_file(tar, Path::new(".entrypoint"), &config.entrypoint)?;
     add_meta_file(tar, Path::new(".cmd"), &config.cmd)?;
+    add_meta_file(
+        tar,
+        Path::new(".working_dir"),
+        &config.working_dir.as_ref().map(|s| vec![s.clone()]),
+    )?;
     Ok(())
 }
 

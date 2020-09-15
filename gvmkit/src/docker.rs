@@ -67,7 +67,7 @@ impl DockerInstance {
         };
 
         let config = container::Config {
-            cmd: cmd,
+            cmd,
             image: Some(image_name.to_string()),
             host_config: Some(host_config),
             ..Default::default()

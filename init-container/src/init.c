@@ -1256,6 +1256,8 @@ int main(void) {
     load_module("/virtio_ring.ko");
     load_module("/virtio_pci.ko");
     load_module("/virtio_console.ko");
+    load_module("/rng-core.ko");
+    load_module("/virtio-rng.ko");
     load_module("/virtio_blk.ko");
     load_module("/squashfs.ko");
     load_module("/overlay.ko");
@@ -1274,15 +1276,24 @@ int main(void) {
 
     CHECK(mount("/dev/vda", "/mnt/ro", "squashfs", MS_RDONLY, ""));
 
-    CHECK(umount2("/dev", MNT_DETACH));
-
     CHECK(mount("overlay", "/mnt/newroot", "overlay", 0,
                 "lowerdir=/mnt/ro,upperdir=/mnt/rw,workdir=/mnt/work"));
+
+    CHECK(umount2("/dev", MNT_DETACH));
 
     CHECK(chdir("/mnt/newroot"));
     CHECK(mount(".", "/", "none", MS_MOVE, NULL));
     CHECK(chroot("."));
     CHECK(chdir("/"));
+
+    if (mkdir("/dev", DEFAULT_DIR_PERMS) < 0
+            && errno != EEXIST) {
+        fprintf(stderr, "mkdir(/dev) in new root failed with: %m\n");
+        die();
+    }
+
+    CHECK(mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID,
+                "mode=0755,size=2M"));
 
     setup_agent_directories();
 

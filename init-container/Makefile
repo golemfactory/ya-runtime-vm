@@ -44,6 +44,8 @@ initramfs.cpio.gz: init $(UNPACKED_DIR)
 	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/drivers/virtio/virtio.ko initramfs
 	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/drivers/virtio/virtio_ring.ko initramfs
 	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/drivers/virtio/virtio_pci.ko initramfs
+	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/drivers/char/hw_random/rng-core.ko initramfs
+	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/drivers/char/hw_random/virtio-rng.ko initramfs
 	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/drivers/char/virtio_console.ko initramfs
 	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/drivers/block/virtio_blk.ko initramfs
 	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/fs/squashfs/squashfs.ko initramfs
