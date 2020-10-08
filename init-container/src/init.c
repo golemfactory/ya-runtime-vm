@@ -242,11 +242,18 @@ static void handle_sigchld(void) {
     }
 }
 
+static void block_signals(void) {
+    sigset_t set;
+    CHECK(sigemptyset(&set));
+    CHECK(sigaddset(&set, SIGCHLD));
+    CHECK(sigaddset(&set, SIGPIPE));
+    CHECK(sigprocmask(SIG_BLOCK, &set, NULL));
+}
+
 static void setup_sigfd(void) {
     sigset_t set;
     CHECK(sigemptyset(&set));
     CHECK(sigaddset(&set, SIGCHLD));
-    CHECK(sigprocmask(SIG_BLOCK, &set, NULL));
     g_sig_fd = CHECK(signalfd(g_sig_fd, &set, SFD_CLOEXEC));
 }
 
@@ -1297,6 +1304,7 @@ int main(void) {
 
     setup_agent_directories();
 
+    block_signals();
     setup_sigfd();
 
     main_loop();
