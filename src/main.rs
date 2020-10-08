@@ -130,6 +130,7 @@ fn make_vmrt_command(
 
     let mut append: Vec<String> = Vec::new();
     let mut cmd = Command::new("./vmrt");
+    let pid = std::process::id();
 
     cmd.current_dir(runtime_path)
         .arg("-m")
@@ -157,7 +158,10 @@ fn make_vmrt_command(
         .arg("-device")
         .arg("virtserialport,chardev=foo,name=org.fedoraproject.port.0")
         .arg("-chardev")
-        .arg("socket,path=/tmp/foo,server,nowait,id=foo")
+        .arg(format!(
+            "socket,path=/tmp/ya_runtime_vm-{}.sock,server,nowait,id=foo",
+            pid
+        ))
         .arg("-drive")
         .arg(format!(
             "file={},cache=none,readonly=on,format=raw,if=virtio",
@@ -323,6 +327,7 @@ mod tests {
 
     #[test]
     fn test_make_vmrt_command() {
+        let pid = std::process::id();
         let cmd = format!(
             "{:?}",
             make_vmrt_command(
@@ -347,6 +352,10 @@ mod tests {
             )
         );
         // one level of quotes and backslash escaping is added by debug formatting of Command
+        let expected_sock = format!(
+            r#""-chardev" "socket,path=/tmp/ya_runtime_vm-{}.sock,server,nowait,id=foo""#,
+            pid
+        );
         let expected_cmd = &[
             r#""./vmrt""#,
             r#""-m" "205m""#,
@@ -360,7 +369,7 @@ mod tests {
             r#""-smp" "4""#,
             r#""-device" "virtio-serial,id=ser0""#,
             r#""-device" "virtserialport,chardev=foo,name=org.fedoraproject.port.0""#,
-            r#""-chardev" "socket,path=/tmp/foo,server,nowait,id=foo""#,
+            expected_sock.as_str(),
             r#""-drive" "file=/qu x/task_\"package,,golem-app,cache=none,readonly=on,format=raw,if=virtio""#,
             r#""-no-reboot""#,
             r#""-virtfs" "local,path=/ba r/wo\"rk,,dir/vol-a,id=vol0,mount_tag=vol0,security_model=none""#,
