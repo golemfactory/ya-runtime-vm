@@ -240,9 +240,11 @@ impl Runtime {
             workdir.join(FILE_VMLINUZ).display().to_string().as_str(),
             "-initrd",
             workdir.join(FILE_INITRAMFS).display().to_string().as_str(),
-            "-no-reboot",
             "-net",
             "none",
+            "-enable-kvm",
+            "-cpu",
+            "host",
             "-smp",
             deployment.cpu_cores.to_string().as_str(),
             "-append",
@@ -265,6 +267,7 @@ impl Runtime {
                 deployment.task_package.display()
             )
             .as_str(),
+            "-no-reboot",
         ]);
 
         for (idx, volume) in deployment.volumes.iter().enumerate() {
