@@ -1,0 +1,10 @@
+[
+  {
+    "name": "vm",
+    "version": "0.2.0",
+    "supervisor-path": "exe-unit",
+    "runtime-path": "ya-runtime-vm/ya-runtime-vm",
+    "description": "vm runtime",
+    "extra-args": ["--cap-handoff"]
+  }
+]

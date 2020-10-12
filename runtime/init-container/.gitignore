@@ -1,0 +1,5 @@
+unpacked_kernel
+vmlinuz-virt
+init
+initramfs.cpio.gz
+squashfs_drive

@@ -1,9 +1,23 @@
 [package]
 name = "ya-runtime-vm"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Golem Factory <contact@golem.network>"]
 edition = "2018"
 license = "GPL-3.0"
+
+[package.metadata.deb]
+assets = [
+    ["target/release/ya-runtime-vm", "usr/lib/yagna/plugins/ya-runtime-vm/", "755"],
+    ["conf/ya-runtime-vm.json", "usr/lib/yagna/plugins/", "644"],
+
+    ["poc/runtime/vmrt", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "755"],
+    ["poc/runtime/bios-256k.bin", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
+    ["poc/runtime/kvmvapic.bin", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
+    ["poc/runtime/linuxboot_dma.bin", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
+
+    ["init-container/initramfs.cpio.gz", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
+    ["init-container/vmlinuz-virt", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
+]
 
 [dependencies]
 anyhow = "1.0"
