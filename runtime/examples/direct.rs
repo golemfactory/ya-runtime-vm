@@ -1,5 +1,7 @@
 use futures::FutureExt;
+use std::path::{Path, PathBuf};
 use std::{
+    env,
     io::{self, prelude::*},
     process::Stdio,
     sync::Arc,
@@ -72,21 +74,48 @@ async fn run_process_with_output(
     Ok(())
 }
 
-fn spawn_vm<'a>(mount_args: &'a [(&'a str, &'a str)]) -> Child {
-    let mut cmd = Command::new("qemu-system-x86_64");
-    cmd.args(&[
+fn get_project_dir() -> PathBuf {
+    PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
+        .canonicalize()
+        .unwrap()
+}
+
+fn get_root_dir() -> PathBuf {
+    get_project_dir().join("..").canonicalize().unwrap()
+}
+
+fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
+    path.as_ref()
+        .join(file.to_string())
+        .canonicalize()
+        .unwrap()
+        .display()
+        .to_string()
+}
+
+fn spawn_vm<'a, P: AsRef<Path>>(temp_path: P, mount_args: &'a [(&'a str, impl ToString)]) -> Child {
+    let root_dir = get_root_dir();
+    let project_dir = get_project_dir();
+    let runtime_dir = project_dir.join("poc").join("runtime");
+    let init_dir = project_dir.join("init-container");
+
+    let mut cmd = Command::new("vmrt");
+    cmd.current_dir(runtime_dir).args(&[
         "-m",
         "256m",
         "-nographic",
         "-vga",
         "none",
         "-kernel",
-        "init-container/vmlinuz-virt",
+        join_as_string(&init_dir, "vmlinuz-virt").as_str(),
         "-initrd",
-        "init-container/initramfs.cpio.gz",
+        join_as_string(&init_dir, "initramfs.cpio.gz").as_str(),
         "-no-reboot",
         "-net",
         "none",
+        "-enable-kvm",
+        "-cpu",
+        "host",
         "-smp",
         "1",
         "-append",
@@ -96,11 +125,19 @@ fn spawn_vm<'a>(mount_args: &'a [(&'a str, &'a str)]) -> Child {
         "-device",
         "virtio-rng-pci",
         "-chardev",
-        "socket,path=./manager.sock,server,nowait,id=manager_cdev",
+        format!(
+            "socket,path={},server,nowait,id=manager_cdev",
+            temp_path.as_ref().join("manager.sock").display()
+        )
+        .as_str(),
         "-device",
         "virtserialport,chardev=manager_cdev,name=manager_port",
         "-drive",
-        "file=./squashfs_drive,cache=none,readonly=on,format=raw,if=virtio",
+        format!(
+            "file={},cache=none,readonly=on,format=raw,if=virtio",
+            root_dir.join("squashfs_drive").display()
+        )
+        .as_str(),
     ]);
     for (tag, path) in mount_args.iter() {
         cmd.args(&[
@@ -108,7 +145,7 @@ fn spawn_vm<'a>(mount_args: &'a [(&'a str, &'a str)]) -> Child {
             &format!(
                 "local,id={tag},path={path},security_model=none,mount_tag={tag}",
                 tag = tag,
-                path = path
+                path = path.to_string()
             ),
         ]);
     }
@@ -118,13 +155,21 @@ fn spawn_vm<'a>(mount_args: &'a [(&'a str, &'a str)]) -> Child {
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    let notifications = Arc::new(Notifications::new());
+    let temp_dir = tempdir::TempDir::new("ya-vm-direct").expect("Failed to create temp dir");
+    let temp_path = temp_dir.path();
+    let inner_path = temp_path.join("inner");
 
-    let mount_args = [("tag0", "init-container"), ("tag1", "runtime")];
-    let child = spawn_vm(&mount_args);
+    std::fs::create_dir_all(&inner_path).expect("Failed to create a dir inside temp dir");
+
+    let notifications = Arc::new(Notifications::new());
+    let mount_args = [
+        ("tag0", temp_path.display()),
+        ("tag1", inner_path.display()),
+    ];
+    let child = spawn_vm(&temp_path, &mount_args);
 
     let ns = notifications.clone();
-    let ga_mutex = GuestAgent::connected("./manager.sock", 10, move |n, _g| {
+    let ga_mutex = GuestAgent::connected(temp_path.join("manager.sock"), 10, move |n, _g| {
         let notifications = ns.clone();
         async move { notifications.clone().handle(n) }.boxed()
     })
@@ -133,8 +178,8 @@ async fn main() -> io::Result<()> {
 
     let no_redir = [None, None, None];
 
-    for (i, (tag, dir)) in mount_args.iter().enumerate() {
-        ga.mount(tag, &format!("/mnt/mnt{}/{}", i, dir))
+    for (i, (tag, _)) in mount_args.iter().enumerate() {
+        ga.mount(tag, &format!("/mnt/mnt{}/{}", i, tag))
             .await?
             .expect("Mount failed");
     }
@@ -164,14 +209,14 @@ async fn main() -> io::Result<()> {
         &mut ga,
         &notifications,
         "/bin/ls",
-        &["ls", "-al", "/mnt/mnt1/runtime"],
+        &["ls", "-al", "/mnt/mnt1/tag1"],
     )
     .await?;
 
     let fds = [
         None,
         Some(RedirectFdType::RedirectFdFile(
-            "/mnt/mnt1/runtime/write_test".as_bytes(),
+            "/mnt/mnt1/tag1/write_test".as_bytes(),
         )),
         None,
     ];
@@ -186,7 +231,7 @@ async fn main() -> io::Result<()> {
         &mut ga,
         &notifications,
         "/bin/cat",
-        &["cat", "/mnt/mnt1/runtime/write_test"],
+        &["cat", "/mnt/mnt1/tag1/write_test"],
     )
     .await?;
 

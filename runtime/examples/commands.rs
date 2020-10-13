@@ -1,6 +1,8 @@
 use std::{
     clone::Clone,
     collections::HashMap,
+    env,
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 use tokio::{process::Command, sync::Notify};
@@ -81,28 +83,31 @@ impl Clone for Events {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let dir = tempdir::TempDir::new("ya-runtime-vm")?;
+    let root_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
+        .join("..")
+        .canonicalize()
+        .unwrap();
+    let temp_dir = tempdir::TempDir::new("ya-runtime-vm")?;
+
+    let temp_dir_string = temp_dir.path().display().to_string();
+    let drive_path_string = root_dir.join("squashfs_drive").display().to_string();
+
     let args = [
-        "run",
-        "--package",
-        "ya-runtime-vm",
-        "--",
         "--task-package",
-        "./squashfs_drive",
+        drive_path_string.as_str(),
         "--workdir",
+        temp_dir_string.as_str(),
     ];
 
-    let mut cmd = Command::new("cargo");
-    cmd.env("RUST_LOG", "debug");
-    cmd.args(&args);
-    cmd.arg(dir.path()).arg("deploy");
+    let runtime_path = PathBuf::from("/usr/lib/yagna/plugins/ya-runtime-vm/ya-runtime-vm");
+
+    let mut cmd = Command::new(&runtime_path);
+    cmd.env("RUST_LOG", "debug").args(&args).arg("deploy");
     let child = cmd.spawn()?;
     child.await?;
 
-    let mut cmd = Command::new("cargo");
-    cmd.env("RUST_LOG", "debug");
-    cmd.args(&args);
-    cmd.arg(dir.path()).arg("start");
+    let mut cmd = Command::new(&runtime_path);
+    cmd.env("RUST_LOG", "debug").args(&args).arg("start");
 
     let events = Events::new();
 
