@@ -1,0 +1,159 @@
+name: Release
+on:
+  push:
+    tags:
+      - v*
+      - pre-rel-*
+
+jobs:
+  create-release:
+    name: "Create Release"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create Release
+        uses: actions/github-script@v3.0
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          script: |
+            let tag = context.payload.ref.replace(/.*\//, '');
+            let buildNo = context.runNumber;
+            let versionName = tag.replace(/^pre-rel-/,'');
+            try {
+              let release =  await github.request("GET /repos/:owner/:repo/releases/tags/:tag", {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: tag
+              });
+            }
+            catch(e) {
+              let body = ["TODO"].join("\n");
+
+              let release =  await github.request("POST /repos/:owner/:repo/releases", {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                data: {
+                  tag_name: tag,
+                  prerelease: true,
+                  body: body,
+                  name: `${versionName} #${buildNo}`
+                }
+              });
+              console.log(release.data.upload_url);
+            }
+  build:
+    name: Build Release
+    runs-on: ubuntu-latest
+    env:
+      OPENSSL_STATIC: 1
+    steps:
+      - uses: actions/checkout@v1
+        with:
+          lfs: true
+      - name: Install Musl
+        run: |
+          sudo apt-get install -y musl-tools musl
+      - name: Get upload url
+        id: release_upload_url
+        uses: actions/github-script@0.9.0
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          result-encoding: string
+          script: |
+              let tag = context.payload.ref.replace(/.*\//, '');
+              let release =  await github.request("GET /repos/:owner/:repo/releases/tags/:tag", {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: tag
+              });
+              console.log(release.data.upload_url);
+              return release.data.upload_url
+
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: x86_64-unknown-linux-musl
+          override: true
+      - name: Build
+        run: |
+          cd runtime && cargo build --release --target x86_64-unknown-linux-musl
+      - name: Pack
+        id: pack
+        shell: bash
+        env:
+          GITHUB_REF: ${{ github.ref }}
+          OS_NAME: linux
+        run: |
+          TAG_NAME="${GITHUB_REF##*/}"
+          TARGET_DIR=releases/ya-runtime-vm-linux-${TAG_NAME}
+          mkdir -p "$TARGET_DIR/ya-runtime-vm"
+          strip "target/x86_64-unknown-linux-musl/release/ya-runtime-vm"
+          set -x
+
+          cp target/x86_64-unknown-linux-musl/release/ya-runtime-vm "$TARGET_DIR/ya-runtime-vm/"
+          cp runtime/conf/ya-runtime-vm.json "$TARGET_DIR/"
+          cp -r runtime/poc/runtime "$TARGET_DIR/ya-runtime-vm/"
+          cp "runtime/init-container/initramfs.cpio.gz" "$TARGET_DIR/ya-runtime-vm/"
+          cp "runtime/init-container/vmlinuz-virt" "$TARGET_DIR/ya-runtime-vm/"
+          (cd releases && tar czvf "ya-runtime-vm-${OS_NAME}-${TAG_NAME}.tar.gz" "ya-runtime-vm-${OS_NAME}-${TAG_NAME}")
+          echo "::set-output name=artifact::ya-runtime-vm-${OS_NAME}-${TAG_NAME}.tar.gz"
+          echo "::set-output name=media::application/tar+gzip"
+      - name: Upload
+        run: echo todo upload ${{ steps.pack.outputs.artifact }}
+      - name: Upload Release Asset
+        id: upload-release-asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.release_upload_url.outputs.result }}
+          asset_path: ./releases/${{ steps.pack.outputs.artifact }}
+          asset_name: ${{ steps.pack.outputs.artifact }}
+          asset_content_type: ${{ steps.pack.outputs.media }}
+  build-deb:
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get upload url
+        id: release_upload_url
+        uses: actions/github-script@0.9.0
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          result-encoding: string
+          script: |
+            let tag = context.payload.ref.replace(/.*\//, '');
+            let release =  await github.request("GET /repos/:owner/:repo/releases/tags/:tag", {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag: tag
+            });
+            console.log(release.data.upload_url);
+            return release.data.upload_url
+      - name: Check out repository
+        uses: actions/checkout@v2
+      - name: Extract Version
+        id: version
+        shell: bash
+        env:
+          GITHUB_REF: ${{ github.ref }}
+        run: |
+          TAG_NAME="${GITHUB_REF##*/}"
+          TAGV_NAME="${TAG_NAME#pre-rel-}"
+          VERSION=${TAGV_NAME#v}
+          echo "::set-output name=tagv::${TAG_NAME}"
+          echo "::set-output name=version::${VERSION}"
+      - uses: golemfactory/build-deb-action@v2
+        id: deb
+        with:
+          debVersion: ${{ steps.version.outputs.version }}
+          pkgName: ya-runtime-vm
+          subdir: runtime
+      - name: Upload Release Deb
+        id: upload-release-asset-core
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.release_upload_url.outputs.result }}
+          asset_path: ${{ steps.deb.outputs.deb }}
+          asset_name: ya-runtime-vm_${{ steps.version.outputs.tagv }}_amd64.deb
+          asset_content_type: application/vnd.debian.binary-package

@@ -1610,7 +1610,7 @@ dependencies = [
 [[package]]
 name = "ya-runtime-api"
 version = "0.1.0"
-source = "git+https://github.com/golemfactory/yagna.git?rev=4479d9dace43673df4034bfed97cd5d609ebc89c#4479d9dace43673df4034bfed97cd5d609ebc89c"
+source = "git+https://github.com/golemfactory/yagna.git#d1aba8f76f560a811599f63e97df01a5a166f1f8"
 dependencies = [
  "anyhow",
  "bytes",
