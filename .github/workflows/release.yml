@@ -40,8 +40,28 @@ jobs:
               });
               console.log(release.data.upload_url);
             }
+  build-init:
+    name: Build container Init
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Musl
+        run: sudo apt-get install -y musl-tools musl
+      - name: Make
+        run: |
+          cd runtime/init-container
+          make
+      - uses: actions/upload-artifact@v2
+        with:
+          name: init-container
+          path: |
+            runtime/init-container/initramfs.cpio.gz
+            runtime/init-container/vmlinuz-virt
+
   build:
     name: Build Release
+    needs:
+      - create-release
+      - build-init
     runs-on: ubuntu-latest
     env:
       OPENSSL_STATIC: 1
@@ -49,6 +69,9 @@ jobs:
       - uses: actions/checkout@v1
         with:
           lfs: true
+      - uses: actions/download-artifact@v2
+        with:
+          name: init-container
       - name: Install Musl
         run: |
           sudo apt-get install -y musl-tools musl
