@@ -1,17 +1,32 @@
 use std::env;
 use std::path::PathBuf;
 use std::process::Command;
+use std::ops::Not;
+use anyhow::Context;
 
-static RERUN_IF_CHANGED: &'static str = "cargo:rerun-if-changed";
+static RERUN_IF_CHANGED: &str = "cargo:rerun-if-changed";
 
-fn main() {
+fn main() -> anyhow::Result<()>{
+    // skip build for CI
+    if env::var("CI").is_ok() {
+        return Ok(())
+    }
+
     let root_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let init_dir = root_dir.join("init-container").canonicalize().unwrap();
 
-    Command::new("make")
+    let make_result = Command::new("make")
         .current_dir(&init_dir)
         .status()
-        .expect("error building init");
+        .context("error building init")?;
+    if make_result.success().not() {
+        if let Some(code) = make_result.code() {
+            anyhow::bail!("make failed with code {:?}", code)
+        }
+        else {
+            anyhow::bail!("make failed")
+        }
+    }
 
     let include_dir = init_dir.join("include");
     let src_dir = init_dir.join("src");
@@ -36,4 +51,5 @@ fn main() {
             src = src_dir.display(),
         )
     );
+    Ok(())
 }

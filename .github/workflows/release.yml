@@ -121,8 +121,8 @@ jobs:
           cp target/x86_64-unknown-linux-musl/release/ya-runtime-vm "$TARGET_DIR/ya-runtime-vm/"
           cp runtime/conf/ya-runtime-vm.json "$TARGET_DIR/"
           cp -r runtime/poc/runtime "$TARGET_DIR/ya-runtime-vm/"
-          cp "runtime/init-container/initramfs.cpio.gz" "$TARGET_DIR/ya-runtime-vm/"
-          cp "runtime/init-container/vmlinuz-virt" "$TARGET_DIR/ya-runtime-vm/"
+          cp "runtime/init-container/initramfs.cpio.gz" "$TARGET_DIR/ya-runtime-vm/ya-runtime-vm/"
+          cp "runtime/init-container/vmlinuz-virt" "$TARGET_DIR/ya-runtime-vm/ya-runtime-vm/"
           (cd releases && tar czvf "ya-runtime-vm-${OS_NAME}-${TAG_NAME}.tar.gz" "ya-runtime-vm-${OS_NAME}-${TAG_NAME}")
           echo "::set-output name=artifact::ya-runtime-vm-${OS_NAME}-${TAG_NAME}.tar.gz"
           echo "::set-output name=media::application/tar+gzip"
@@ -139,6 +139,7 @@ jobs:
           asset_name: ${{ steps.pack.outputs.artifact }}
           asset_content_type: ${{ steps.pack.outputs.media }}
   build-deb:
+    name: Build Deb
     needs:
       - create-release
       - build-init

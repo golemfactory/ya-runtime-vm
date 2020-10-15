@@ -38,6 +38,9 @@ ya-runtime-api = { version = "0.1", features = ["codec"], git="https://github.co
 [dev-dependencies]
 tempdir = "0.3.7"
 
+[build-dependencies]
+anyhow = "1.0.33"
+
 [lib]
 name = "ya_runtime_vm"
 path = "src/lib.rs"
