@@ -42,12 +42,14 @@ jobs:
             }
   build-init:
     name: Build container Init
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     steps:
       - name: Install Musl
         run: sudo apt-get install -y musl-tools musl
+      - uses: actions/checkout@v1
       - name: Make
         run: |
+          musl-gcc -v
           cd runtime/init-container
           make
       - uses: actions/upload-artifact@v2
@@ -72,6 +74,10 @@ jobs:
       - uses: actions/download-artifact@v2
         with:
           name: init-container
+          path: runtime/init-container/
+      - run: |
+          ls -R
+          test -f runtime/init-container/initramfs.cpio.gz
       - name: Install Musl
         run: |
           sudo apt-get install -y musl-tools musl
@@ -133,7 +139,9 @@ jobs:
           asset_name: ${{ steps.pack.outputs.artifact }}
           asset_content_type: ${{ steps.pack.outputs.media }}
   build-deb:
-    needs: create-release
+    needs:
+      - create-release
+      - build-init
     runs-on: ubuntu-latest
     steps:
       - name: Get upload url
@@ -153,6 +161,14 @@ jobs:
             return release.data.upload_url
       - name: Check out repository
         uses: actions/checkout@v2
+        with:
+          lfs: true
+      - uses: actions/download-artifact@v2
+        with:
+          name: init-container
+          path: runtime/init-container/
+      - run: |
+          test -f runtime/init-container/initramfs.cpio.gz
       - name: Extract Version
         id: version
         shell: bash
