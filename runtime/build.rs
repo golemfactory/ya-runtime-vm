@@ -1,15 +1,15 @@
+use anyhow::Context;
 use std::env;
+use std::ops::Not;
 use std::path::PathBuf;
 use std::process::Command;
-use std::ops::Not;
-use anyhow::Context;
 
 static RERUN_IF_CHANGED: &str = "cargo:rerun-if-changed";
 
-fn main() -> anyhow::Result<()>{
+fn main() -> anyhow::Result<()> {
     // skip build for CI
     if env::var("CI").is_ok() {
-        return Ok(())
+        return Ok(());
     }
 
     let root_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -22,8 +22,7 @@ fn main() -> anyhow::Result<()>{
     if make_result.success().not() {
         if let Some(code) = make_result.code() {
             anyhow::bail!("make failed with code {:?}", code)
-        }
-        else {
+        } else {
             anyhow::bail!("make failed")
         }
     }
