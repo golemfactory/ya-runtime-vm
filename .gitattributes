@@ -1,2 +1,8 @@
 poc/runtime/ filter=lfs diff=lfs merge=lfs -text
 poc/runtime/* filter=lfs diff=lfs merge=lfs -text
+runtime/poc/runtime/kvmvapic.bin filter=lfs diff=lfs merge=lfs -text
+runtime/poc/runtime/linuxboot_dma.bin filter=lfs diff=lfs merge=lfs -text
+runtime/poc/runtime/vmlinuz-virt filter=lfs diff=lfs merge=lfs -text
+runtime/poc/runtime/vmrt filter=lfs diff=lfs merge=lfs -text
+runtime/poc/runtime/bios-256k.bin filter=lfs diff=lfs merge=lfs -text
+runtime/poc/runtime/initramfs-virt filter=lfs diff=lfs merge=lfs -text
