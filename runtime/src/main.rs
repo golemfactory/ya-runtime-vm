@@ -18,9 +18,8 @@ use ya_runtime_vm::{
     guest_agent_comm::{GuestAgent, Notification, RedirectFdType, RemoteCommandResult},
 };
 
-static ASSET_VMLINUZ: &'static [u8] = include_bytes!("../../init-container/vmlinuz-virt");
-static ASSET_INITRAMFS: &'static [u8] = include_bytes!("../../init-container/initramfs.cpio.gz");
-
+const DIR_RUNTIME: &'static str = "runtime";
+const FILE_RUNTIME: &'static str = "vmrt";
 const FILE_VMLINUZ: &'static str = "vmlinuz-virt";
 const FILE_INITRAMFS: &'static str = "initramfs.cpio.gz";
 const FILE_DEPLOYMENT: &'static str = "deployment.json";
@@ -50,7 +49,7 @@ enum Commands {
 }
 
 struct RuntimeData {
-    qemu: Option<process::Child>,
+    runtime: Option<process::Child>,
     ga: Arc<Mutex<GuestAgent>>,
 }
 
@@ -77,8 +76,6 @@ async fn deploy(cmdargs: &CmdArgs) -> anyhow::Result<()> {
         fs::create_dir_all(workdir.join(&vol.name)).await?;
     }
 
-    write_file(workdir.join(FILE_VMLINUZ), ASSET_VMLINUZ).await?;
-    write_file(workdir.join(FILE_INITRAMFS), ASSET_INITRAMFS).await?;
     write_file(
         workdir.join(FILE_DEPLOYMENT),
         serde_json::to_string(&deployment)?.as_bytes(),
@@ -220,26 +217,28 @@ async fn reader_to_log<T: io::AsyncRead + Unpin>(reader: T) {
 
 impl Runtime {
     async fn started<'a, E: server::RuntimeEvent + Send + Sync + 'static, P: AsRef<Path>>(
-        workdir: P,
+        work_dir: P,
         deployment: Deployment,
         event_emitter: E,
     ) -> io::Result<Self> {
-        let workdir = workdir.as_ref();
-        let socket_path = std::env::temp_dir().join(format!(
-            "{}.sock",
-            uuid::Uuid::new_v4().to_simple().to_string()
-        ));
-        let mut cmd = process::Command::new("qemu-system-x86_64");
-        cmd.args(&[
+        let socket_name = uuid::Uuid::new_v4().to_simple().to_string();
+        let socket_path = std::env::temp_dir().join(format!("{}.sock", socket_name));
+        let runtime_dir = std::env::current_exe()?
+            .parent()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?
+            .join(DIR_RUNTIME);
+
+        let mut cmd = process::Command::new(FILE_RUNTIME);
+        cmd.current_dir(&runtime_dir).args(&[
             "-m",
             format!("{}M", deployment.mem_mib).as_str(),
             "-nographic",
             "-vga",
             "none",
             "-kernel",
-            workdir.join(FILE_VMLINUZ).display().to_string().as_str(),
+            FILE_VMLINUZ,
             "-initrd",
-            workdir.join(FILE_INITRAMFS).display().to_string().as_str(),
+            FILE_INITRAMFS,
             "-net",
             "none",
             "-enable-kvm",
@@ -275,16 +274,16 @@ impl Runtime {
             cmd.arg(format!(
                 "local,id={tag},path={path},security_model=none,mount_tag={tag}",
                 tag = format!("mnt{}", idx),
-                path = workdir.join(&volume.name).to_string_lossy(),
+                path = work_dir.as_ref().join(&volume.name).to_string_lossy(),
             ));
         }
 
-        let mut qemu = cmd
+        let mut runtime = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .kill_on_drop(true)
             .spawn()?;
-        spawn(reader_to_log(qemu.stdout.take().unwrap()));
+        spawn(reader_to_log(runtime.stdout.take().unwrap()));
 
         let emitter = Arc::new(event_emitter);
         let ga = GuestAgent::connected(socket_path, 10, move |notification, ga| {
@@ -309,7 +308,7 @@ impl Runtime {
 
         Ok(Runtime {
             data: Mutex::new(RuntimeData {
-                qemu: Some(qemu),
+                runtime: Some(runtime),
                 ga,
             }),
             deployment,
@@ -383,8 +382,8 @@ impl server::RuntimeService for Runtime {
         log::debug!("got shutdown");
         async move {
             let mut data = self.data.lock().await;
-            let qemu = data
-                .qemu
+            let runtime = data
+                .runtime
                 .take()
                 .ok_or(server::ErrorResponse::msg("not running"))?;
 
@@ -396,9 +395,9 @@ impl server::RuntimeService for Runtime {
                 return result;
             }
 
-            if let Err(e) = qemu.await {
+            if let Err(e) = runtime.await {
                 return Err(server::ErrorResponse::msg(format!(
-                    "Waiting for qemu shutdown failed: {}",
+                    "Waiting for runtime shutdown failed: {}",
                     e
                 )));
             }
