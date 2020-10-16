@@ -903,6 +903,7 @@ dependencies = [
  "awc",
  "bollard",
  "bytes",
+ "console",
  "crc",
  "env_logger",
  "futures",

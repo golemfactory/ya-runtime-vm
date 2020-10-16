@@ -31,6 +31,7 @@ impl DockerInstance {
             from_image: image_name,
             ..Default::default()
         };
+
         self.docker
             .create_image(Some(options), None, None)
             .try_collect::<Vec<_>>()
@@ -195,7 +196,6 @@ impl DockerInstance {
             path,
             ..Default::default()
         };
-
         self.docker
             .upload_to_container(container_name, Some(options), data.into())
             .await?;
