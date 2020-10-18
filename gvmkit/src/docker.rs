@@ -4,9 +4,8 @@ use bollard::{
     service::{ContainerConfig, HostConfig, Mount, MountTypeEnum},
     Docker,
 };
-use bytes::{Bytes, BytesMut};
-use futures_util::stream::TryStreamExt;
-use log::{debug, info};
+use bytes::{BufMut, Bytes, BytesMut};
+use futures::TryStreamExt;
 
 #[derive(Debug, Clone)]
 pub struct DirectoryMount {
@@ -27,7 +26,7 @@ impl DockerInstance {
     }
 
     pub async fn create_image(&mut self, image_name: &str) -> anyhow::Result<()> {
-        info!("Pulling image '{}'", image_name);
+        log::debug!("Pulling image '{}'", image_name);
         let options = image::CreateImageOptions {
             from_image: image_name,
             ..Default::default()
@@ -84,21 +83,20 @@ impl DockerInstance {
         mounts: Option<Vec<DirectoryMount>>,
         cmd: Option<Vec<String>>,
     ) -> anyhow::Result<()> {
-        info!(
+        log::debug!(
             "Creating container '{}' from image '{}'",
-            container_name, image_name
+            container_name,
+            image_name
         );
 
-        let result = self
+        match self
             .try_create_container(image_name, container_name, mounts.clone(), cmd.clone())
-            .await;
-
-        match result {
+            .await
+        {
             Ok(_) => (),
             Err(err) => {
                 if err.to_string().contains("No such image") {
                     // TODO: better way
-                    info!("Required image not found locally");
                     self.create_image(image_name).await?;
                     self.try_create_container(image_name, container_name, mounts, cmd)
                         .await?;
@@ -111,23 +109,20 @@ impl DockerInstance {
     }
 
     pub async fn start_container(&mut self, container_name: &str) -> anyhow::Result<()> {
-        info!("Starting container '{}'", container_name);
-        self.docker
-            .start_container(
-                container_name,
-                None::<container::StartContainerOptions<String>>,
-            )
-            .await?;
+        log::debug!("Starting container '{}'", container_name);
+        let options = None::<container::StartContainerOptions<String>>;
+        self.docker.start_container(container_name, options).await?;
         Ok(())
     }
 
-    pub async fn run_command(
+    pub async fn run_command<F: Fn(String) -> ()>(
         &mut self,
         container_name: &str,
         cmd: Vec<&str>,
         dir: &str,
+        on_output: F,
     ) -> anyhow::Result<()> {
-        info!("Running '{:?}' in container '{}'", cmd, container_name);
+        log::debug!("Running '{:?}' in container '{}'", cmd, container_name);
         let config = exec::CreateExecOptions {
             cmd: Some(cmd),
             working_dir: Some(dir),
@@ -137,27 +132,21 @@ impl DockerInstance {
         };
 
         let result = self.docker.create_exec(container_name, config).await?;
-
-        let options = exec::StartExecOptions {
-            detach: false, // run synchronously
-        };
-
-        let result = self
-            .docker
-            .start_exec(&result.id, Some(options))
-            .try_collect::<Vec<_>>()
+        self.docker
+            .start_exec(&result.id, Some(exec::StartExecOptions { detach: false }))
+            .try_for_each(|results| async {
+                match results {
+                    exec::StartExecResults::Attached { log } => on_output(log.to_string()),
+                    exec::StartExecResults::Detached => (),
+                }
+                Ok(())
+            })
             .await?;
-
-        // TODO: stream progress
-        result.iter().for_each(|el| match el {
-            exec::StartExecResults::Attached { log } => debug!("{}", log),
-            exec::StartExecResults::Detached => debug!("[Detached]"),
-        });
         Ok(())
     }
 
     pub async fn stop_container(&mut self, container_name: &str) -> anyhow::Result<()> {
-        info!("Stopping container '{}'", container_name);
+        log::debug!("Stopping container '{}'", container_name);
         self.docker
             .stop_container(container_name, None::<container::StopContainerOptions>)
             .await?;
@@ -165,8 +154,9 @@ impl DockerInstance {
     }
 
     pub async fn remove_container(&mut self, container_name: &str) -> anyhow::Result<()> {
-        info!("Removing container '{}'", container_name);
+        log::debug!("Removing container '{}'", container_name);
         let options = container::RemoveContainerOptions {
+            v: true,
             force: true,
             ..Default::default()
         };
@@ -177,23 +167,20 @@ impl DockerInstance {
         Ok(())
     }
 
-    pub async fn download(&mut self, container_name: &str, path: &str) -> anyhow::Result<Bytes> {
-        info!("Downloading '{}' from container '{}'", path, container_name);
+    pub async fn download(&mut self, container_name: &str, path: &str) -> anyhow::Result<BytesMut> {
+        log::debug!("Downloading '{}' from container '{}'", path, container_name);
 
-        let options = container::DownloadFromContainerOptions { path: path };
-        let chunks: Vec<Bytes> = self
+        let options = container::DownloadFromContainerOptions { path };
+        let bytes = self
             .docker
             .download_from_container(container_name, Some(options))
-            .try_collect()
+            .try_fold(BytesMut::new(), |mut bytes, b| async move {
+                bytes.put(b);
+                Ok(bytes)
+            })
             .await?;
 
-        // transform chunks into a single Bytes instance
-        let tar = chunks.iter().fold(BytesMut::new(), |mut buf, chunk| {
-            buf.extend_from_slice(chunk as &[u8]);
-            buf
-        });
-
-        Ok(tar.freeze())
+        Ok(bytes)
     }
 
     pub async fn upload(
@@ -202,10 +189,10 @@ impl DockerInstance {
         path: &str,
         data: Bytes,
     ) -> anyhow::Result<()> {
-        info!("Uploading to '{}' in container '{}'", path, container_name);
+        log::debug!("Uploading to '{}' in container '{}'", path, container_name);
 
         let options = container::UploadToContainerOptions {
-            path: path,
+            path,
             ..Default::default()
         };
 
@@ -225,7 +212,7 @@ impl DockerInstance {
             .await?;
 
         let hash = cont.id.ok_or(anyhow!("Container has no id"))?;
-        debug!("Container ID: {}", &hash);
+        log::debug!("Container ID: {}", &hash);
 
         let cfg = cont.config.ok_or(anyhow!("Container has no config"))?;
         Ok((hash, cfg))
