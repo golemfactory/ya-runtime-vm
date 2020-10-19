@@ -35,9 +35,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.31"
+version = "1.0.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85bb70cc08ec97ca5450e6eba421deeea5f172c0fc61f78b5357b2a8e8be195f"
+checksum = "a1fd36ffbb1fb7c834eac128ea8d0e310c5aeb635548f9d58861e1308d46e71c"
 
 [[package]]
 name = "arc-swap"
@@ -1610,7 +1610,7 @@ dependencies = [
 [[package]]
 name = "ya-runtime-api"
 version = "0.1.0"
-source = "git+https://github.com/golemfactory/yagna.git?rev=4479d9dace43673df4034bfed97cd5d609ebc89c#4479d9dace43673df4034bfed97cd5d609ebc89c"
+source = "git+https://github.com/golemfactory/yagna.git#d1aba8f76f560a811599f63e97df01a5a166f1f8"
 dependencies = [
  "anyhow",
  "bytes",

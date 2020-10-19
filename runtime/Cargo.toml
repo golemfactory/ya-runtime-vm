@@ -33,10 +33,13 @@ structopt = "0.3"
 tokio = { version = "0.2", features = ["fs", "io-std", "io-util", "macros", "process", "rt-core", "rt-threaded", "sync", "time", "uds"] }
 tokio-byteorder = "0.2"
 uuid = { version = "0.8", features = ["v4"] }
-ya-runtime-api = { version = "0.1", features = ["codec"] }
+ya-runtime-api = { version = "0.1", features = ["codec"], git="https://github.com/golemfactory/yagna.git" }
 
 [dev-dependencies]
 tempdir = "0.3.7"
+
+[build-dependencies]
+anyhow = "1.0.33"
 
 [lib]
 name = "ya_runtime_vm"
