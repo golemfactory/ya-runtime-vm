@@ -58,7 +58,7 @@ impl DockerInstance {
                         target: Some(mount.guest),
                         source: Some(mount.host),
                         read_only: Some(mount.readonly),
-                        _type: Some(MountTypeEnum::BIND),
+                        typ: Some(MountTypeEnum::BIND),
                         ..Default::default()
                     })
                     .collect()
