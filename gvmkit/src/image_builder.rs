@@ -1,7 +1,5 @@
-use bollard::service::ContainerConfig;
 use bytes::Bytes;
 use crc::crc32;
-use log::{debug, info};
 use std::{
     fs,
     io::Write,
@@ -10,39 +8,63 @@ use std::{
 use tar;
 
 use crate::docker::DockerInstance;
+use crate::progress::{from_progress_output, Progress, ProgressResult, Spinner, SpinnerResult};
 use crate::rwbuf::RWBuffer;
+use bollard::service::ContainerConfig;
+use std::rc::Rc;
+
+pub(crate) const STEPS: usize = 3;
 
 pub async fn build_image(image_name: &str, output: &Path) -> anyhow::Result<()> {
-    info!("Building image from '{}'", image_name);
-
-    let mut docker = DockerInstance::new().await?;
-
+    let spinner = Spinner::new(format!("Downloading '{}'", image_name)).ticking();
+    let mut docker = DockerInstance::new().await.spinner_err(&spinner)?;
     let cont_name = "gvmkit-tmp";
+
     docker
         .create_container(image_name, cont_name, None, None)
-        .await?;
+        .await
+        .spinner_result(&spinner)?;
 
-    let (hash, cfg) = docker.get_config(cont_name).await?;
+    let spinner = Spinner::new("Copying image contents").ticking();
+    let (hash, cfg) = docker.get_config(cont_name).await.spinner_err(&spinner)?;
+    let tar_bytes = docker
+        .download(cont_name, "/")
+        .await
+        .spinner_err(&spinner)?
+        .freeze();
+    let mut tar = tar_from_bytes(&tar_bytes).spinner_err(&spinner)?;
 
-    let tar_bytes = docker.download(cont_name, "/").await?;
-    debug!("Docker image size: {}", tar_bytes.len());
+    docker
+        .remove_container(cont_name)
+        .await
+        .spinner_result(&spinner)?;
 
-    let mut tar = tar_from_bytes(&tar_bytes)?;
+    let progress = Rc::new(Progress::new(
+        format!("Building  '{}'", output.display()),
+        0,
+    ));
+    let progress_ = progress.clone();
 
-    docker.remove_container(cont_name).await?;
+    async move {
+        let mut work_dir = PathBuf::from(&format!("work-{}", hash));
+        fs::create_dir_all(&work_dir)?; // path must exist for canonicalize()
+        work_dir = work_dir.canonicalize()?;
 
-    let mut work_dir = PathBuf::from(&format!("work-{}", hash));
-    fs::create_dir_all(&work_dir)?; // path must exist for canonicalize()
-    work_dir = work_dir.canonicalize()?;
-    let work_dir_out = work_dir.join("out");
-    fs::create_dir_all(&work_dir_out)?;
+        let work_dir_out = work_dir.join("out");
+        fs::create_dir_all(&work_dir_out)?;
 
-    add_metadata_inside(&mut tar, &cfg)?;
-    let squashfs_image_path = repack(tar, &mut docker, &work_dir_out).await?;
-    add_metadata_outside(&squashfs_image_path, &cfg)?;
-    fs::copy(&squashfs_image_path, output)?;
-    fs::remove_dir_all(work_dir)?;
-    info!("Image built successfully: {}", output.display());
+        add_metadata_inside(&mut tar, &cfg)?;
+        let squashfs_image_path = repack(tar, &mut docker, &work_dir_out, progress_).await?;
+        add_metadata_outside(&squashfs_image_path, &cfg)?;
+
+        fs::rename(&squashfs_image_path, output)?;
+        fs::remove_dir_all(work_dir_out)?;
+        fs::remove_dir_all(work_dir)?;
+
+        Ok::<_, anyhow::Error>(())
+    }
+    .await
+    .progress_result(&progress)?;
 
     Ok(())
 }
@@ -62,7 +84,7 @@ fn add_meta_file(
     path: &Path,
     strings: &Option<Vec<String>>,
 ) -> anyhow::Result<()> {
-    debug!("Adding metadata file '{}': {:?}", path.display(), strings);
+    log::debug!("Adding metadata file '{}': {:?}", path.display(), strings);
     match strings {
         Some(val) => add_file(tar, path, val.join("\n").as_bytes())?,
         None => add_file(tar, path, &[])?,
@@ -91,7 +113,7 @@ fn add_metadata_outside(image_path: &Path, config: &ContainerConfig) -> anyhow::
     let mut file = fs::OpenOptions::new().append(true).open(image_path)?;
     let meta_size = json_buf.bytes.len();
     let crc = crc32::checksum_ieee(&json_buf.bytes);
-    info!("Image metadata checksum: 0x{:x}", crc);
+    log::debug!("Image metadata checksum: 0x{:x}", crc);
     file.write(&crc.to_le_bytes())?;
     file.write(&json_buf.bytes)?;
     file.write(format!("{:08}", meta_size).as_bytes())?;
@@ -102,8 +124,12 @@ async fn repack(
     tar: tar::Builder<RWBuffer>,
     docker: &mut DockerInstance,
     dir_out: &Path,
+    progress: Rc<Progress>,
 ) -> anyhow::Result<PathBuf> {
+    progress.set_total(9 /* local */ + 100 /* mksquashfs percent */);
+
     let img_as_tar = finish_tar(tar)?;
+    progress.inc(1);
 
     let squashfs_image = "prekucki/squashfs-tools:latest";
     let squashfs_cont = "sqfs-tools";
@@ -117,7 +143,10 @@ async fn repack(
             Some(start_cmd.iter().map(|s| s.to_string()).collect()),
         )
         .await?;
+    progress.inc(1);
+
     docker.start_container(squashfs_cont).await?;
+    progress.inc(1);
 
     let path_in = "/work/in";
     let path_out = "/work/out/image.squashfs";
@@ -125,30 +154,37 @@ async fn repack(
     docker
         .upload(squashfs_cont, path_in, img_as_tar.bytes.freeze())
         .await?;
+    progress.inc(1);
+
+    let pre_run_progress = progress.position();
+    let on_output = |s: String| {
+        for s in s.split('\n').filter(|s| s.trim_end().ends_with('%')) {
+            if let Some(v) = from_progress_output(&s) {
+                let delta = v as u64 - (progress.position() - pre_run_progress);
+                progress.inc(delta);
+            }
+        }
+    };
 
     docker
         .run_command(
             squashfs_cont,
-            vec![
-                "mksquashfs",
-                path_in,
-                path_out,
-                "-info",
-                "-comp",
-                "lzo",
-                "-noappend",
-            ],
+            vec!["mksquashfs", path_in, path_out, "-comp", "lzo", "-noappend"],
             "/",
+            on_output,
         )
         .await?;
 
     let final_img_tar = docker.download(squashfs_cont, path_out).await?;
-
-    let mut tar = tar::Archive::new(RWBuffer::from_bytes(&final_img_tar)?);
+    progress.inc(1);
+    let mut tar = tar::Archive::new(RWBuffer::from(final_img_tar));
+    progress.inc(1);
     tar.unpack(dir_out)?;
-
+    progress.inc(1);
     docker.stop_container(squashfs_cont).await?;
+    progress.inc(1);
     docker.remove_container(squashfs_cont).await?;
+    progress.inc(1);
 
     Ok(dir_out.join(Path::new(path_out).file_name().unwrap()))
 }
@@ -164,7 +200,7 @@ fn tar_from_bytes(bytes: &Bytes) -> anyhow::Result<tar::Builder<RWBuffer>> {
     loop {
         if offset + 2 * 0x200 > bytes.len() {
             // tar file is terminated by two zeroed chunks
-            debug!(
+            log::debug!(
                 "reading tar: Break at offset 0x{:x}: EOF (incomplete file)",
                 offset
             );
@@ -178,7 +214,7 @@ fn tar_from_bytes(bytes: &Bytes) -> anyhow::Result<tar::Builder<RWBuffer>> {
             val
         }) == 0
         {
-            debug!("reading tar: Break at offset 0x{:x}: EOF", offset);
+            log::debug!("reading tar: Break at offset 0x{:x}: EOF", offset);
             break;
         }
 
@@ -199,6 +235,6 @@ fn tar_from_bytes(bytes: &Bytes) -> anyhow::Result<tar::Builder<RWBuffer>> {
 
 fn finish_tar(tar: tar::Builder<RWBuffer>) -> anyhow::Result<RWBuffer> {
     let buf = tar.into_inner()?;
-    debug!("Bytes in tar archive: {}", buf.bytes.len());
+    log::debug!("Bytes in tar archive: {}", buf.bytes.len());
     Ok(buf)
 }
