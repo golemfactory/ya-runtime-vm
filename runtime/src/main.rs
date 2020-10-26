@@ -228,7 +228,7 @@ impl Runtime {
             .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?
             .join(DIR_RUNTIME);
 
-        let mut cmd = process::Command::new(FILE_RUNTIME);
+        let mut cmd = process::Command::new(runtime_dir.join(FILE_RUNTIME));
         cmd.current_dir(&runtime_dir).args(&[
             "-m",
             format!("{}M", deployment.mem_mib).as_str(),
