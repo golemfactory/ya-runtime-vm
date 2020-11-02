@@ -122,5 +122,6 @@ pub async fn upload_image<P: AsRef<Path>>(file_path: P) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Image descriptor upload error: {}", e))
         .spinner_result(&spinner)?;
 
+    println!("{}", hash);
     Ok(())
 }
