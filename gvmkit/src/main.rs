@@ -12,7 +12,6 @@ const DEFAULT_LOG_LEVEL: &str = "info";
 
 #[derive(StructOpt)]
 #[structopt(rename_all = "kebab-case")]
-// TODO: additional volumes
 struct CmdArgs {
     /// Output image name
     #[structopt(short, long)]
@@ -20,6 +19,15 @@ struct CmdArgs {
     /// Upload image to repository
     #[structopt(short, long)]
     push: bool,
+    /// Specify additional image environment variable
+    #[structopt(long)]
+    env: Vec<String>,
+    /// Specify additional image volume
+    #[structopt(short, long)]
+    vol: Vec<String>,
+    /// Specify image entrypoint
+    #[structopt(short, long)]
+    entrypoint: Option<String>,
     /// Input Docker image name
     image_name: String, // positional
 }
@@ -39,7 +47,15 @@ async fn main() -> anyhow::Result<()> {
         image_builder::STEPS
     });
 
-    image_builder::build_image(&cmdargs.image_name, Path::new(&cmdargs.output)).await?;
+    image_builder::build_image(
+        &cmdargs.image_name,
+        Path::new(&cmdargs.output),
+        cmdargs.env,
+        cmdargs.vol,
+        cmdargs.entrypoint,
+    )
+    .await?;
+
     if cmdargs.push {
         upload::upload_image(&cmdargs.output).await?;
     }

@@ -7,7 +7,7 @@ use std::{
 };
 use tar;
 
-use crate::docker::DockerInstance;
+use crate::docker::{ContainerOptions, DockerInstance};
 use crate::progress::{from_progress_output, Progress, ProgressResult, Spinner, SpinnerResult};
 use crate::rwbuf::RWBuffer;
 use bollard::service::ContainerConfig;
@@ -15,13 +15,32 @@ use std::rc::Rc;
 
 pub(crate) const STEPS: usize = 3;
 
-pub async fn build_image(image_name: &str, output: &Path) -> anyhow::Result<()> {
+pub async fn build_image(
+    image_name: &str,
+    output: &Path,
+    env: Vec<String>,
+    volumes: Vec<String>,
+    entrypoint: Option<String>,
+) -> anyhow::Result<()> {
     let spinner = Spinner::new(format!("Downloading '{}'", image_name)).ticking();
     let mut docker = DockerInstance::new().await.spinner_err(&spinner)?;
     let cont_name = "gvmkit-tmp";
+    let options = ContainerOptions {
+        image_name: image_name.to_owned(),
+        container_name: cont_name.to_owned(),
+        mounts: None,
+        cmd: None,
+        env: if env.is_empty() { None } else { Some(env) },
+        volumes: if volumes.is_empty() {
+            None
+        } else {
+            Some(volumes)
+        },
+        entrypoint: entrypoint.map(|e| vec![e]),
+    };
 
     docker
-        .create_container(image_name, cont_name, None, None)
+        .create_container(options)
         .await
         .spinner_result(&spinner)?;
 
@@ -134,15 +153,17 @@ async fn repack(
     let squashfs_image = "prekucki/squashfs-tools:latest";
     let squashfs_cont = "sqfs-tools";
     let start_cmd = vec!["tail", "-f", "/dev/null"]; // prevent container from exiting
+    let options = ContainerOptions {
+        image_name: squashfs_image.to_owned(),
+        container_name: squashfs_cont.to_owned(),
+        mounts: None,
+        cmd: Some(start_cmd.iter().map(|s| s.to_string()).collect()),
+        env: None,
+        volumes: None,
+        entrypoint: None,
+    };
 
-    docker
-        .create_container(
-            squashfs_image,
-            squashfs_cont,
-            None,
-            Some(start_cmd.iter().map(|s| s.to_string()).collect()),
-        )
-        .await?;
+    docker.create_container(options).await?;
     progress.inc(1);
 
     docker.start_container(squashfs_cont).await?;

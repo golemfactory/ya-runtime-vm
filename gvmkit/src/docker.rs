@@ -6,12 +6,24 @@ use bollard::{
 };
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::TryStreamExt;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct DirectoryMount {
     pub host: String,
     pub guest: String,
     pub readonly: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContainerOptions {
+    pub image_name: String,
+    pub container_name: String,
+    pub mounts: Option<Vec<DirectoryMount>>,
+    pub cmd: Option<Vec<String>>,
+    pub env: Option<Vec<String>>,
+    pub volumes: Option<Vec<String>>,
+    pub entrypoint: Option<Vec<String>>,
 }
 
 pub struct DockerInstance {
@@ -31,6 +43,7 @@ impl DockerInstance {
             from_image: image_name,
             ..Default::default()
         };
+
         self.docker
             .create_image(Some(options), None, None)
             .try_collect::<Vec<_>>()
@@ -38,19 +51,13 @@ impl DockerInstance {
         Ok(())
     }
 
-    pub async fn try_create_container(
-        &mut self,
-        image_name: &str,
-        container_name: &str,
-        mounts: Option<Vec<DirectoryMount>>,
-        cmd: Option<Vec<String>>,
-    ) -> anyhow::Result<()> {
-        let options = container::CreateContainerOptions {
-            name: container_name,
+    pub async fn try_create_container(&mut self, options: ContainerOptions) -> anyhow::Result<()> {
+        let create_options = container::CreateContainerOptions {
+            name: options.container_name,
         };
 
         let host_config = HostConfig {
-            mounts: mounts.map(|mut mounts| {
+            mounts: options.mounts.map(|mut mounts| {
                 mounts
                     .drain(..)
                     .map(|mount| Mount {
@@ -65,41 +72,37 @@ impl DockerInstance {
             ..Default::default()
         };
 
+        let mut vols = HashMap::new();
+        if let Some(volumes) = options.volumes {
+            volumes.iter().for_each(|v| {
+                vols.insert(v.into(), HashMap::new());
+            });
+        }
+
         let config = container::Config {
-            cmd,
-            image: Some(image_name.to_string()),
+            cmd: options.cmd,
+            env: options.env,
+            volumes: Some(vols),
+            entrypoint: options.entrypoint,
+            image: Some(options.image_name),
             host_config: Some(host_config),
             ..Default::default()
         };
 
-        self.docker.create_container(Some(options), config).await?;
+        self.docker
+            .create_container(Some(create_options), config)
+            .await?;
         Ok(())
     }
 
-    pub async fn create_container(
-        &mut self,
-        image_name: &str,
-        container_name: &str,
-        mounts: Option<Vec<DirectoryMount>>,
-        cmd: Option<Vec<String>>,
-    ) -> anyhow::Result<()> {
-        log::debug!(
-            "Creating container '{}' from image '{}'",
-            container_name,
-            image_name
-        );
-
-        match self
-            .try_create_container(image_name, container_name, mounts.clone(), cmd.clone())
-            .await
-        {
+    pub async fn create_container(&mut self, options: ContainerOptions) -> anyhow::Result<()> {
+        match self.try_create_container(options.clone()).await {
             Ok(_) => (),
             Err(err) => {
                 if err.to_string().contains("No such image") {
                     // TODO: better way
-                    self.create_image(image_name).await?;
-                    self.try_create_container(image_name, container_name, mounts, cmd)
-                        .await?;
+                    self.create_image(&options.image_name).await?;
+                    self.try_create_container(options).await?;
                 } else {
                     return Err(err);
                 }
@@ -195,7 +198,6 @@ impl DockerInstance {
             path,
             ..Default::default()
         };
-
         self.docker
             .upload_to_container(container_name, Some(options), data.into())
             .await?;
