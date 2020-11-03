@@ -9,8 +9,9 @@ endif
 SRC_DIR ?= src
 TEST_DIR ?= tests
 
-KERNEL_URL ?= "https://nl.alpinelinux.org/alpine/v3.11/main/x86_64/linux-virt-5.4.34-r0.apk"
-KERNEL_SHA256 ?= "a6b32dc0ba8a52604b2adc9f9ae5035dc1d7936d81324911b9ee089eca81b2e3"
+KERNEL_VER = "5.4.72-0-virt"
+KERNEL_URL ?= "https://nl.alpinelinux.org/alpine/v3.11/main/x86_64/linux-virt-5.4.72-r0.apk"
+KERNEL_SHA256 ?= "b91c18aeeba32272509dc3b695cab9838dc252424c13c251ed3581a43fc5261a"
 
 UNPACKED_DIR := unpacked_kernel
 
@@ -41,19 +42,19 @@ initramfs.cpio.gz: init $(UNPACKED_DIR)
 	$(RM) -rf initramfs
 	mkdir initramfs
 	cp $< initramfs
-	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/drivers/virtio/virtio.ko initramfs
-	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/drivers/virtio/virtio_ring.ko initramfs
-	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/drivers/virtio/virtio_pci.ko initramfs
-	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/drivers/char/hw_random/rng-core.ko initramfs
-	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/drivers/char/hw_random/virtio-rng.ko initramfs
-	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/drivers/char/virtio_console.ko initramfs
-	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/drivers/block/virtio_blk.ko initramfs
-	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/fs/squashfs/squashfs.ko initramfs
-	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/fs/overlayfs/overlay.ko initramfs
-	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/fs/fscache/fscache.ko initramfs
-	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/net/9p/9pnet.ko initramfs
-	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/net/9p/9pnet_virtio.ko initramfs
-	cp $(UNPACKED_DIR)/lib/modules/5.4.34-0-virt/kernel/fs/9p/9p.ko initramfs
+	cp $(UNPACKED_DIR)/lib/modules/$(KERNEL_VER)/kernel/drivers/virtio/virtio.ko initramfs
+	cp $(UNPACKED_DIR)/lib/modules/$(KERNEL_VER)/kernel/drivers/virtio/virtio_ring.ko initramfs
+	cp $(UNPACKED_DIR)/lib/modules/$(KERNEL_VER)/kernel/drivers/virtio/virtio_pci.ko initramfs
+	cp $(UNPACKED_DIR)/lib/modules/$(KERNEL_VER)/kernel/drivers/char/hw_random/rng-core.ko initramfs
+	cp $(UNPACKED_DIR)/lib/modules/$(KERNEL_VER)/kernel/drivers/char/hw_random/virtio-rng.ko initramfs
+	cp $(UNPACKED_DIR)/lib/modules/$(KERNEL_VER)/kernel/drivers/char/virtio_console.ko initramfs
+	cp $(UNPACKED_DIR)/lib/modules/$(KERNEL_VER)/kernel/drivers/block/virtio_blk.ko initramfs
+	cp $(UNPACKED_DIR)/lib/modules/$(KERNEL_VER)/kernel/fs/squashfs/squashfs.ko initramfs
+	cp $(UNPACKED_DIR)/lib/modules/$(KERNEL_VER)/kernel/fs/overlayfs/overlay.ko initramfs
+	cp $(UNPACKED_DIR)/lib/modules/$(KERNEL_VER)/kernel/fs/fscache/fscache.ko initramfs
+	cp $(UNPACKED_DIR)/lib/modules/$(KERNEL_VER)/kernel/net/9p/9pnet.ko initramfs
+	cp $(UNPACKED_DIR)/lib/modules/$(KERNEL_VER)/kernel/net/9p/9pnet_virtio.ko initramfs
+	cp $(UNPACKED_DIR)/lib/modules/$(KERNEL_VER)/kernel/fs/9p/9p.ko initramfs
 	cd initramfs && find . | cpio --quiet -o -H newc -R 0:0 | gzip -9 > ../$@
 	$(RM) -rf initramfs
 
