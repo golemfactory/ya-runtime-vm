@@ -1,3 +1,6 @@
+mod cpu;
+
+use cpu::CpuInfo;
 use futures::future::FutureExt;
 use futures::lock::Mutex;
 use std::path::{Component, Path, PathBuf};
@@ -27,10 +30,20 @@ const FILE_DEPLOYMENT: &'static str = "deployment.json";
 #[derive(StructOpt)]
 #[structopt(rename_all = "kebab-case")]
 struct CmdArgs {
-    #[structopt(short, long)]
-    workdir: PathBuf,
-    #[structopt(short, long)]
-    task_package: PathBuf,
+    #[structopt(short, long, required_ifs(
+        &[
+            ("command", "deploy"),
+            ("command", "start")
+        ])
+    )]
+    workdir: Option<PathBuf>,
+    #[structopt(short, long, required_ifs(
+        &[
+            ("command", "deploy"),
+            ("command", "start")
+        ])
+    )]
+    task_package: Option<PathBuf>,
     #[structopt(long, default_value = "1")]
     cpu_cores: usize,
     #[structopt(long, default_value = "0.25")]
@@ -44,6 +57,7 @@ struct CmdArgs {
 
 #[derive(StructOpt)]
 enum Commands {
+    OfferTemplate {},
     Deploy {},
     Start {},
 }
@@ -58,9 +72,9 @@ struct Runtime {
     deployment: Deployment,
 }
 
-async fn deploy(cmdargs: &CmdArgs) -> anyhow::Result<()> {
-    let workdir = normalize_path(&cmdargs.workdir).await?;
-    let task_package = normalize_path(&cmdargs.task_package).await?;
+async fn deploy(cmdargs: CmdArgs) -> anyhow::Result<()> {
+    let workdir = normalize_path(&cmdargs.workdir.unwrap()).await?;
+    let task_package = normalize_path(&cmdargs.task_package.unwrap()).await?;
     let package_file = fs::File::open(&task_package).await?;
     let deployment = Deployment::try_from_input(
         package_file,
@@ -408,20 +422,36 @@ impl server::RuntimeService for Runtime {
     }
 }
 
+fn offer_template() -> anyhow::Result<serde_json::Value> {
+    let cpu = CpuInfo::try_new()?;
+    let model = format!(
+        "Stepping {} Family {} Model {}",
+        cpu.model.stepping, cpu.model.family, cpu.model.model
+    );
+
+    Ok(serde_json::json!({
+        "golem.inf.cpu.vendor": cpu.model.vendor,
+        "golem.inf.cpu.model": model,
+        "golem.inf.cpu.capabilities": cpu.capabilities,
+    }))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
     let cmdargs = CmdArgs::from_args();
     match &cmdargs.command {
-        Commands::Deploy { .. } => deploy(&cmdargs).await?,
+        Commands::OfferTemplate { .. } => println!("{}", offer_template()?.to_string()),
+        Commands::Deploy { .. } => deploy(cmdargs).await?,
         Commands::Start { .. } => {
+            let work_dir = cmdargs.workdir.unwrap();
             server::run_async(|e| async {
                 let deployment: Deployment = serde_json::from_reader(
-                    std::fs::File::open(cmdargs.workdir.join(FILE_DEPLOYMENT))
+                    std::fs::File::open(work_dir.join(FILE_DEPLOYMENT))
                         .expect("deployment file not found"),
                 )
                 .expect("failed to read the deployment file");
-                Runtime::started(&cmdargs.workdir, deployment, e)
+                Runtime::started(&work_dir, deployment, e)
                     .await
                     .expect("failed to start runtime")
             })
