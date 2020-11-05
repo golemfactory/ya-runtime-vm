@@ -157,24 +157,18 @@ async fn notification_into_status(
     match notification {
         Notification::OutputAvailable { id, fd } => {
             log::debug!("Process {} has output available on fd {}", id, fd);
-            let output = {
-                let result = {
-                    let mut guard = ga.lock().await;
-                    guard.query_output(id, 0, u64::MAX).await
-                };
-                match result {
-                    Ok(output) => match output {
-                        Ok(vec) => vec,
-                        Err(e) => {
-                            log::error!("Remote error while querying output: {:?}", e);
-                            Vec::new()
-                        }
-                    },
-                    Err(e) => {
-                        log::error!("Error querying output: {:?}", e);
-                        Vec::new()
-                    }
-                }
+            let mut output = Vec::new();
+            let result = {
+                let mut guard = ga.lock().await;
+                guard.query_output(id, 0, u64::MAX).await
+            };
+            match result {
+                Ok(r) => match r {
+                    Ok(v) => output = v,
+                    Err(22) => (),
+                    Err(e) => log::error!("Remote error while querying output: {:?}", e),
+                },
+                Err(e) => log::error!("Error querying output: {:?}", e),
             };
 
             let (stdout, stderr) = if fd == 1 {
