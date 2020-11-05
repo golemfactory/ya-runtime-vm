@@ -430,9 +430,12 @@ fn offer_template() -> anyhow::Result<serde_json::Value> {
     );
 
     Ok(serde_json::json!({
-        "golem.inf.cpu.vendor": cpu.model.vendor,
-        "golem.inf.cpu.model": model,
-        "golem.inf.cpu.capabilities": cpu.capabilities,
+        "properties": {
+            "golem.inf.cpu.vendor": cpu.model.vendor,
+            "golem.inf.cpu.model": model,
+            "golem.inf.cpu.capabilities": cpu.capabilities,
+        },
+        "constraints": ""
     }))
 }
 
