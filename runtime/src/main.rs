@@ -276,7 +276,7 @@ impl Runtime {
             "virtserialport,chardev=manager_cdev,name=manager_port",
             "-drive",
             format!(
-                "file={},cache=none,readonly=on,format=raw,if=virtio",
+                "file={},cache=unsafe,readonly=on,format=raw,if=virtio",
                 deployment.task_package.display()
             )
             .as_str(),
