@@ -1308,6 +1308,8 @@ int main(void) {
 
     CHECK(mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID,
                 "mode=0755,size=2M"));
+    CHECK(mount("proc", "/proc", "proc", MS_NOSUID,
+                NULL));
 
     setup_agent_directories();
 
