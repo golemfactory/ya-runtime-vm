@@ -64,7 +64,7 @@ async fn run_process_with_output(
     println!("Spawned process with id: {}", id);
     notifications.process_died.notified().await;
     notifications.output_available.notified().await;
-    match ga.query_output(id, 0, u64::MAX).await? {
+    match ga.query_output(id, 1, 0, u64::MAX).await? {
         Ok(out) => {
             println!("Output:");
             io::stdout().write_all(&out)?;
@@ -199,7 +199,7 @@ async fn main() -> io::Result<()> {
     println!("Spawned process with id: {}", id);
     notifications.process_died.notified().await;
     let out = ga
-        .query_output(id, 0, u64::MAX)
+        .query_output(id, 1, 0, u64::MAX)
         .await?
         .expect("Output query failed");
     println!("Output:");
@@ -267,7 +267,7 @@ async fn main() -> io::Result<()> {
     println!("Spawned process with id: {}", id);
     notifications.output_available.notified().await;
     let out = ga
-        .query_output(id, 0, u64::MAX)
+        .query_output(id, 1, 0, u64::MAX)
         .await?
         .expect("Output query failed");
     println!(
@@ -277,7 +277,7 @@ async fn main() -> io::Result<()> {
     );
     notifications.output_available.notified().await;
     let out = ga
-        .query_output(id, 0, u64::MAX)
+        .query_output(id, 1, 0, u64::MAX)
         .await?
         .expect("Output query failed");
     println!(
@@ -310,7 +310,7 @@ async fn main() -> io::Result<()> {
     notifications.process_died.notified().await;
     notifications.output_available.notified().await;
     let out = ga
-        .query_output(id, 0, u64::MAX)
+        .query_output(id, 1, 0, u64::MAX)
         .await?
         .expect("Output query failed");
     println!(
@@ -319,7 +319,7 @@ async fn main() -> io::Result<()> {
         out.iter().filter(|x| **x != 0x62).count()
     );
     let out = ga
-        .query_output(id, 0, u64::MAX)
+        .query_output(id, 1, 0, u64::MAX)
         .await?
         .expect("Output query failed");
     println!("Big output 2: {}, expected 0", out.len());
