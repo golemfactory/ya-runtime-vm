@@ -62,6 +62,7 @@ enum epoll_fd_type {
 struct epoll_fd_desc {
     enum epoll_fd_type type;
     int fd;
+    int src_fd;
     struct redir_fd_desc* data;
 };
 
@@ -331,19 +332,20 @@ static noreturn void handle_quit(msg_id_t msg_id) {
 
 static int add_epoll_fd_desc(struct redir_fd_desc* redir_fd_desc,
                              int fd,
-                             bool in,
+                             int src_fd,
                              struct epoll_fd_desc** epoll_fd_desc_ptr) {
     struct epoll_fd_desc* epoll_fd_desc = malloc(sizeof(*epoll_fd_desc));
     if (!epoll_fd_desc) {
         return -1;
     }
 
-    epoll_fd_desc->type = in ? EPOLL_FD_IN : EPOLL_FD_OUT;
+    epoll_fd_desc->type = (src_fd == 0) ? EPOLL_FD_OUT : EPOLL_FD_IN;
     epoll_fd_desc->fd = fd;
+    epoll_fd_desc->src_fd = src_fd;
     epoll_fd_desc->data = redir_fd_desc;
 
     struct epoll_event event = {
-        .events = in ? EPOLLIN : EPOLLOUT,
+        .events = (src_fd == 0) ? EPOLLOUT : EPOLLIN,
         .data.ptr = epoll_fd_desc,
     };
 
@@ -622,7 +624,7 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
 
             if (add_epoll_fd_desc(&proc_desc->redirs[fd],
                                   proc_desc->redirs[fd].buffer.fds[fd ? 0 : 1],
-                                  /*in=*/!!fd,
+                                  fd,
                                   &epoll_fd_descs[fd]) < 0) {
                 if (errno == ENOMEM || errno == ENOSPC) {
                     ret = errno;
@@ -994,6 +996,7 @@ static void handle_query_output(msg_id_t msg_id) {
     bool done = false;
     uint32_t ret = 0;
     uint64_t id = 0;
+    uint8_t fd = 1;
     uint64_t off = 0;
     uint64_t len = 0;
     char* buf = NULL;
@@ -1009,6 +1012,9 @@ static void handle_query_output(msg_id_t msg_id) {
             case SUB_MSG_QUERY_OUTPUT_ID:
                 CHECK(recv_u64(g_cmds_fd, &id));
                 break;
+            case SUB_MSG_QUERY_OUTPUT_FD:
+                CHECK(recv_u8(g_cmds_fd, &fd));
+                break;
             case SUB_MSG_QUERY_OUTPUT_OFF:
                 CHECK(recv_u64(g_cmds_fd, &off));
                 break;
@@ -1022,7 +1028,7 @@ static void handle_query_output(msg_id_t msg_id) {
         }
     }
 
-    if (!id || !len) {
+    if (!id || !len || !fd || fd > 2) {
         ret = EINVAL;
         goto out_err;
     }
@@ -1033,9 +1039,9 @@ static void handle_query_output(msg_id_t msg_id) {
         goto out_err;
     }
 
-    switch (proc_desc->redirs[1].type) {
+    switch (proc_desc->redirs[fd].type) {
         case REDIRECT_FD_FILE:
-            ret = do_query_output_path(proc_desc->redirs[1].path, off, &buf, &len);
+            ret = do_query_output_path(proc_desc->redirs[fd].path, off, &buf, &len);
             if (ret) {
                 goto out_err;
             }
@@ -1048,12 +1054,12 @@ static void handle_query_output(msg_id_t msg_id) {
                 ret = EINVAL;
                 goto out_err;
             }
-            bool was_full = cyclic_buffer_free_size(&proc_desc->redirs[1].buffer.cb) == 0;
-            send_response_cyclic_buffer(msg_id, &proc_desc->redirs[1].buffer.cb, len);
-            if (was_full && proc_desc->redirs[1].type != REDIRECT_FD_PIPE_CYCLIC) {
-                if (add_epoll_fd_desc(&proc_desc->redirs[1],
-                                      proc_desc->redirs[1].buffer.fds[0],
-                                      /*in=*/true,
+            bool was_full = cyclic_buffer_free_size(&proc_desc->redirs[fd].buffer.cb) == 0;
+            send_response_cyclic_buffer(msg_id, &proc_desc->redirs[fd].buffer.cb, len);
+            if (was_full && proc_desc->redirs[fd].type != REDIRECT_FD_PIPE_CYCLIC) {
+                if (add_epoll_fd_desc(&proc_desc->redirs[fd],
+                                      proc_desc->redirs[fd].buffer.fds[0],
+                                      fd,
                                       NULL) < 0) {
                     if (errno != EEXIST) {
                         CHECK(-1);
@@ -1120,8 +1126,9 @@ static void handle_output_available(struct epoll_fd_desc** epoll_fd_desc_ptr) {
 
     if (needs_notification) {
         /* XXX: this is ugly, but for now there is no other way of obtaining process id here. */
-        struct process_desc* process_desc = CONTAINER_OF(epoll_fd_desc->data, struct process_desc, redirs[1]);
-        send_output_available_notification(process_desc->id, 1);
+        int fd = epoll_fd_desc->src_fd;
+        struct process_desc* process_desc = CONTAINER_OF(epoll_fd_desc->data, struct process_desc, redirs[fd]);
+        send_output_available_notification(process_desc->id, fd);
     }
 }
 
@@ -1301,6 +1308,8 @@ int main(void) {
 
     CHECK(mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID,
                 "mode=0755,size=2M"));
+    CHECK(mount("proc", "/proc", "proc", MS_NOSUID,
+                NULL));
 
     setup_agent_directories();
 

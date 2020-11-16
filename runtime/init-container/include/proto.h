@@ -129,6 +129,8 @@ enum SUB_MSG_QUERY_OUTPUT_TYPE {
     SUB_MSG_QUERY_OUTPUT_END = 0,
     /* ID of process. (u64) */
     SUB_MSG_QUERY_OUTPUT_ID,
+    /* File descriptor (u8) */
+    SUB_MSG_QUERY_OUTPUT_FD,
     /* Offset in output (default = 0). (u64) */
     SUB_MSG_QUERY_OUTPUT_OFF,
     /* Requested length. (u64) */

@@ -160,7 +160,7 @@ async fn notification_into_status(
             let output = {
                 let result = {
                     let mut guard = ga.lock().await;
-                    guard.query_output(id, 0, u64::MAX).await
+                    guard.query_output(id, fd as u8, 0, u64::MAX).await
                 };
                 match result {
                     Ok(output) => match output {

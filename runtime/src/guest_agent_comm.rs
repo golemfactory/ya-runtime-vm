@@ -55,6 +55,7 @@ enum SubMsgMountVolumeType<'a> {
 enum SubMsgQueryOutputType {
     SubMsgEnd,
     SubMsgQueryOutputId(u64),
+    SubMsgQueryOutputFd(u8),
     SubMsgQueryOutputOff(u64),
     SubMsgQueryOutputLen(u64),
 }
@@ -248,12 +249,16 @@ impl EncodeInto for SubMsgQueryOutputType {
                 1u8.encode_into(buf);
                 id.encode_into(buf);
             }
-            SubMsgQueryOutputType::SubMsgQueryOutputOff(off) => {
+            SubMsgQueryOutputType::SubMsgQueryOutputFd(fd) => {
                 2u8.encode_into(buf);
+                fd.encode_into(buf);
+            }
+            SubMsgQueryOutputType::SubMsgQueryOutputOff(off) => {
+                3u8.encode_into(buf);
                 off.encode_into(buf);
             }
             SubMsgQueryOutputType::SubMsgQueryOutputLen(len) => {
-                3u8.encode_into(buf);
+                4u8.encode_into(buf);
                 len.encode_into(buf);
             }
         }
@@ -573,6 +578,7 @@ impl GuestAgent {
     pub async fn query_output(
         &mut self,
         id: u64,
+        fd: u8,
         off: u64,
         len: u64,
     ) -> io::Result<RemoteCommandResult<Vec<u8>>> {
@@ -582,6 +588,7 @@ impl GuestAgent {
         msg.create_header(msg_id);
 
         msg.append_submsg(&SubMsgQueryOutputType::SubMsgQueryOutputId(id));
+        msg.append_submsg(&SubMsgQueryOutputType::SubMsgQueryOutputFd(fd));
         msg.append_submsg(&SubMsgQueryOutputType::SubMsgQueryOutputOff(off));
         msg.append_submsg(&SubMsgQueryOutputType::SubMsgQueryOutputLen(len));
 
