@@ -152,7 +152,7 @@ where
             let body = self.body().await?;
             let message = String::from_utf8_lossy(body.as_ref());
             Err(if message.is_empty() {
-                anyhow::anyhow!("Unknown failure")
+                anyhow::anyhow!("HTTP error: {}", self.status().as_u16())
             } else {
                 anyhow::anyhow!("Failure: {}", message)
             })
