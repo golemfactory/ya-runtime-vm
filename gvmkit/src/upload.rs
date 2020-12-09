@@ -1,9 +1,12 @@
 use crate::progress::{Progress, ProgressResult, Spinner, SpinnerResult};
 use actix_rt::Arbiter;
 use anyhow::Context;
+use awc::error::PayloadError;
+use awc::ClientResponse;
 use bytes::Bytes;
 use futures::channel::{mpsc, oneshot};
-use futures::SinkExt;
+use futures::future::LocalBoxFuture;
+use futures::{FutureExt, SinkExt, Stream};
 use hex::ToHex;
 use sha3::Digest;
 use std::path::Path;
@@ -110,6 +113,9 @@ pub async fn upload_image<P: AsRef<Path>>(file_path: P) -> anyhow::Result<()> {
         .send_stream(rx)
         .await
         .map_err(|e| anyhow::anyhow!("Image upload error: {}", e))
+        .progress_err(&progress)?
+        .into_result()
+        .await
         .progress_result(&progress)?;
 
     let hash: String = hrx.await?;
@@ -120,8 +126,37 @@ pub async fn upload_image<P: AsRef<Path>>(file_path: P) -> anyhow::Result<()> {
         .send_body(bytes)
         .await
         .map_err(|e| anyhow::anyhow!("Image descriptor upload error: {}", e))
+        .spinner_err(&spinner)?
+        .into_result()
+        .await
         .spinner_result(&spinner)?;
 
     println!("{}", hash);
     Ok(())
+}
+
+trait IntoResult<'f> {
+    fn into_result(self) -> LocalBoxFuture<'f, anyhow::Result<()>>;
+}
+
+impl<'f, S> IntoResult<'f> for ClientResponse<S>
+where
+    S: Stream<Item = Result<Bytes, PayloadError>> + Unpin + 'f,
+{
+    fn into_result(mut self) -> LocalBoxFuture<'f, anyhow::Result<()>> {
+        if self.status().is_success() {
+            return futures::future::ok(()).boxed_local();
+        }
+
+        async move {
+            let body = self.body().await?;
+            let message = String::from_utf8_lossy(body.as_ref());
+            Err(if message.is_empty() {
+                anyhow::anyhow!("Unknown failure")
+            } else {
+                anyhow::anyhow!("Failure: {}", message)
+            })
+        }
+        .boxed_local()
+    }
 }
