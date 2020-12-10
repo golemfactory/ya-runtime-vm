@@ -911,6 +911,7 @@ dependencies = [
  "indicatif",
  "lazy_static",
  "log",
+ "percent-encoding",
  "regex",
  "serde",
  "serde_json",

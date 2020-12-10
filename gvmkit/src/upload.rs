@@ -8,6 +8,7 @@ use futures::channel::{mpsc, oneshot};
 use futures::future::LocalBoxFuture;
 use futures::{FutureExt, SinkExt, Stream};
 use hex::ToHex;
+use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use sha3::Digest;
 use std::path::Path;
 use std::rc::Rc;
@@ -16,8 +17,13 @@ use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 use trust_dns_resolver::TokioAsyncResolver;
 
 pub(crate) const STEPS: usize = 2;
-const PROTOCOL: &'static str = "http";
-const DOMAIN: &'static str = "dev.golem.network";
+pub(crate) const PROTOCOL: &'static str = "http";
+pub(crate) const DOMAIN: &'static str = "dev.golem.network";
+
+lazy_static::lazy_static! {
+    static ref ASCII_SET: AsciiSet = NON_ALPHANUMERIC
+        .remove(b'.').remove(b'-').remove(b'_');
+}
 
 async fn resolve_repo() -> anyhow::Result<String> {
     let resolver: TokioAsyncResolver =
@@ -119,7 +125,9 @@ pub async fn upload_image<P: AsRef<Path>>(file_path: P) -> anyhow::Result<()> {
         .progress_result(&progress)?;
 
     let hash: String = hrx.await?;
-    let bytes = format!("{}/{}", repo_url, file_name).as_bytes().to_vec();
+    let encoded = utf8_percent_encode(&file_name, &(*ASCII_SET)).to_string();
+    let bytes = format!("{}/{}", repo_url, encoded).as_bytes().to_vec();
+
     let spinner = Spinner::new(format!("Uploading link for {}", file_name)).ticking();
     client
         .put(format!("{}/upload/image.{}.link", repo_url, hash))
