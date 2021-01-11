@@ -17,6 +17,7 @@
 #include <sys/signalfd.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -40,6 +41,7 @@
         .path = NULL,               \
     }
 
+#define MODE_RW_UGO (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)
 #define OUTPUT_PATH_PREFIX "/var/tmp/guest_agent_private/fds"
 
 struct new_process_args {
@@ -1252,17 +1254,19 @@ static noreturn void main_loop(void) {
     }
 }
 
+static void create_dir(const char *pathname, mode_t mode) {
+    if (mkdir(pathname, mode) < 0 && errno != EEXIST) {
+        fprintf(stderr, "mkdir(%s) failed with: %m\n", pathname);
+        die();
+    }
+}
+
 int main(void) {
     setbuf(stdin, NULL);
     setbuf(stdout, NULL);
     setbuf(stderr, NULL);
 
-    if (mkdir("/dev", DEFAULT_DIR_PERMS) < 0
-            && errno != EEXIST) {
-        fprintf(stderr, "mkdir(/dev) failed with: %m\n");
-        die();
-    }
-
+    create_dir("/dev", DEFAULT_DIR_PERMS);
     CHECK(mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID,
                 "mode=0755,size=2M"));
 
@@ -1289,7 +1293,6 @@ int main(void) {
     CHECK(mkdir("/mnt/newroot", DEFAULT_DIR_PERMS));
 
     CHECK(mount("/dev/vda", "/mnt/ro", "squashfs", MS_RDONLY, ""));
-
     CHECK(mount("overlay", "/mnt/newroot", "overlay", 0,
                 "lowerdir=/mnt/ro,upperdir=/mnt/rw,workdir=/mnt/work"));
 
@@ -1300,16 +1303,42 @@ int main(void) {
     CHECK(chroot("."));
     CHECK(chdir("/"));
 
-    if (mkdir("/dev", DEFAULT_DIR_PERMS) < 0
-            && errno != EEXIST) {
-        fprintf(stderr, "mkdir(/dev) in new root failed with: %m\n");
-        die();
-    }
+    create_dir("/dev", DEFAULT_DIR_PERMS);
+    create_dir("/tmp", DEFAULT_DIR_PERMS);
 
-    CHECK(mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID,
-                "mode=0755,size=2M"));
-    CHECK(mount("proc", "/proc", "proc", MS_NOSUID,
+    CHECK(mount("proc", "/proc", "proc",
+                MS_NODEV | MS_NOSUID | MS_NOEXEC,
                 NULL));
+    CHECK(mount("sysfs", "/sys", "sysfs",
+                MS_NODEV | MS_NOSUID | MS_NOEXEC,
+                NULL));
+    CHECK(mount("devtmpfs", "/dev", "devtmpfs",
+                MS_NOSUID,
+                "exec,mode=0755,size=2M"));
+    CHECK(mount("tmpfs", "/tmp", "tmpfs",
+                MS_NOSUID,
+                "mode=0777"));
+
+    create_dir("/dev/pts", DEFAULT_DIR_PERMS);
+    create_dir("/dev/shm", DEFAULT_DIR_PERMS);
+
+    CHECK(mount("devpts", "/dev/pts", "devpts", 
+                MS_NOSUID | MS_NOEXEC,
+                "gid=5,mode=0620"));
+    CHECK(mount("tmpfs", "/dev/shm", "tmpfs",
+                MS_NODEV | MS_NOSUID | MS_NOEXEC,
+                NULL));
+                
+    if (access("/dev/null", F_OK) != 0) {
+        CHECK(mknod("/dev/null",
+                    MODE_RW_UGO | S_IFCHR,
+                    makedev(1, 3)));
+    }
+    if (access("/dev/ptmx", F_OK) != 0) {
+        CHECK(mknod("/dev/ptmx",
+                    MODE_RW_UGO | S_IFCHR,
+                    makedev(5, 2)));
+    }
 
     setup_agent_directories();
 
