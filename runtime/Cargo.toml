@@ -1,6 +1,6 @@
 [package]
 name = "ya-runtime-vm"
-version = "0.2.3"
+version = "0.2.4"
 authors = ["Golem Factory <contact@golem.network>"]
 edition = "2018"
 license = "GPL-3.0"
@@ -9,6 +9,7 @@ license = "GPL-3.0"
 assets = [
     ["target/release/ya-runtime-vm", "usr/lib/yagna/plugins/ya-runtime-vm/", "755"],
     ["conf/ya-runtime-vm.json", "usr/lib/yagna/plugins/", "644"],
+    ["image/self-test.gvmi", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
 
     ["poc/runtime/vmrt", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "755"],
     ["poc/runtime/bios-256k.bin", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],

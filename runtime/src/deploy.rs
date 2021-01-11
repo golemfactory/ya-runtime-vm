@@ -9,7 +9,7 @@ use tokio_byteorder::LittleEndian;
 use uuid::Uuid;
 use ya_runtime_api::deploy::ContainerVolume;
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct Deployment {
     #[serde(default)]
     pub cpu_cores: usize,
