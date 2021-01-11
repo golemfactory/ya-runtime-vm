@@ -6,12 +6,13 @@ use futures::lock::Mutex;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use structopt::StructOpt;
+use structopt::{clap, StructOpt};
 use tokio::{
     fs,
     io::{self, AsyncBufReadExt, AsyncWriteExt},
     process, spawn,
 };
+use ya_runtime_api::server::RuntimeService;
 use ya_runtime_api::{
     deploy::{DeployResult, StartMode},
     server,
@@ -25,6 +26,7 @@ const DIR_RUNTIME: &'static str = "runtime";
 const FILE_RUNTIME: &'static str = "vmrt";
 const FILE_VMLINUZ: &'static str = "vmlinuz-virt";
 const FILE_INITRAMFS: &'static str = "initramfs.cpio.gz";
+const FILE_TEST_IMAGE: &'static str = "self-test.gvmi";
 const FILE_DEPLOYMENT: &'static str = "deployment.json";
 
 #[derive(StructOpt)]
@@ -56,9 +58,15 @@ struct CmdArgs {
 }
 
 #[derive(StructOpt)]
+#[structopt(setting = clap::AppSettings::DeriveDisplayOrder)]
 enum Commands {
+    /// Perform a self-test
+    Test {},
+    /// Print the market offer template (JSON)
     OfferTemplate {},
+    /// Deploy an image
     Deploy {},
+    /// Start a deployed image
     Start {},
 }
 
@@ -237,10 +245,7 @@ impl Runtime {
     ) -> io::Result<Self> {
         let socket_name = uuid::Uuid::new_v4().to_simple().to_string();
         let socket_path = std::env::temp_dir().join(format!("{}.sock", socket_name));
-        let runtime_dir = std::env::current_exe()?
-            .parent()
-            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?
-            .join(DIR_RUNTIME);
+        let runtime_dir = runtime_dir()?;
 
         let mut cmd = process::Command::new(runtime_dir.join(FILE_RUNTIME));
         cmd.current_dir(&runtime_dir).args(&[
@@ -439,12 +444,51 @@ fn offer_template() -> anyhow::Result<serde_json::Value> {
     }))
 }
 
+async fn self_test() -> anyhow::Result<()> {
+    server::run_async(|e| async {
+        let deployment = Deployment {
+            cpu_cores: 1,
+            mem_mib: 128,
+            task_package: runtime_dir()
+                .expect("runtime directory not found")
+                .join(FILE_TEST_IMAGE)
+                .canonicalize()
+                .expect("test image not found"),
+            ..Deployment::default()
+        };
+
+        println!("Starting runtime @ {}", deployment.task_package.display());
+        let runtime = Runtime::started(std::env::temp_dir(), deployment, e)
+            .await
+            .expect("failed to start runtime");
+
+        println!("Stopping runtime");
+        runtime.shutdown().await.expect("failed to stop runtime");
+        tokio::spawn(async move {
+            // the server refuses to stop by itself; force quit
+            std::process::exit(0);
+        });
+
+        runtime
+    })
+    .await;
+    Ok(())
+}
+
+fn runtime_dir() -> io::Result<PathBuf> {
+    Ok(std::env::current_exe()?
+        .parent()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?
+        .join(DIR_RUNTIME))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
     let cmdargs = CmdArgs::from_args();
     match &cmdargs.command {
         Commands::OfferTemplate { .. } => println!("{}", offer_template()?.to_string()),
+        Commands::Test { .. } => self_test().await?,
         Commands::Deploy { .. } => deploy(cmdargs).await?,
         Commands::Start { .. } => {
             let work_dir = cmdargs.workdir.unwrap();
