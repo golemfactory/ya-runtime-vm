@@ -1287,14 +1287,21 @@ int main(void) {
     g_cmds_fd = CHECK(open("/dev/vport0p1", O_RDWR | O_CLOEXEC));
 
     CHECK(mkdir("/mnt", S_IRWXU));
-    CHECK(mkdir("/mnt/ro", S_IRWXU));
-    CHECK(mkdir("/mnt/rw", S_IRWXU));
-    CHECK(mkdir("/mnt/work", S_IRWXU));
+    CHECK(mkdir("/mnt/image", S_IRWXU));
+    CHECK(mkdir("/mnt/overlay", S_IRWXU));    
     CHECK(mkdir("/mnt/newroot", DEFAULT_DIR_PERMS));
+    
+    // 'workdir' and 'upperdir' have to be on the same filesystem
+    CHECK(mount("tmpfs", "/mnt/overlay", "tmpfs",
+                MS_NOSUID,
+                "mode=0777,size=128M"));
+    
+    CHECK(mkdir("/mnt/overlay/upper", S_IRWXU));
+    CHECK(mkdir("/mnt/overlay/work", S_IRWXU));
 
-    CHECK(mount("/dev/vda", "/mnt/ro", "squashfs", MS_RDONLY, ""));
+    CHECK(mount("/dev/vda", "/mnt/image", "squashfs", MS_RDONLY, ""));
     CHECK(mount("overlay", "/mnt/newroot", "overlay", 0,
-                "lowerdir=/mnt/ro,upperdir=/mnt/rw,workdir=/mnt/work"));
+                "lowerdir=/mnt/image,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work"));
 
     CHECK(umount2("/dev", MNT_DETACH));
 
