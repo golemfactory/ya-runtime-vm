@@ -114,13 +114,14 @@ jobs:
         run: |
           TAG_NAME="${GITHUB_REF##*/}"
           TARGET_DIR=releases/ya-runtime-vm-linux-${TAG_NAME}
-          mkdir -p "$TARGET_DIR/ya-runtime-vm"
+          mkdir -p "$TARGET_DIR/ya-runtime-vm/runtime"
           strip "target/x86_64-unknown-linux-musl/release/ya-runtime-vm"
           set -x
 
           cp target/x86_64-unknown-linux-musl/release/ya-runtime-vm "$TARGET_DIR/ya-runtime-vm/"
           cp runtime/conf/ya-runtime-vm.json "$TARGET_DIR/"
           cp -r runtime/poc/runtime "$TARGET_DIR/ya-runtime-vm/"
+          cp "runtime/image/self-test.gvmi" "$TARGET_DIR/ya-runtime-vm/runtime/"
           cp "runtime/init-container/initramfs.cpio.gz" "$TARGET_DIR/ya-runtime-vm/runtime/"
           cp "runtime/init-container/vmlinuz-virt" "$TARGET_DIR/ya-runtime-vm/runtime/"
           (cd releases && tar czvf "ya-runtime-vm-${OS_NAME}-${TAG_NAME}.tar.gz" "ya-runtime-vm-${OS_NAME}-${TAG_NAME}")
