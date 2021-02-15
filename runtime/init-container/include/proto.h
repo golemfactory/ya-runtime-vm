@@ -63,6 +63,12 @@ enum HOST_MSG_TYPE {
 
     /* Expected response: RESP_OK */
     MSG_SYNC_FS,
+
+    /* Expected response: RESP_OK */
+    MSG_NET_CTL,
+
+    /* Expected response: RESP_OK */
+    MSG_NET_HOST,
 };
 
 enum SUB_MSG_QUIT_TYPE {
@@ -141,9 +147,33 @@ enum SUB_MSG_PUT_INPUT_TYPE {
     /* End of sub-messages. */
     SUB_MSG_PUT_INPUT_END = 0,
     /* ID of process. (u64) */
-    SUG_MSG_PUT_INPUT_ID,
+    SUB_MSG_PUT_INPUT_ID,
     /* Data to put on process' stdin. (BYTES) */
     SUB_MSG_PUT_INPUT_DATA,
+};
+
+enum SUB_MSG_NET_CTL {
+    /* End of sub-messages. */
+    SUB_MSG_NET_CTL_END = 0,
+    /* Network control flags (u16) */
+    SUB_MSG_NET_CTL_FLAGS,
+    /* Network address to assign. (BYTES) */
+    SUB_MSG_NET_CTL_ADDR,
+    /* Network mask to assign. (BYTES) */
+    SUB_MSG_NET_CTL_MASK,
+    /* Network gateway assign. (BYTES) */
+    SUB_MSG_NET_CTL_GATEWAY,
+};
+
+enum SUB_MSG_NET_CTL_FLAGS {
+    FLAG_MSG_NET_CTL_IP6 = 6,
+};
+
+enum SUB_MSG_NET_HOST {
+    /* End of sub-messages. */
+    SUB_MSG_NET_HOST_END = 0,
+    /* End of sub-messages. (BYTES, BYTES) */
+    SUB_MSG_NET_HOST_ENTRY,
 };
 
 enum REDIRECT_FD_TYPE {

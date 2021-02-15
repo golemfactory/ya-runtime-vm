@@ -1,8 +1,9 @@
 mod cpu;
 
 use cpu::CpuInfo;
-use futures::future::FutureExt;
+use futures::future::{FutureExt, TryFutureExt};
 use futures::lock::Mutex;
+use semver::{Version, VersionReq};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -12,10 +13,9 @@ use tokio::{
     io::{self, AsyncBufReadExt, AsyncWriteExt},
     process, spawn,
 };
-use ya_runtime_api::server::RuntimeService;
 use ya_runtime_api::{
     deploy::{DeployResult, StartMode},
-    server,
+    server::{self, RuntimeService},
 };
 use ya_runtime_vm::{
     deploy::Deployment,
@@ -75,8 +75,15 @@ struct RuntimeData {
     ga: Arc<Mutex<GuestAgent>>,
 }
 
+#[derive(Clone)]
+#[non_exhaustive]
+enum NetworkEndpoint {
+    Socket(PathBuf),
+}
+
 struct Runtime {
     data: Mutex<RuntimeData>,
+    network: NetworkEndpoint,
     deployment: Deployment,
 }
 
@@ -95,7 +102,7 @@ async fn deploy(cmdargs: CmdArgs) -> anyhow::Result<()> {
 
     fs::create_dir_all(&workdir).await?;
     for vol in &deployment.volumes {
-        fs::create_dir_all(workdir.join(&vol.name)).await?;
+        fs::create_dir(workdir.join(&vol.name)).await?;
     }
 
     write_file(
@@ -164,7 +171,7 @@ async fn notification_into_status(
 ) -> server::ProcessStatus {
     match notification {
         Notification::OutputAvailable { id, fd } => {
-            log::debug!("Process {} has output available on fd {}", id, fd);
+            log::trace!("Process {} has output available on fd {}", id, fd);
             let output = {
                 let result = {
                     let mut guard = ga.lock().await;
@@ -220,7 +227,7 @@ async fn reader_to_log<T: io::AsyncRead + Unpin>(reader: T) {
         match reader.read_until(b'\n', &mut buf).await {
             Ok(len) => {
                 if len > 0 {
-                    log::debug!(
+                    log::trace!(
                         "VM: {}",
                         String::from_utf8_lossy(&strip_ansi_escapes::strip(&buf).unwrap())
                             .trim_end()
@@ -243,9 +250,15 @@ impl Runtime {
         deployment: Deployment,
         event_emitter: E,
     ) -> io::Result<Self> {
-        let socket_name = uuid::Uuid::new_v4().to_simple().to_string();
-        let socket_path = std::env::temp_dir().join(format!("{}.sock", socket_name));
         let runtime_dir = runtime_dir()?;
+        let uid = uuid::Uuid::new_v4().to_simple().to_string();
+        let manager_sock = std::env::temp_dir().join(format!("{}.sock", uid));
+        let net_sock = std::env::temp_dir().join(format!("{}_net.sock", uid));
+        let emitter = Arc::new(event_emitter);
+
+        let chardev = |name, path: &PathBuf| {
+            format!("socket,path={},server,nowait,id={}", path.display(), name)
+        };
 
         let mut cmd = process::Command::new(runtime_dir.join(FILE_RUNTIME));
         cmd.current_dir(&runtime_dir).args(&[
@@ -272,13 +285,13 @@ impl Runtime {
             "-device",
             "virtio-rng-pci",
             "-chardev",
-            format!(
-                "socket,path={},server,nowait,id=manager_cdev",
-                socket_path.display()
-            )
-            .as_str(),
+            chardev("manager_cdev", &manager_sock).as_str(),
+            "-chardev",
+            chardev("net_cdev", &net_sock).as_str(),
             "-device",
             "virtserialport,chardev=manager_cdev,name=manager_port",
+            "-device",
+            "virtserialport,chardev=net_cdev,name=net_port",
             "-drive",
             format!(
                 "file={},cache=unsafe,readonly=on,format=raw,if=virtio",
@@ -302,10 +315,10 @@ impl Runtime {
             .stdout(Stdio::piped())
             .kill_on_drop(true)
             .spawn()?;
+
         spawn(reader_to_log(runtime.stdout.take().unwrap()));
 
-        let emitter = Arc::new(event_emitter);
-        let ga = GuestAgent::connected(socket_path, 10, move |notification, ga| {
+        let ga = GuestAgent::connected(manager_sock, 10, move |notification, ga| {
             let emitter = emitter.clone();
             async move {
                 let status = notification_into_status(notification, ga).await;
@@ -330,6 +343,7 @@ impl Runtime {
                 runtime: Some(runtime),
                 ga,
             }),
+            network: NetworkEndpoint::Socket(net_sock),
             deployment,
         })
     }
@@ -337,8 +351,34 @@ impl Runtime {
 
 impl server::RuntimeService for Runtime {
     fn hello(&self, version: &str) -> server::AsyncResponse<String> {
-        log::info!("server version: {}", version);
-        async { Ok("0.0.0-demo".to_owned()) }.boxed_local()
+        let client_version = version.to_owned();
+        let server_version = ya_runtime_api::PROTOCOL_VERSION;
+        log::debug!("server version: {}", server_version);
+
+        async move {
+            let client = Version::parse(&client_version)?;
+            let mut server = Version::parse(server_version)?;
+            if server.major > 0 {
+                server.minor = 0;
+            }
+            server.patch = 0;
+
+            let required = VersionReq::parse(&format!("^{}", server))?;
+            if !required.matches(&client) {
+                return Err(anyhow::anyhow!(
+                    "Client version {} is incompatible with {}",
+                    client_version,
+                    server_version
+                ));
+            }
+
+            Ok::<_, anyhow::Error>(server_version.to_owned())
+        }
+        .map_err(|e| ya_runtime_api::server::ErrorResponse {
+            message: format!("Version error: {}", e),
+            ..Default::default()
+        })
+        .boxed_local()
     }
 
     fn run_process(
@@ -393,6 +433,43 @@ impl server::RuntimeService for Runtime {
             let data = self.data.lock().await;
             let result = data.ga.lock().await.kill(kill.pid).await;
             convert_result(result, &format!("Killing process {}", kill.pid))
+        }
+        .boxed_local()
+    }
+
+    fn create_network(
+        &self,
+        msg: server::CreateNetwork,
+    ) -> server::AsyncResponse<'_, server::CreateNetworkResp> {
+        log::debug!("got create network");
+        let hosts = msg.hosts;
+        let networks = msg.networks;
+
+        async move {
+            let network = self.network.clone();
+            let data = self.data.lock().await;
+            let mut ga = data.ga.lock().await;
+
+            convert_result(ga.add_hosts(hosts.iter()).await, "Updating network hosts")?;
+
+            for net in networks {
+                convert_result(
+                    if net.ipv6 {
+                        ga.create_network6(&net.addr, &net.gateway).await
+                    } else {
+                        ga.create_network(&net.addr, &net.mask, &net.gateway).await
+                    },
+                    &format!("Creating network {} {}", net.addr, net.gateway),
+                )?;
+            }
+
+            Ok(match network {
+                NetworkEndpoint::Socket(path) => server::CreateNetworkResp {
+                    endpoint: Some(server::proto::response::create_network::Endpoint::Socket(
+                        path.display().to_string(),
+                    )),
+                },
+            })
         }
         .boxed_local()
     }

@@ -1,6 +1,6 @@
 [package]
 name = "ya-runtime-vm"
-version = "0.2.4"
+version = "0.3.0"
 authors = ["Golem Factory <contact@golem.network>"]
 edition = "2018"
 license = "GPL-3.0"
@@ -28,6 +28,7 @@ env_logger = "0.7.1"
 futures = "0.3"
 log = "0.4.8"
 raw-cpuid = "8.1.2"
+semver = "0.11"
 serde = { version = "^1.0", features = ["derive"] }
 serde_json = "1.0"
 strip-ansi-escapes = "0.1.0"
@@ -35,13 +36,19 @@ structopt = "0.3"
 tokio = { version = "0.2", features = ["fs", "io-std", "io-util", "macros", "process", "rt-core", "rt-threaded", "sync", "time", "uds"] }
 tokio-byteorder = "0.2"
 uuid = { version = "0.8", features = ["v4"] }
-ya-runtime-api = { version = "0.1", features = ["codec"], git="https://github.com/golemfactory/yagna.git" }
+
+[dependencies.ya-runtime-api]
+version = "0.2"
+features = ["codec"]
+git = "https://github.com/golemfactory/yagna.git"
+rev = "eb8eb216ae0b131d9c68cc9ce609a6b624812d9e"
 
 [dev-dependencies]
 tempdir = "0.3.7"
+pnet = "0.27.2"
 
 [build-dependencies]
-anyhow = "1.0.33"
+anyhow = "1.0"
 
 [lib]
 name = "ya_runtime_vm"
