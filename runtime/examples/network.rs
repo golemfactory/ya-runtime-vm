@@ -367,7 +367,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(_) | Err(0) => (),
             Err(code) => anyhow::bail!("Unable to join network {}", code),
         }
-        match ga.add_hosts(hosts.iter()).await? {
+        match ga.add_hosts(hosts.into_iter()).await? {
             Ok(_) | Err(0) => (),
             Err(code) => anyhow::bail!("Unable to add hosts {}", code),
         }

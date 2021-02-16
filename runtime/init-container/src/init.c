@@ -343,8 +343,8 @@ static void setup_network(void) {
     CHECK(net_if_addr(g_lo_name, "127.0.0.1", "255.255.255.0"));
     CHECK(add_network_hosts(hosts, sizeof(hosts) / sizeof(*hosts)));
 
-    CHECK(fwd_start(g_tun_fd, g_net_fd));
-    CHECK(fwd_start(g_net_fd, g_tun_fd));
+    CHECK(fwd_start(g_tun_fd, g_net_fd, MTU));
+    CHECK(fwd_start(g_net_fd, g_tun_fd, MTU));
 }
 
 static void stop_network(void) {
@@ -1253,6 +1253,11 @@ static void handle_net_ctl(msg_id_t msg_id) {
             perror("Error setting IPv4 route");
             goto out_err;
         }
+    }
+
+    if ((ret = net_if_mtu(g_tun_name, MTU)) < 0) {
+        perror("Error setting MTU");
+        goto out_err;
     }
 
 out_err:

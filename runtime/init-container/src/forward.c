@@ -14,25 +14,44 @@
 
 #include "forward.h"
 
-#define READ_SZ             1500
 #define QUEUE_DEPTH         8
 
 static int working = true;
 
+struct fwd_args {
+    int *fds;
+    int read_sz;
+};
+
 int fwd(void *data);
 
-int fwd_start(int rfd, int wfd) {
-    int ret = 0, *fds = malloc(2 * sizeof(int));
+int fwd_start(int rfd, int wfd, int read_sz) {
     thrd_t th;
+    int ret, *fds = 0;
+    struct fwd_args *args = 0;
+
+    if (!(fds = malloc(2 * sizeof(int)))) {
+        ret = -ENOMEM;
+        goto err;
+    }
+    if (!(args = malloc(sizeof(struct fwd_args)))) {
+        ret = -ENOMEM;
+        goto err;
+    }
 
     fds[0] = rfd;
     fds[1] = wfd;
+    args->fds = fds;
+    args->read_sz = read_sz;
 
-    if ((ret = thrd_create(&th, fwd, (void*) fds)) != thrd_success) {
-        free(fds);
-        return ret;
+    if ((ret = thrd_create(&th, fwd, (void*) args)) != thrd_success) {
+        goto err;
     }
     return thrd_detach(th);
+err:
+    if (fds) free(fds);
+    if (args) free(args);
+    return ret;
 }
 
 void fwd_stop() {
@@ -40,12 +59,18 @@ void fwd_stop() {
 }
 
 int fwd(void *data) {
-    char buf[READ_SZ];
     struct io_uring ring;
     struct io_uring_sqe *sqe;
     struct io_uring_cqe *cqe;
     int rc, wc, ret = 0;
-    int *fds = (int*) data;
+    char *buf = 0;
+
+    struct fwd_args *args = (struct fwd_args*) data;
+
+    if (!(buf = malloc(args->read_sz))) {
+        ret = -ENOMEM;
+        goto end;
+    }
 
     struct timespec sleep_tsc = {
         .tv_sec = 0,
@@ -53,7 +78,7 @@ int fwd(void *data) {
     };
 
     io_uring_queue_init(QUEUE_DEPTH, &ring, 0);
-    if ((ret = io_uring_register_files(&ring, fds, 2)) < 0) {
+    if ((ret = io_uring_register_files(&ring, args->fds, 2)) < 0) {
         goto end;
     }
 
@@ -62,7 +87,7 @@ int fwd(void *data) {
             ret = -1;
             goto end;
         }
-        io_uring_prep_read(sqe, 0, buf, READ_SZ, 0);
+        io_uring_prep_read(sqe, 0, buf, args->read_sz, 0);
         sqe->flags |= IOSQE_FIXED_FILE;
 
         io_uring_submit(&ring);
@@ -102,5 +127,8 @@ int fwd(void *data) {
     }
 end:
     io_uring_unregister_files(&ring);
+    free(args->fds);
+    free(args);
+    if (buf) free(buf);
     return ret;
 }

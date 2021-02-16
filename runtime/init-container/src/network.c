@@ -64,7 +64,7 @@ int net_create_tun(char *name) {
         strncpy(ifr.ifr_name, name, sizeof(ifr.ifr_name) - 1);
     }
 
-    if ((ret = ioctl(fd, TUNSETIFF, (void *) &ifr)) < 0){
+    if ((ret = ioctl(fd, TUNSETIFF, &ifr)) < 0) {
         goto err;
     }
 
@@ -93,6 +93,27 @@ int net_if_up(char *name, int up) {
     }
 
     if ((ret = ioctl(fd, SIOCSIFFLAGS, &ifr)) < 0) {
+        goto end;
+    }
+end:
+    close(fd);
+    return ret;
+}
+
+int net_if_mtu(char *name, int mtu) {
+    struct ifreq ifr;
+    int fd, ret;
+
+    if ((fd = socket(PF_INET, SOCK_DGRAM, IPPROTO_IP)) < 0) {
+        return fd;
+    }
+
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, name, sizeof(ifr.ifr_name) - 1);
+
+    ifr.ifr_addr.sa_family = AF_INET;
+    ifr.ifr_mtu = mtu;
+    if ((ret = ioctl(fd, SIOCSIFMTU, &ifr)) < 0) {
         goto end;
     }
 end:
