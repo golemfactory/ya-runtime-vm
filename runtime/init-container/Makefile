@@ -9,9 +9,9 @@ endif
 SRC_DIR ?= src
 TEST_DIR ?= tests
 
-KERNEL_VER = "5.10.12-0-virt"
-KERNEL_URL ?= "https://nl.alpinelinux.org/alpine/v3.11/main/x86_64/linux-virt-5.10.12-r0.apk"
-KERNEL_SHA256 ?= "74ccfed28189c62722b177837182a3abcfbc7ab9fe1cec8e4c17208cc7902989"
+KERNEL_VER = "5.10.16-0-virt"
+KERNEL_URL ?= "https://nl.alpinelinux.org/alpine/v3.13/main/x86_64/linux-virt-5.10.16-r0.apk"
+KERNEL_SHA256 ?= "d3de4dc7b8c71582cb2e2f78fd742b60e7c718ea59754a42762d45abe601a7cd"
 
 UNPACKED_DIR := unpacked_kernel
 
