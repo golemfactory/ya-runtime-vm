@@ -305,9 +305,9 @@ fn handle_ipv4_packet(data: &[u8]) -> Option<Vec<u8>> {
                 let mut data: Vec<u8> = vec![0u8; 1500];
                 let reply_len = 20 + payload.len();
 
-                data[0] = 0x45;
-
                 let mut reply = MutableIpv4Packet::new(&mut data[..reply_len]).unwrap();
+                reply.set_version(4);
+                reply.set_header_length(5);
                 reply.set_total_length(reply_len as u16);
                 reply.set_identification(IDENTIFICATION.fetch_add(1, Relaxed));
                 reply.set_flags(pnet::packet::ipv4::Ipv4Flags::DontFragment);
