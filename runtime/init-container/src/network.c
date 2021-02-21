@@ -8,6 +8,7 @@
 #include <linux/socket.h>
 #include <linux/string.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -15,18 +16,30 @@
 
 #include "network.h"
 
+static int alias_counter = 0;
+
 struct ifreq6_stub {
     struct in6_addr addr;
     uint32_t prefixlen;
     int32_t ifindex;
 };
 
-int parse_prefix_len(char *ip) {
+int parse_prefix_len(const char *ip) {
     char *cp;
     if ((cp = strchr(ip, '/'))) {
         return atol(cp + 1);
     }
     return -1;
+}
+
+int net_if_alias(struct ifreq *ifr, const char *name) {
+    const int suffix_len = 5;
+    if (strlen(name) >= sizeof(ifr->ifr_name) - suffix_len) {
+        return -1;
+    }
+    snprintf(ifr->ifr_name, sizeof(ifr->ifr_name) - 1,
+            "%s:%d", name, ++alias_counter);
+    return 0;
 }
 
 int net_create_lo(char *name) {
@@ -75,7 +88,7 @@ err:
     return ret;
 }
 
-int net_if_up(char *name, int up) {
+int net_if_up(const char *name, int up) {
     struct ifreq ifr;
     int fd, ret;
 
@@ -100,7 +113,7 @@ end:
     return ret;
 }
 
-int net_if_mtu(char *name, int mtu) {
+int net_if_mtu(const char *name, int mtu) {
     struct ifreq ifr;
     int fd, ret;
 
@@ -121,7 +134,7 @@ end:
     return ret;
 }
 
-int net_if_addr(char *name, char *ip, char *mask) {
+int net_if_addr(const char *name, const char *ip, const char *mask) {
     struct ifreq ifr;
     int fd, ret;
 
@@ -131,6 +144,12 @@ int net_if_addr(char *name, char *ip, char *mask) {
 
     memset(&ifr, 0, sizeof(ifr));
     strncpy(ifr.ifr_name, name, sizeof(ifr.ifr_name) - 1);
+
+    if ((ret = ioctl(fd, SIOCGIFADDR, &ifr)) == 0) {
+        if ((ret = net_if_alias(&ifr, name)) < 0) {
+            goto end;
+        }
+    }
 
     struct sockaddr_in* sa = (struct sockaddr_in*) &ifr.ifr_addr;
     sa->sin_family = AF_INET;
@@ -157,7 +176,7 @@ end:
     return ret;
 }
 
-int net_if_addr6(char *name, char *ip6) {
+int net_if_addr6(const char *name, const char *ip6) {
     struct ifreq ifr;
     struct ifreq6_stub ifr6;
     int fd, ret, pl;
@@ -172,6 +191,12 @@ int net_if_addr6(char *name, char *ip6) {
     strncpy(ifr.ifr_name, name, sizeof(ifr.ifr_name) - 1);
     if ((ret = ioctl(fd, SIOGIFINDEX, &ifr)) < 0) {
         goto end;
+    }
+
+    if ((ret = ioctl(fd, SIOCGIFADDR, &ifr)) == 0) {
+        if ((ret = net_if_alias(&ifr, name)) < 0) {
+            goto end;
+        }
     }
 
     if ((pl = parse_prefix_len(ip6)) < 0) {
@@ -197,7 +222,7 @@ end:
     return ret;
 }
 
-int net_route(char *ip, char *via) {
+int net_route(const char *ip, const char *via) {
     struct rtentry rt;
     struct sockaddr_in *addr;
     int fd, ret = 0;
@@ -228,7 +253,7 @@ end:
     return ret;
 }
 
-int net_route6(char *name, char *ip6, char *via) {
+int net_route6(const char *name, const char *ip6, const char *via) {
     struct ifreq ifr;
     struct in6_rtmsg rt;
     int fd, pl, ret = 0;

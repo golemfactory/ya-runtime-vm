@@ -367,6 +367,13 @@ async fn main() -> anyhow::Result<()> {
             Ok(_) | Err(0) => (),
             Err(code) => anyhow::bail!("Unable to join network {}", code),
         }
+        match ga
+            .create_network("10.0.1.10", "255.255.255.0", "10.0.1.1")
+            .await?
+        {
+            Ok(_) | Err(0) => (),
+            Err(code) => anyhow::bail!("Unable to join network {}", code),
+        }
         match ga.add_hosts(hosts.into_iter()).await? {
             Ok(_) | Err(0) => (),
             Err(code) => anyhow::bail!("Unable to add hosts {}", code),
@@ -405,7 +412,7 @@ async fn main() -> anyhow::Result<()> {
         run_process(
             &mut ga,
             "/bin/ping",
-            &["ping", "-v", "-n", "-D", "-c", "3", "10.0.0.4"],
+            &["ping", "-v", "-n", "-D", "-c", "3", "10.0.1.4"],
         )
         .await?;
     }
