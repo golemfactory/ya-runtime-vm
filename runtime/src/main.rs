@@ -28,6 +28,7 @@ const FILE_VMLINUZ: &'static str = "vmlinuz-virt";
 const FILE_INITRAMFS: &'static str = "initramfs.cpio.gz";
 const FILE_TEST_IMAGE: &'static str = "self-test.gvmi";
 const FILE_DEPLOYMENT: &'static str = "deployment.json";
+const DEFAULT_CWD: &'static str = "/";
 
 #[derive(StructOpt)]
 #[structopt(rename_all = "kebab-case")]
@@ -395,7 +396,9 @@ impl server::RuntimeService for Runtime {
             .config
             .working_dir
             .as_ref()
-            .map(|s| s.as_str());
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.as_str())
+            .unwrap_or_else(|| DEFAULT_CWD);
 
         async move {
             let data = self.data.lock().await;
@@ -418,7 +421,7 @@ impl server::RuntimeService for Runtime {
                         Some(RedirectFdType::RedirectFdPipeCyclic(0x1000)),
                         Some(RedirectFdType::RedirectFdPipeCyclic(0x1000)),
                     ],
-                    cwd,
+                    Some(cwd),
                 )
                 .await;
             convert_result(result, "Running process").map(|pid| server::RunProcessResp { pid })

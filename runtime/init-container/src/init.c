@@ -236,7 +236,7 @@ static void handle_sigchld(void) {
     pid_t w_pid = waitpid(child_pid, NULL, WNOHANG);
     if (w_pid != child_pid) {
         fprintf(stderr, "Error at waitpid: %d: %m\n", w_pid);
-        die();
+        return;
     }
 
     struct process_desc* proc_desc = find_process_by_pid(child_pid);
