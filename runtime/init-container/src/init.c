@@ -80,10 +80,10 @@ static int g_cmds_fd = -1;
 static int g_net_fd = -1;
 static int g_sig_fd = -1;
 static int g_epoll_fd = -1;
-static int g_tun_fd = -1;
+static int g_tap_fd = -1;
 
 static char g_lo_name[16];
-static char g_tun_name[16];
+static char g_tap_name[16];
 
 static struct process_desc* g_entrypoint_desc = NULL;
 
@@ -335,16 +335,16 @@ static void setup_network(void) {
     };
 
     strcpy(g_lo_name, "lo");
-    strcpy(g_tun_name, "golem%d");
+    strcpy(g_tap_name, "golem%d");
 
     CHECK(net_create_lo(g_lo_name));
-    g_tun_fd = CHECK(net_create_tun(g_tun_name));
+    g_tap_fd = CHECK(net_create_tap(g_tap_name));
 
     CHECK(net_if_addr(g_lo_name, "127.0.0.1", "255.255.255.0"));
     CHECK(add_network_hosts(hosts, sizeof(hosts) / sizeof(*hosts)));
 
-    CHECK(fwd_start(g_tun_fd, g_net_fd, MTU));
-    CHECK(fwd_start(g_net_fd, g_tun_fd, MTU));
+    CHECK(fwd_start(g_tap_fd, g_net_fd, MTU));
+    CHECK(fwd_start(g_net_fd, g_tap_fd, MTU));
 }
 
 static void stop_network(void) {
@@ -1232,11 +1232,11 @@ static void handle_net_ctl(msg_id_t msg_id) {
     }
 
     if ((flags & FLAG_MSG_NET_CTL_IP6) == FLAG_MSG_NET_CTL_IP6) {
-        if ((ret = net_if_addr6(g_tun_name, addr)) < 0) {
+        if ((ret = net_if_addr6(g_tap_name, addr)) < 0) {
             perror("Error setting IPv6 address");
             goto out_err;
         }
-        if ((ret = net_route6(g_tun_name, addr, gateway)) < 0) {
+        if ((ret = net_route6(g_tap_name, addr, gateway)) < 0) {
             perror("Error setting IPv6 route");
             goto out_err;
         }
@@ -1245,7 +1245,7 @@ static void handle_net_ctl(msg_id_t msg_id) {
             ret = EINVAL;
             goto out_err;
         }
-        if ((ret = net_if_addr(g_tun_name, addr, mask)) < 0) {
+        if ((ret = net_if_addr(g_tap_name, addr, mask)) < 0) {
             perror("Error setting IPv4 address");
             goto out_err;
         }
@@ -1255,7 +1255,7 @@ static void handle_net_ctl(msg_id_t msg_id) {
         }
     }
 
-    if ((ret = net_if_mtu(g_tun_name, MTU)) < 0) {
+    if ((ret = net_if_mtu(g_tap_name, MTU)) < 0) {
         perror("Error setting MTU");
         goto out_err;
     }

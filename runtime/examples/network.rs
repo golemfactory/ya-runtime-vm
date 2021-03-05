@@ -1,5 +1,7 @@
 use futures::lock::Mutex;
 use futures::FutureExt;
+use pnet::packet::arp::{ArpOperations, ArpPacket, MutableArpPacket};
+use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
 use pnet::packet::icmp::{echo_reply, echo_request, IcmpPacket, IcmpTypes, MutableIcmpPacket};
 use pnet::packet::ip::{IpNextHeaderProtocol, IpNextHeaderProtocols};
 use pnet::packet::ipv4::{Ipv4Packet, MutableIpv4Packet};
@@ -181,7 +183,7 @@ async fn handle_net<P: AsRef<Path>>(path: P) -> anyhow::Result<()> {
                 Ok(0) => break println!("No more data to read"),
                 Ok(c) => c,
             };
-            if let Some(res) = handle_ipv4_packet(&buf[..count]) {
+            if let Some(res) = handle_ethernet_packet(&buf[..count]) {
                 if let Err(e) = write.write_all(&res).await {
                     println!("Write error: {:?}", e);
                 }
@@ -331,6 +333,65 @@ fn handle_ipv4_packet(data: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
+fn handle_arp_packet(data: &[u8]) -> Option<Vec<u8>> {
+    match ArpPacket::new(data) {
+        Some(arp) => match arp.get_operation() {
+            ArpOperations::Request => {
+                println!("Arp packet");
+
+                let mut buffer = [0u8; 28];
+                let mut reply = MutableArpPacket::new(&mut buffer).unwrap();
+
+                reply.set_hardware_type(arp.get_hardware_type());
+                reply.set_protocol_type(arp.get_protocol_type());
+                reply.set_hw_addr_len(arp.get_hw_addr_len());
+                reply.set_proto_addr_len(arp.get_proto_addr_len());
+                reply.set_operation(ArpOperations::Reply);
+                reply.set_sender_hw_addr(arp.get_target_hw_addr());
+                reply.set_sender_proto_addr(arp.get_target_proto_addr());
+                reply.set_target_hw_addr(arp.get_sender_hw_addr());
+                reply.set_target_proto_addr(arp.get_sender_proto_addr());
+
+                return Some(reply.packet().to_vec());
+            }
+            _ => (),
+        },
+        _ => {
+            println!("Malformed ARP Packet");
+        }
+    };
+    None
+}
+
+fn handle_ethernet_packet(data: &[u8]) -> Option<Vec<u8>> {
+    match EthernetPacket::new(data) {
+        Some(eth) => match eth.get_ethertype() {
+            EtherTypes::Ipv4 => handle_ipv4_packet(eth.payload()),
+            EtherTypes::Arp => {
+                println!("Got ARP packet");
+                handle_arp_packet(eth.payload())
+            }
+            eth_type => {
+                println!("Got ethernet packet: {:?}", eth_type);
+                None
+            }
+        }
+        .map(move |payload| {
+            let mut data: Vec<u8> = vec![0u8; 1500];
+            let mut reply = MutableEthernetPacket::new(&mut data).unwrap();
+            reply.set_source(eth.get_destination());
+            reply.set_destination(eth.get_source());
+            reply.set_ethertype(eth.get_ethertype());
+            reply.set_payload(&payload);
+            reply.packet().to_vec()
+        }),
+        _ => {
+            println!("Malformed Ethernet Packet");
+            None
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let temp_dir = tempdir::TempDir::new("ya-vm-direct").expect("Failed to create temp dir");
@@ -345,6 +406,12 @@ async fn main() -> anyhow::Result<()> {
         async move { notifications.clone().lock().await.handle(n) }.boxed()
     })
     .await?;
+
+    {
+        notifications.clone().lock().await.set_ga(ga_mutex.clone());
+    };
+
+    handle_net(temp_path.join("net.sock")).await?;
 
     {
         let hosts = [
@@ -381,18 +448,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     {
-        notifications.clone().lock().await.set_ga(ga_mutex.clone());
-    };
-    handle_net(temp_path.join("net.sock")).await?;
-
-    {
         let mut ga = ga_mutex.lock().await;
         run_process(&mut ga, "/bin/cat", &["cat", "/etc/hosts"]).await?;
     }
 
     {
         let mut ga = ga_mutex.lock().await;
-        run_process(&mut ga, "/bin/ip", &["ip", "a"]).await?;
+        run_process(&mut ga, "/bin/ip", &["ip", "-d", "a"]).await?;
     }
     {
         let mut ga = ga_mutex.lock().await;

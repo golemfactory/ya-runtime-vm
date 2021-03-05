@@ -2,6 +2,7 @@
 #include <fcntl.h>
 #include <linux/errno.h>
 #include <linux/if.h>
+#include <linux/if_arp.h>
 #include <linux/if_tun.h>
 #include <linux/ipv6_route.h>
 #include <linux/route.h>
@@ -62,16 +63,16 @@ end:
     return ret;
 }
 
-int net_create_tun(char *name) {
+int net_create_tap(char *name) {
     struct ifreq ifr;
     int fd, ret;
 
     if ((fd = open("/dev/net/tun", O_RDWR)) < 0) {
-        return -EALREADY;
+        return fd;
     }
 
     memset(&ifr, 0, sizeof(ifr));
-    ifr.ifr_flags = IFF_TUN | IFF_NO_PI | IFF_UP;
+    ifr.ifr_flags = IFF_TAP | IFF_NO_PI;
 
     if (*name) {
         strncpy(ifr.ifr_name, name, sizeof(ifr.ifr_name) - 1);
@@ -218,6 +219,27 @@ int net_if_addr6(const char *name, const char *ip6) {
         goto end;
     }
 end:
+    close(fd);
+    return ret;
+}
+
+int net_if_hw_addr(const char *name, const char mac[6]) {
+    struct ifreq ifr;
+    int fd, ret = 0;
+
+    if ((fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL))) < 0) {
+        return fd;
+    }
+
+    ifr.ifr_hwaddr.sa_family = ARPHRD_ETHER;
+    memcpy(ifr.ifr_hwaddr.sa_data, mac, 6);
+
+    strncpy(ifr.ifr_name, name, sizeof(ifr.ifr_name) - 1);
+    if ((ret = ioctl(fd, SIOCSIFHWADDR, &ifr)) < 0) {
+        goto err;
+    }
+
+err:
     close(fd);
     return ret;
 }
