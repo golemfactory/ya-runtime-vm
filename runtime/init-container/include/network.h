@@ -1,7 +1,7 @@
 #ifndef _NETWORK_H
 #define _NETWORK_H
 
-#define MTU 65507
+#define MTU 65521
 
 int net_create_lo(char *name);
 int net_create_tap(char *name);

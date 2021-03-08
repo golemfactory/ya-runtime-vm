@@ -26,6 +26,7 @@ use tokio::{
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
 
 const IDENTIFICATION: AtomicU16 = AtomicU16::new(42);
+const MTU: usize = 65535;
 
 struct Notifications {
     process_died: sync::Notify,
@@ -176,7 +177,7 @@ async fn handle_net<P: AsRef<Path>>(path: P) -> anyhow::Result<()> {
     let (mut read, mut write) = tokio::io::split(stream);
 
     let fut = async move {
-        let mut buf: [u8; 1500] = [0u8; 1500];
+        let mut buf: [u8; MTU] = [0u8; MTU];
         loop {
             let count = match read.read(&mut buf).await {
                 Err(e) => break println!("Read error: {:?}", e),
@@ -304,7 +305,7 @@ fn handle_ipv4_packet(data: &[u8]) -> Option<Vec<u8>> {
             );
 
             reply.map(move |payload| {
-                let mut data: Vec<u8> = vec![0u8; 1500];
+                let mut data: Vec<u8> = vec![0u8; MTU];
                 let reply_len = 20 + payload.len();
 
                 let mut reply = MutableIpv4Packet::new(&mut data[..reply_len]).unwrap();
@@ -377,7 +378,7 @@ fn handle_ethernet_packet(data: &[u8]) -> Option<Vec<u8>> {
             }
         }
         .map(move |payload| {
-            let mut data: Vec<u8> = vec![0u8; 1500];
+            let mut data: Vec<u8> = vec![0u8; MTU];
             let mut reply = MutableEthernetPacket::new(&mut data).unwrap();
             reply.set_source(eth.get_destination());
             reply.set_destination(eth.get_source());
