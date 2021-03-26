@@ -41,7 +41,7 @@ uuid = { version = "0.8", features = ["v4"] }
 version = "0.2"
 features = ["codec"]
 git = "https://github.com/golemfactory/yagna.git"
-rev = "eb8eb216ae0b131d9c68cc9ce609a6b624812d9e"
+branch = "mf/vpn"
 
 [dev-dependencies]
 tempdir = "0.3.7"

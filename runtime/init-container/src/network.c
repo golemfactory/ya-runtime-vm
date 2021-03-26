@@ -244,7 +244,7 @@ err:
     return ret;
 }
 
-int net_route(const char *ip, const char *via) {
+int net_route(const char *name, const char *ip, const char *mask, const char *via) {
     struct rtentry rt;
     struct sockaddr_in *addr;
     int fd, ret = 0;
@@ -255,22 +255,38 @@ int net_route(const char *ip, const char *via) {
 
     memset(&rt, 0, sizeof(rt));
 
-    addr = (struct sockaddr_in*) &rt.rt_dst;
-    addr->sin_family = AF_INET;
-    addr->sin_addr.s_addr = inet_addr(ip);
+    rt.rt_dev = malloc(strlen(name) + 1);
+    if (!rt.rt_dev) {
+        ret = -ENOMEM;
+        goto end;
+    }
+    memcpy(rt.rt_dev, name, strlen(name) + 1);
 
-    rt.rt_flags |= RTF_UP | RTF_HOST;
-    while (!ioctl(fd, SIOCDELRT, &rt));
-    rt.rt_flags |= RTF_GATEWAY;
+    int any = !ip || strlen(ip) == 0;
+    if (!any) {
+        rt.rt_flags |= RTF_HOST;
+    }
+    rt.rt_flags |= RTF_UP | RTF_GATEWAY;
 
     addr = (struct sockaddr_in *) &rt.rt_gateway;
     addr->sin_family = AF_INET;
     addr->sin_addr.s_addr = inet_addr(via);
 
+    while (!ioctl(fd, SIOCDELRT, &rt));
+
+    addr = (struct sockaddr_in*) &rt.rt_dst;
+    addr->sin_family = AF_INET;
+    addr->sin_addr.s_addr = any ? INADDR_ANY : inet_addr(ip);
+
+    addr = (struct sockaddr_in *) &rt.rt_genmask;
+    addr->sin_family = AF_INET;
+    addr->sin_addr.s_addr = any ? INADDR_ANY : inet_addr(mask);
+
     if ((ret = ioctl(fd, SIOCADDRT, (void *) &rt)) < 0) {
         goto end;
     }
 end:
+    if (rt.rt_dev) free(rt.rt_dev);
     close(fd);
     return ret;
 }
@@ -293,21 +309,21 @@ int net_route6(const char *name, const char *ip6, const char *via) {
     if ((ret = inet_pton(AF_INET6, ip6, (void *) &(rt.rtmsg_dst))) < 0) {
         goto end;
     }
-    if ((pl = parse_prefix_len(ip6)) < 0) {
-        pl = 128;
-    }
-
-    rt.rtmsg_flags |= RTF_UP | RTF_HOST;
-    while (!ioctl(fd, SIOCDELRT, &rt));
-    rt.rtmsg_flags |= RTF_GATEWAY;
 
     rt.rtmsg_ifindex = ifr.ifr_ifindex;
-    rt.rtmsg_dst_len = pl;
-    rt.rtmsg_metric = 101;
+    rt.rtmsg_flags |= RTF_UP | RTF_GATEWAY;
 
     if ((ret = inet_pton(AF_INET6, via, (void *) &(rt.rtmsg_gateway))) < 0) {
         goto end;
     }
+
+    while (!ioctl(fd, SIOCDELRT, &rt));
+
+    if ((pl = parse_prefix_len(ip6)) < 0) {
+        pl = 128;
+    }
+    rt.rtmsg_dst_len = pl;
+    rt.rtmsg_metric = 101;
 
     if ((ret = ioctl(fd, SIOCADDRT, (void *) &rt)) < 0) {
         goto end;

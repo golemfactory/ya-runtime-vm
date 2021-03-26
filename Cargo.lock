@@ -2971,7 +2971,7 @@ dependencies = [
 [[package]]
 name = "ya-runtime-api"
 version = "0.2.0"
-source = "git+https://github.com/golemfactory/yagna.git?rev=eb8eb216ae0b131d9c68cc9ce609a6b624812d9e#eb8eb216ae0b131d9c68cc9ce609a6b624812d9e"
+source = "git+https://github.com/golemfactory/yagna.git?branch=mf/vpn#2eaf8979aa4ba1a823363fde6cb8f7186549ac4a"
 dependencies = [
  "anyhow",
  "bytes",

@@ -1231,7 +1231,7 @@ static void handle_net_ctl(msg_id_t msg_id) {
         goto out_err;
     }
 
-    if ((flags & FLAG_MSG_NET_CTL_IP6) == FLAG_MSG_NET_CTL_IP6) {
+    if (strstr(addr, ":")) {
         if ((ret = net_if_addr6(g_tap_name, addr)) < 0) {
             perror("Error setting IPv6 address");
             goto out_err;
@@ -1249,7 +1249,7 @@ static void handle_net_ctl(msg_id_t msg_id) {
             perror("Error setting IPv4 address");
             goto out_err;
         }
-        if ((ret = net_route(addr, gateway)) < 0) {
+        if ((ret = net_route(g_tap_name, 0, mask, gateway)) < 0) {
             perror("Error setting IPv4 route");
             goto out_err;
         }

@@ -457,11 +457,7 @@ impl server::RuntimeService for Runtime {
 
             for net in networks {
                 convert_result(
-                    if net.ipv6 {
-                        ga.create_network6(&net.addr, &net.gateway).await
-                    } else {
-                        ga.create_network(&net.addr, &net.mask, &net.gateway).await
-                    },
+                    ga.create_network(&net.addr, &net.mask, &net.gateway).await,
                     &format!("Creating network {} {}", net.addr, net.gateway),
                 )?;
             }

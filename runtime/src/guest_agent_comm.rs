@@ -75,7 +75,7 @@ enum SubMsgNetCtlType<'a> {
 }
 
 enum SubMsgNetCtlFlags {
-    IP6 = 6,
+    Empty = 0,
 }
 
 enum SubMsgNetHostType<'a> {
@@ -682,34 +682,16 @@ impl GuestAgent {
     ) -> io::Result<RemoteCommandResult<()>> {
         let mut msg = Message::default();
         let msg_id = self.get_new_msg_id();
+        let flags = SubMsgNetCtlFlags::Empty as u16;
 
         msg.create_header(msg_id);
+        msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlFlags(flags));
         msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlAddr(addr.as_bytes()));
         msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlMask(mask.as_bytes()));
         msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlGateway(gateway.as_bytes()));
         msg.append_submsg(&SubMsgNetCtlType::SubMsgEnd);
 
         self.stream.write_all(msg.as_ref()).await?;
-        self.get_ok_response(msg_id).await
-    }
-
-    pub async fn create_network6(
-        &mut self,
-        addr: &str,
-        gateway: &str,
-    ) -> io::Result<RemoteCommandResult<()>> {
-        let mut msg = Message::default();
-        let msg_id = self.get_new_msg_id();
-        let flags = SubMsgNetCtlFlags::IP6 as u16;
-
-        msg.create_header(msg_id);
-        msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlFlags(flags));
-        msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlAddr(addr.as_bytes()));
-        msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlGateway(gateway.as_bytes()));
-        msg.append_submsg(&SubMsgNetCtlType::SubMsgEnd);
-
-        self.stream.write_all(msg.as_ref()).await?;
-
         self.get_ok_response(msg_id).await
     }
 
