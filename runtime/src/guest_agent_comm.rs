@@ -72,10 +72,13 @@ enum SubMsgNetCtlType<'a> {
     SubMsgNetCtlAddr(&'a [u8]),
     SubMsgNetCtlMask(&'a [u8]),
     SubMsgNetCtlGateway(&'a [u8]),
+    SubMsgNetCtlIfAddr(&'a [u8]),
 }
 
 enum SubMsgNetCtlFlags {
+    #[allow(unused)]
     Empty = 0,
+    Add,
 }
 
 enum SubMsgNetHostType<'a> {
@@ -323,6 +326,10 @@ impl EncodeInto for SubMsgNetCtlType<'_> {
             SubMsgNetCtlType::SubMsgNetCtlGateway(gateway) => {
                 4u8.encode_into(buf);
                 gateway.encode_into(buf);
+            }
+            SubMsgNetCtlType::SubMsgNetCtlIfAddr(addr) => {
+                5u8.encode_into(buf);
+                addr.encode_into(buf);
             }
         }
     }
@@ -653,9 +660,10 @@ impl GuestAgent {
         self.get_ok_response(msg_id).await
     }
 
-    pub async fn add_hosts<'a, I, S>(&mut self, hosts: I) -> io::Result<RemoteCommandResult<()>>
+    pub async fn add_hosts<'a, I, T, S>(&mut self, hosts: I) -> io::Result<RemoteCommandResult<()>>
     where
-        I: Iterator<Item = (S, S)>,
+        I: Iterator<Item = (T, S)>,
+        T: AsRef<str>,
         S: AsRef<str>,
     {
         let mut msg = Message::default();
@@ -682,13 +690,32 @@ impl GuestAgent {
     ) -> io::Result<RemoteCommandResult<()>> {
         let mut msg = Message::default();
         let msg_id = self.get_new_msg_id();
-        let flags = SubMsgNetCtlFlags::Empty as u16;
+        let flags = SubMsgNetCtlFlags::Add as u16;
 
         msg.create_header(msg_id);
         msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlFlags(flags));
         msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlAddr(addr.as_bytes()));
         msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlMask(mask.as_bytes()));
         msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlGateway(gateway.as_bytes()));
+        msg.append_submsg(&SubMsgNetCtlType::SubMsgEnd);
+
+        self.stream.write_all(msg.as_ref()).await?;
+        self.get_ok_response(msg_id).await
+    }
+
+    pub async fn add_address(
+        &mut self,
+        if_addr: &str,
+        mask: &str,
+    ) -> io::Result<RemoteCommandResult<()>> {
+        let mut msg = Message::default();
+        let msg_id = self.get_new_msg_id();
+        let flags = SubMsgNetCtlFlags::Add as u16;
+
+        msg.create_header(msg_id);
+        msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlFlags(flags));
+        msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlIfAddr(if_addr.as_bytes()));
+        msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlMask(mask.as_bytes()));
         msg.append_submsg(&SubMsgNetCtlType::SubMsgEnd);
 
         self.stream.write_all(msg.as_ref()).await?;

@@ -339,6 +339,7 @@ static void setup_network(void) {
 
     CHECK(net_create_lo(g_lo_name));
     g_tap_fd = CHECK(net_create_tap(g_tap_name));
+    CHECK(net_if_mtu(g_tap_name, MTU));
 
     CHECK(net_if_addr(g_lo_name, "127.0.0.1", "255.255.255.0"));
     CHECK(add_network_hosts(hosts, sizeof(hosts) / sizeof(*hosts)));
@@ -1197,6 +1198,7 @@ static void handle_net_ctl(msg_id_t msg_id) {
     char* addr = NULL;
     char* mask = NULL;
     char* gateway = NULL;
+    char* if_addr = NULL;
     int ret = 0;
 
     while (!done) {
@@ -1219,6 +1221,9 @@ static void handle_net_ctl(msg_id_t msg_id) {
             case SUB_MSG_NET_CTL_GATEWAY:
                 CHECK(recv_bytes(g_cmds_fd, &gateway, NULL, /*is_cstring=*/true));
                 break;
+            case SUB_MSG_NET_CTL_IF_ADDR:
+                CHECK(recv_bytes(g_cmds_fd, &if_addr, NULL, /*is_cstring=*/true));
+                break;
             default:
                 fprintf(stderr, "Unknown MSG_NET_CTL subtype: %hhu\n",
                         subtype);
@@ -1226,38 +1231,41 @@ static void handle_net_ctl(msg_id_t msg_id) {
         }
     }
 
-    if (!addr || !gateway) {
-        ret = EINVAL;
-        goto out_err;
+    if (if_addr) {
+        if (strstr(if_addr, ":")) {
+            if ((ret = net_if_addr6(g_tap_name, if_addr)) < 0) {
+                perror("Error setting IPv6 address");
+                goto out_err;
+            }
+        } else {
+            if (!mask) {
+                ret = EINVAL;
+                goto out_err;
+            }
+            if ((ret = net_if_addr(g_tap_name, if_addr, mask)) < 0) {
+                perror("Error setting IPv4 address");
+                goto out_err;
+            }
+        }
     }
 
-    if (strstr(addr, ":")) {
-        if ((ret = net_if_addr6(g_tap_name, addr)) < 0) {
-            perror("Error setting IPv6 address");
-            goto out_err;
-        }
-        if ((ret = net_route6(g_tap_name, addr, gateway)) < 0) {
-            perror("Error setting IPv6 route");
-            goto out_err;
-        }
-    } else {
-        if (!mask) {
+    if (addr || gateway) {
+        if (!addr || !gateway) {
             ret = EINVAL;
             goto out_err;
         }
-        if ((ret = net_if_addr(g_tap_name, addr, mask)) < 0) {
-            perror("Error setting IPv4 address");
-            goto out_err;
-        }
-        if ((ret = net_route(g_tap_name, 0, mask, gateway)) < 0) {
-            perror("Error setting IPv4 route");
-            goto out_err;
-        }
-    }
 
-    if ((ret = net_if_mtu(g_tap_name, MTU)) < 0) {
-        perror("Error setting MTU");
-        goto out_err;
+        if (strstr(addr, ":")) {
+            if ((ret = net_route6(g_tap_name, addr, gateway)) < 0) {
+                perror("Error setting IPv6 route");
+                goto out_err;
+            }
+        } else {
+            if ((ret = net_route(g_tap_name, addr, mask, gateway)) < 0) {
+                perror("Error setting IPv4 route");
+                goto out_err;
+            }
+        }
     }
 
 out_err:

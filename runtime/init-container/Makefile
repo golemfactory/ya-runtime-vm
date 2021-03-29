@@ -12,9 +12,9 @@ ifndef V
 endif
 endif
 
-KERNEL_VER ?= 5.10.16-0-virt
-KERNEL_URL ?= https://nl.alpinelinux.org/alpine/v3.13/main/x86_64/linux-virt-5.10.16-r0.apk
-KERNEL_SHA256 ?= d3de4dc7b8c71582cb2e2f78fd742b60e7c718ea59754a42762d45abe601a7cd
+KERNEL_VER ?= 5.10.26-0-virt
+KERNEL_URL ?= https://nl.alpinelinux.org/alpine/v3.13/main/x86_64/linux-virt-5.10.26-r0.apk
+KERNEL_SHA256 ?= 50b93e671943b9fdec738783ce30ce6379688d0365435d40d94a87b2236e4e30
 
 HEADERS_URL ?= https://nl.alpinelinux.org/alpine/v3.13/main/x86_64/linux-headers-5.7.8-r0.apk
 HEADERS_SHA256 ?= 0b0f0c30be30ff367f5d1eaee227e919efc4b7f442bc03b3190c6e0d1a165362

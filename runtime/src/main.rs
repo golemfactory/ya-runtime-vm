@@ -457,6 +457,10 @@ impl server::RuntimeService for Runtime {
 
             for net in networks {
                 convert_result(
+                    ga.add_address(&net.if_addr, &net.mask).await,
+                    &format!("Adding interface address {} {}", net.if_addr, net.gateway),
+                )?;
+                convert_result(
                     ga.create_network(&net.addr, &net.mask, &net.gateway).await,
                     &format!("Creating network {} {}", net.addr, net.gateway),
                 )?;

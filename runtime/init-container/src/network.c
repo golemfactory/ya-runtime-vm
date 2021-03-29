@@ -172,6 +172,10 @@ int net_if_addr(const char *name, const char *ip, const char *mask) {
     if ((ret = ioctl(fd, SIOCSIFFLAGS, &ifr)) < 0) {
         goto end;
     }
+
+    if ((ret = net_if_mtu(ifr.ifr_name, MTU)) < 0) {
+        goto end;
+    }
 end:
     close(fd);
     return ret;
@@ -218,6 +222,10 @@ int net_if_addr6(const char *name, const char *ip6) {
     if ((ret = ioctl(fd, SIOCSIFFLAGS, &ifr)) < 0) {
         goto end;
     }
+
+    if ((ret = net_if_mtu(ifr.ifr_name, MTU)) < 0) {
+        goto end;
+    }
 end:
     close(fd);
     return ret;
@@ -255,6 +263,7 @@ int net_route(const char *name, const char *ip, const char *mask, const char *vi
 
     memset(&rt, 0, sizeof(rt));
 
+    rt.rt_flags |= RTF_UP | RTF_GATEWAY;
     rt.rt_dev = malloc(strlen(name) + 1);
     if (!rt.rt_dev) {
         ret = -ENOMEM;
@@ -262,25 +271,17 @@ int net_route(const char *name, const char *ip, const char *mask, const char *vi
     }
     memcpy(rt.rt_dev, name, strlen(name) + 1);
 
-    int any = !ip || strlen(ip) == 0;
-    if (!any) {
-        rt.rt_flags |= RTF_HOST;
-    }
-    rt.rt_flags |= RTF_UP | RTF_GATEWAY;
-
     addr = (struct sockaddr_in *) &rt.rt_gateway;
     addr->sin_family = AF_INET;
     addr->sin_addr.s_addr = inet_addr(via);
 
-    while (!ioctl(fd, SIOCDELRT, &rt));
-
     addr = (struct sockaddr_in*) &rt.rt_dst;
     addr->sin_family = AF_INET;
-    addr->sin_addr.s_addr = any ? INADDR_ANY : inet_addr(ip);
+    addr->sin_addr.s_addr = inet_addr(ip);
 
     addr = (struct sockaddr_in *) &rt.rt_genmask;
     addr->sin_family = AF_INET;
-    addr->sin_addr.s_addr = any ? INADDR_ANY : inet_addr(mask);
+    addr->sin_addr.s_addr = inet_addr(mask);
 
     if ((ret = ioctl(fd, SIOCADDRT, (void *) &rt)) < 0) {
         goto end;
@@ -306,25 +307,21 @@ int net_route6(const char *name, const char *ip6, const char *via) {
 
     memset(&rt, 0, sizeof(rt));
 
-    if ((ret = inet_pton(AF_INET6, ip6, (void *) &(rt.rtmsg_dst))) < 0) {
-        goto end;
+    if ((pl = parse_prefix_len(ip6)) < 0) {
+        pl = 128;
     }
 
+    rt.rtmsg_dst_len = pl;
+    rt.rtmsg_metric = 101;
     rt.rtmsg_ifindex = ifr.ifr_ifindex;
     rt.rtmsg_flags |= RTF_UP | RTF_GATEWAY;
 
     if ((ret = inet_pton(AF_INET6, via, (void *) &(rt.rtmsg_gateway))) < 0) {
         goto end;
     }
-
-    while (!ioctl(fd, SIOCDELRT, &rt));
-
-    if ((pl = parse_prefix_len(ip6)) < 0) {
-        pl = 128;
+    if ((ret = inet_pton(AF_INET6, ip6, (void *) &(rt.rtmsg_dst))) < 0) {
+        goto end;
     }
-    rt.rtmsg_dst_len = pl;
-    rt.rtmsg_metric = 101;
-
     if ((ret = ioctl(fd, SIOCADDRT, (void *) &rt)) < 0) {
         goto end;
     }

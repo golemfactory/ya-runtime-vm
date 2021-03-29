@@ -415,28 +415,18 @@ async fn main() -> anyhow::Result<()> {
     handle_net(temp_path.join("net.sock")).await?;
 
     {
-        let hosts = [
-            ("host0", "127.0.0.1"),
-            ("host1", "127.0.0.1"),
-            ("host2", "127.0.0.1"),
-            ("host3", "127.0.0.1"),
-            ("host4", "127.0.0.1"),
-            ("host5", "127.0.0.1"),
-        ]
-        .iter()
-        .map(|(h, i)| (h.to_string(), i.to_string()))
-        .collect::<Vec<_>>();
+        let hosts = [("host0", "127.0.0.2"), ("host1", "127.0.0.3")]
+            .iter()
+            .map(|(h, i)| (h.to_string(), i.to_string()))
+            .collect::<Vec<_>>();
 
         let mut ga = ga_mutex.lock().await;
-        match ga
-            .create_network("10.0.0.10", "255.255.255.0", "10.0.0.1")
-            .await?
-        {
+        match ga.add_address("10.0.0.1", "255.255.255.0").await? {
             Ok(_) | Err(0) => (),
-            Err(code) => anyhow::bail!("Unable to join network {}", code),
+            Err(code) => anyhow::bail!("Unable to set address {}", code),
         }
         match ga
-            .create_network("10.0.1.10", "255.255.255.0", "10.0.1.1")
+            .create_network("10.0.0.0", "255.255.255.0", "10.0.0.1")
             .await?
         {
             Ok(_) | Err(0) => (),
@@ -446,29 +436,6 @@ async fn main() -> anyhow::Result<()> {
             Ok(_) | Err(0) => (),
             Err(code) => anyhow::bail!("Unable to add hosts {}", code),
         }
-    }
-
-    {
-        let mut ga = ga_mutex.lock().await;
-        run_process(&mut ga, "/bin/cat", &["cat", "/etc/hosts"]).await?;
-    }
-
-    {
-        let mut ga = ga_mutex.lock().await;
-        run_process(&mut ga, "/bin/ip", &["ip", "-d", "a"]).await?;
-    }
-    {
-        let mut ga = ga_mutex.lock().await;
-        run_process(&mut ga, "/sbin/route", &["route", "-n"]).await?;
-    }
-    {
-        let mut ga = ga_mutex.lock().await;
-        run_process(
-            &mut ga,
-            "/bin/ip",
-            &["ip", "route", "show", "table", "local"],
-        )
-        .await?;
     }
     {
         let mut ga = ga_mutex.lock().await;

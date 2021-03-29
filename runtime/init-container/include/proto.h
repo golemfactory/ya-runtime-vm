@@ -157,16 +157,19 @@ enum SUB_MSG_NET_CTL {
     SUB_MSG_NET_CTL_END = 0,
     /* Network control flags (u16) */
     SUB_MSG_NET_CTL_FLAGS,
-    /* Network address to assign. (BYTES) */
+    /* Network address. (BYTES) */
     SUB_MSG_NET_CTL_ADDR,
-    /* Network mask to assign. (BYTES) */
+    /* Network mask. (BYTES) */
     SUB_MSG_NET_CTL_MASK,
-    /* Network gateway assign. (BYTES) */
+    /* Network gateway. (BYTES) */
     SUB_MSG_NET_CTL_GATEWAY,
+    /* Network interface address. (BYTES) */
+    SUB_MSG_NET_CTL_IF_ADDR,
 };
 
 enum SUB_MSG_NET_CTL_FLAGS {
-    FLAG_MSG_NET_CTL_IP6 = 6,
+    EMPTY = 0,
+    ADD,
 };
 
 enum SUB_MSG_NET_HOST {
