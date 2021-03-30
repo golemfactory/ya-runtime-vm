@@ -13,7 +13,7 @@ This repository consists of 2 crates:
    A tool for converting Docker images into yagna Virtual Machine images and uploading them to a public repository.
    Requires for [Docker](https://docs.docker.com/engine/install/ubuntu/) to be installed on your system.
 
-## Building `ya-runtime-vm`
+## Building
 
 Prerequisites:
 
@@ -36,7 +36,7 @@ cd runtime
 cargo build
 ```
 
-## Installing `ya-runtime-vm`
+## Installing
 
 Prerequisites:
 
