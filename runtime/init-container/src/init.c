@@ -344,8 +344,8 @@ static void setup_network(void) {
     CHECK(net_if_addr(g_lo_name, "127.0.0.1", "255.255.255.0"));
     CHECK(add_network_hosts(hosts, sizeof(hosts) / sizeof(*hosts)));
 
-    CHECK(fwd_start(g_tap_fd, g_net_fd, MTU));
-    CHECK(fwd_start(g_net_fd, g_tap_fd, MTU));
+    CHECK(fwd_start(g_tap_fd, g_net_fd, MTU, false, true));
+    CHECK(fwd_start(g_net_fd, g_tap_fd, MTU, true, false));
 }
 
 static void stop_network(void) {
