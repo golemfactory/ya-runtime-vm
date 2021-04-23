@@ -5,9 +5,8 @@ use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
 use pnet::packet::icmp::{echo_reply, echo_request, IcmpPacket, IcmpTypes, MutableIcmpPacket};
 use pnet::packet::ip::{IpNextHeaderProtocol, IpNextHeaderProtocols};
 use pnet::packet::ipv4::{Ipv4Packet, MutableIpv4Packet};
-use pnet::packet::tcp::TcpPacket;
-use pnet::packet::udp::UdpPacket;
-use pnet::packet::{Packet, PacketSize};
+use pnet::packet::Packet;
+use pnet::util::MacAddr;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering::Relaxed;
@@ -27,6 +26,7 @@ use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
 
 const IDENTIFICATION: AtomicU16 = AtomicU16::new(42);
 const MTU: usize = 65535;
+const PREFIX_LEN: usize = 2;
 
 struct Notifications {
     process_died: sync::Notify,
@@ -62,14 +62,14 @@ impl Notifications {
                     {
                         Ok(res) => match res {
                             Ok(out) => while let Err(_) = io::stdout().write_all(&out[..]) {},
-                            Err(code) => println!("Output query failed with: {}", code),
+                            Err(code) => eprintln!("Output query failed with: {}", code),
                         },
-                        Err(code) => println!("Output query failed with: {}", code),
+                        Err(code) => eprintln!("Output query failed with: {}", code),
                     }
                 });
             }
             Notification::ProcessDied { id, reason } => {
-                println!("Process {} died with {:?}", id, reason);
+                eprintln!("Process {} died with {:?}", id, reason);
                 self.process_died.notify();
             }
         }
@@ -93,7 +93,7 @@ async fn run_process(ga: &mut GuestAgent, bin: &str, argv: &[&str]) -> io::Resul
         )
         .await?
         .expect("Run process failed");
-    println!("Spawned process with id: {}", id);
+    eprintln!("Spawned process with id: {}", id);
     Ok(())
 }
 
@@ -180,13 +180,18 @@ async fn handle_net<P: AsRef<Path>>(path: P) -> anyhow::Result<()> {
         let mut buf: [u8; MTU] = [0u8; MTU];
         loop {
             let count = match read.read(&mut buf).await {
-                Err(e) => break println!("Read error: {:?}", e),
-                Ok(0) => break println!("No more data to read"),
+                Err(_) | Ok(0) => break,
                 Ok(c) => c,
             };
-            if let Some(res) = handle_ethernet_packet(&buf[..count]) {
+            eprintln!("-> {:?}", &buf[..count]);
+            if let Some(mut res) = handle_ethernet_packet(&buf[PREFIX_LEN..count]) {
+                let len_u16 = res.len() as u16;
+                res.reserve(PREFIX_LEN);
+                res.splice(0..0, u16::to_ne_bytes(len_u16).to_vec());
+
+                eprintln!("<- {:?}", &res);
                 if let Err(e) = write.write_all(&res).await {
-                    println!("Write error: {:?}", e);
+                    eprintln!("Write error: {:?}", e);
                 }
             }
         }
@@ -194,34 +199,6 @@ async fn handle_net<P: AsRef<Path>>(path: P) -> anyhow::Result<()> {
 
     tokio::spawn(fut);
     Ok(())
-}
-
-fn handle_udp(src: IpAddr, dst: IpAddr, packet: &[u8]) -> Option<Vec<u8>> {
-    if let Some(udp) = UdpPacket::new(packet) {
-        println!(
-            "UDP Packet: {}:{} > {}:{}; length: {}",
-            src,
-            udp.get_source(),
-            dst,
-            udp.get_destination(),
-            udp.get_length()
-        );
-    }
-    None
-}
-
-fn handle_tcp(src: IpAddr, dst: IpAddr, packet: &[u8]) -> Option<Vec<u8>> {
-    if let Some(tcp) = TcpPacket::new(packet) {
-        println!(
-            "TCP Packet: {}:{} > {}:{}; length: {}",
-            src,
-            tcp.get_source(),
-            dst,
-            tcp.get_destination(),
-            packet.len()
-        );
-    }
-    None
 }
 
 fn handle_icmp(src: IpAddr, dst: IpAddr, packet: &[u8]) -> Option<Vec<u8>> {
@@ -233,8 +210,8 @@ fn handle_icmp(src: IpAddr, dst: IpAddr, packet: &[u8]) -> Option<Vec<u8>> {
     match icmp_packet.get_icmp_type() {
         IcmpTypes::EchoReply => {
             let reply = echo_reply::EchoReplyPacket::new(packet).unwrap();
-            println!(
-                "ICMP echo reply {} -> {} (seq={:?}, id={:?})",
+            eprintln!(
+                "-> ICMP echo reply {} -> {} (seq={:?}, id={:?})",
                 src,
                 dst,
                 reply.get_sequence_number(),
@@ -243,16 +220,16 @@ fn handle_icmp(src: IpAddr, dst: IpAddr, packet: &[u8]) -> Option<Vec<u8>> {
         }
         IcmpTypes::EchoRequest => {
             let request = echo_request::EchoRequestPacket::new(packet).unwrap();
-            println!(
-                "ICMP echo request {} -> {} (seq={:?}, id={:?}, size={})",
+            eprintln!(
+                "-> ICMP echo request {} -> {} (seq={:?}, id={:?}, size={})",
                 src,
                 dst,
                 request.get_sequence_number(),
                 request.get_identifier(),
-                request.packet_size(),
+                request.packet().len(),
             );
 
-            let mut data: Vec<u8> = vec![0u8; 64];
+            let mut data: Vec<u8> = vec![0u8; request.packet().len()];
             {
                 let mut reply = echo_reply::MutableEchoReplyPacket::new(&mut data[..]).unwrap();
                 reply.set_identifier(request.get_identifier());
@@ -269,8 +246,8 @@ fn handle_icmp(src: IpAddr, dst: IpAddr, packet: &[u8]) -> Option<Vec<u8>> {
 
             return Some(reply.packet().to_vec());
         }
-        _ => println!(
-            "ICMP packet {} -> {} (type={:?})",
+        _ => eprintln!(
+            "-> ICMP packet {} -> {} (type={:?})",
             src,
             dst,
             icmp_packet.get_icmp_type()
@@ -288,8 +265,6 @@ fn handle_transport(
 ) -> Option<Vec<u8>> {
     match protocol {
         IpNextHeaderProtocols::Icmp => handle_icmp(src, dst, packet),
-        IpNextHeaderProtocols::Udp => handle_udp(src, dst, packet),
-        IpNextHeaderProtocols::Tcp => handle_tcp(src, dst, packet),
         _ => None,
     }
 }
@@ -328,7 +303,7 @@ fn handle_ipv4_packet(data: &[u8]) -> Option<Vec<u8>> {
             })
         }
         _ => {
-            println!("Malformed IPv4 Packet");
+            eprintln!("Malformed IPv4 Packet");
             None
         }
     }
@@ -338,8 +313,6 @@ fn handle_arp_packet(data: &[u8]) -> Option<Vec<u8>> {
     match ArpPacket::new(data) {
         Some(arp) => match arp.get_operation() {
             ArpOperations::Request => {
-                println!("Arp packet");
-
                 let mut buffer = [0u8; 28];
                 let mut reply = MutableArpPacket::new(&mut buffer).unwrap();
 
@@ -348,7 +321,7 @@ fn handle_arp_packet(data: &[u8]) -> Option<Vec<u8>> {
                 reply.set_hw_addr_len(arp.get_hw_addr_len());
                 reply.set_proto_addr_len(arp.get_proto_addr_len());
                 reply.set_operation(ArpOperations::Reply);
-                reply.set_sender_hw_addr(arp.get_target_hw_addr());
+                reply.set_sender_hw_addr(MacAddr(1, 2, 3, 4, 5, 6));
                 reply.set_sender_proto_addr(arp.get_target_proto_addr());
                 reply.set_target_hw_addr(arp.get_sender_hw_addr());
                 reply.set_target_proto_addr(arp.get_sender_proto_addr());
@@ -358,7 +331,7 @@ fn handle_arp_packet(data: &[u8]) -> Option<Vec<u8>> {
             _ => (),
         },
         _ => {
-            println!("Malformed ARP Packet");
+            eprintln!("Malformed ARP Packet");
         }
     };
     None
@@ -367,18 +340,21 @@ fn handle_arp_packet(data: &[u8]) -> Option<Vec<u8>> {
 fn handle_ethernet_packet(data: &[u8]) -> Option<Vec<u8>> {
     match EthernetPacket::new(data) {
         Some(eth) => match eth.get_ethertype() {
-            EtherTypes::Ipv4 => handle_ipv4_packet(eth.payload()),
+            EtherTypes::Ipv4 => {
+                eprintln!("-> IPv4 packet");
+                handle_ipv4_packet(eth.payload())
+            }
             EtherTypes::Arp => {
-                println!("Got ARP packet");
+                eprintln!("-> ARP packet");
                 handle_arp_packet(eth.payload())
             }
             eth_type => {
-                println!("Got ethernet packet: {:?}", eth_type);
+                eprintln!("-> ETH packet: {:?}", eth_type);
                 None
             }
         }
         .map(move |payload| {
-            let mut data: Vec<u8> = vec![0u8; MTU];
+            let mut data: Vec<u8> = vec![0u8; 14 + payload.len()];
             let mut reply = MutableEthernetPacket::new(&mut data).unwrap();
             reply.set_source(eth.get_destination());
             reply.set_destination(eth.get_source());
@@ -387,7 +363,7 @@ fn handle_ethernet_packet(data: &[u8]) -> Option<Vec<u8>> {
             reply.packet().to_vec()
         }),
         _ => {
-            println!("Malformed Ethernet Packet");
+            eprintln!("Malformed Ethernet Packet");
             None
         }
     }
@@ -442,14 +418,14 @@ async fn main() -> anyhow::Result<()> {
         run_process(
             &mut ga,
             "/bin/ping",
-            &["ping", "-v", "-n", "-D", "-c", "3", "10.0.1.4"],
+            &["ping", "-v", "-n", "-D", "-c", "3", "10.0.0.2"],
         )
         .await?;
     }
 
     /* VM should quit now. */
     let e = child.await.expect("failed to wait on child");
-    println!("{:?}", e);
+    eprintln!("{:?}", e);
 
     Ok(())
 }
