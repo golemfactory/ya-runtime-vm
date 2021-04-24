@@ -264,6 +264,7 @@ int net_route(const char *name, const char *ip, const char *mask, const char *vi
     memset(&rt, 0, sizeof(rt));
 
     rt.rt_flags |= RTF_UP | RTF_GATEWAY;
+    rt.rt_metric = 101;
     rt.rt_dev = malloc(strlen(name) + 1);
     if (!rt.rt_dev) {
         ret = -ENOMEM;
