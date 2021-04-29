@@ -15,6 +15,16 @@ KERNEL_SHA256 ?= f3f7ca3421c5232e260b2a8a741bbf72c21881006afcf790aa3bc938e226271
 
 UNPACKED_DIR := unpacked_kernel
 
+# Below are the steps performed by this Makefile:
+# - download the kernel apk package
+# - verify checksum of the downloaded package
+# - extract the contents of the downloaded package
+# - copy vmlinuz-virt from the extracted package
+# - create a build directory for initramfs
+# - copy required kernel modules from the extracted package to initramfs build directory
+# - bundle initramfs.cpio.gz
+# - compile init (https://en.wikipedia.org/wiki/Init) from sources
+
 .DEFAULT_GOAL = all
 .PHONY: all
 all: vmlinuz-virt initramfs.cpio.gz
