@@ -310,7 +310,7 @@ impl Runtime {
             let emitter = emitter.clone();
             async move {
                 let status = notification_into_status(notification, ga).await;
-                emitter.on_process_status(status);
+                emitter.on_process_status(status).await;
             }
             .boxed()
         })
