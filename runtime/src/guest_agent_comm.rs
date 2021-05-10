@@ -1,5 +1,6 @@
 use futures::future::{BoxFuture, FutureExt};
 use futures::lock::Mutex;
+use futures::StreamExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::{io, marker::PhantomData};
@@ -305,12 +306,18 @@ fn reader<'f, F>(
 where
     F: FnMut(Notification, Arc<Mutex<GuestAgent>>) -> BoxFuture<'static, ()> + Send + 'static,
 {
+    let (mut tx, rx) = mpsc::channel(8);
+    spawn(async move {
+        let _ = rx
+            .for_each(|n| notification_handler(n, agent.clone()))
+            .await;
+    });
     async move {
         loop {
             match parse_one_response(&mut stream).await {
                 Ok(msg) => match msg {
                     GuestAgentMessage::Notification(notification) => {
-                        spawn(notification_handler(notification, agent.clone()));
+                        let _ = tx.send(notification).await;
                     }
                     GuestAgentMessage::Response(resp) => {
                         responses.send(resp).await.expect("failed to send response");
