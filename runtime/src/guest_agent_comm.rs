@@ -1,15 +1,14 @@
+use futures::channel::mpsc;
 use futures::future::{BoxFuture, FutureExt};
 use futures::lock::Mutex;
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 use std::path::Path;
 use std::sync::Arc;
 use std::{io, marker::PhantomData};
 use tokio::{
     io::{split, AsyncWriteExt, ReadHalf, WriteHalf},
     net::UnixStream,
-    spawn,
-    sync::mpsc,
-    time,
+    spawn, time,
 };
 
 pub use crate::response_parser::Notification;
@@ -389,7 +388,7 @@ impl GuestAgent {
     }
 
     async fn get_response(&mut self, msg_id: u64) -> io::Result<Response> {
-        let ResponseWithId { id, resp } = match self.responses.recv().await {
+        let ResponseWithId { id, resp } = match self.responses.next().await {
             Some(x) => x,
             None => {
                 return Err(self
