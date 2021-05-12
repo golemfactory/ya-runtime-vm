@@ -2745,8 +2745,8 @@ dependencies = [
 
 [[package]]
 name = "ya-runtime-api"
-version = "0.1.0"
-source = "git+https://github.com/golemfactory/yagna.git#d1aba8f76f560a811599f63e97df01a5a166f1f8"
+version = "0.2.1"
+source = "git+https://github.com/golemfactory/yagna.git?branch=mf/ya-runtime-api-0.2.1#cda5201826e672b9645716cc114f20042b17f3a5"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2758,6 +2758,32 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-util 0.2.0",
+]
+
+[[package]]
+name = "ya-runtime-sdk"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "directories",
+ "futures",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "structopt",
+ "tokio",
+ "toml",
+ "ya-runtime-api",
+ "ya-runtime-sdk-derive",
+]
+
+[[package]]
+name = "ya-runtime-sdk-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -2779,33 +2805,7 @@ dependencies = [
  "tokio",
  "tokio-byteorder",
  "uuid",
- "ya-service-sdk",
-]
-
-[[package]]
-name = "ya-service-sdk"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "directories",
- "futures",
- "serde",
- "serde_json",
- "serde_yaml",
- "structopt",
- "tokio",
- "toml",
- "ya-runtime-api",
- "ya-service-sdk-derive",
-]
-
-[[package]]
-name = "ya-service-sdk-derive"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
+ "ya-runtime-sdk",
 ]
 
 [[package]]

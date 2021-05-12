@@ -11,19 +11,19 @@ use tokio::{
     process, spawn,
 };
 
-use ya_runtime_vm::{
-    cpu::CpuInfo,
-    deploy::Deployment,
-    guest_agent_comm::{GuestAgent, Notification, RedirectFdType, RemoteCommandResult},
-};
-use ya_service_sdk::{
+use ya_runtime_sdk::{
     runner::exe_dir,
     runtime_api::{
         deploy::{DeployResult, StartMode},
         server,
     },
     serialize, Context, EmptyResponse, EventEmitter, OutputResponse, ProcessId, ProcessIdResponse,
-    Server, Service, ServiceMode,
+    RuntimeMode, Server,
+};
+use ya_runtime_vm::{
+    cpu::CpuInfo,
+    deploy::Deployment,
+    guest_agent_comm::{GuestAgent, Notification, RedirectFdType, RemoteCommandResult},
 };
 
 const DIR_RUNTIME: &'static str = "runtime";
@@ -58,7 +58,7 @@ pub struct Cli {
     storage_gib: f64,
 }
 
-#[derive(ya_service_sdk::ServiceDef, Default)]
+#[derive(ya_runtime_sdk::RuntimeDef, Default)]
 #[cli(Cli)]
 struct Runtime {
     data: Arc<Mutex<RuntimeData>>,
@@ -91,10 +91,10 @@ impl RuntimeData {
     }
 }
 
-impl Service for Runtime {
+impl ya_runtime_sdk::Runtime for Runtime {
     fn deploy<'a>(&mut self, ctx: &mut Context<Self>) -> OutputResponse<'a> {
         let workdir = ctx.cli.workdir.clone().expect("Workdir not provided");
-        let cli = ctx.cli.service.clone();
+        let cli = ctx.cli.runtime.clone();
 
         deploy(workdir, cli).map_err(Into::into).boxed_local()
     }
@@ -130,10 +130,10 @@ impl Service for Runtime {
     fn run_command<'a>(
         &mut self,
         command: server::RunProcess,
-        mode: ServiceMode,
+        mode: RuntimeMode,
         _: &mut Context<Self>,
     ) -> ProcessIdResponse<'a> {
-        if let ServiceMode::Command = mode {
+        if let RuntimeMode::Command = mode {
             return async move { Err(anyhow::anyhow!("CLI `run` is not supported")) }
                 .map_err(Into::into)
                 .boxed_local();
@@ -540,5 +540,5 @@ fn runtime_dir() -> io::Result<PathBuf> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
-    ya_service_sdk::run::<Runtime>().await
+    ya_runtime_sdk::run::<Runtime>().await
 }
