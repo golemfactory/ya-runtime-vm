@@ -1,3 +1,5 @@
+use futures::future::BoxFuture;
+use futures::FutureExt;
 use std::{
     clone::Clone,
     collections::HashMap,
@@ -51,7 +53,7 @@ impl Events {
 }
 
 impl server::RuntimeEvent for Events {
-    fn on_process_status(&self, status: ProcessStatus) {
+    fn on_process_status<'a>(&self, status: ProcessStatus) -> BoxFuture<'a, ()> {
         log::debug!("event: {:?}", status);
         let mut processes = self.0.lock().unwrap();
         let process = processes.get_mut(&status.pid);
@@ -71,6 +73,7 @@ impl server::RuntimeEvent for Events {
                 }
             }
         }
+        futures::future::ready(()).boxed()
     }
 }
 
