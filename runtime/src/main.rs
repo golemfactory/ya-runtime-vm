@@ -273,7 +273,7 @@ async fn start(
         let emitter = emitter.clone();
         async move {
             let status = notification_into_status(notification, ga).await;
-            emitter.emit(status);
+            emitter.emit(status).await;
         }
         .boxed()
     })
