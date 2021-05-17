@@ -12,13 +12,14 @@ use tokio::{
 };
 
 use ya_runtime_sdk::{
-    runner::exe_dir,
     runtime_api::{
         deploy::{DeployResult, StartMode},
         server,
     },
-    serialize, Context, EmptyResponse, EventEmitter, OutputResponse, ProcessId, ProcessIdResponse,
-    RuntimeMode, Server,
+    serialize,
+    server::Server,
+    Context, EmptyResponse, EventEmitter, OutputResponse, ProcessId, ProcessIdResponse,
+    RuntimeMode,
 };
 use ya_runtime_vm::{
     cpu::CpuInfo,
@@ -534,7 +535,11 @@ async fn reader_to_log<T: io::AsyncRead + Unpin>(reader: T) {
 }
 
 fn runtime_dir() -> io::Result<PathBuf> {
-    Ok(exe_dir()?.join(DIR_RUNTIME))
+    Ok(std::env::current_exe()?
+        .parent()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?
+        .to_path_buf()
+        .join(DIR_RUNTIME))
 }
 
 #[tokio::main]
