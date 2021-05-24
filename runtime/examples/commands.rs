@@ -8,7 +8,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio::{process::Command, sync::Notify};
-use ya_runtime_api::server::{self, ProcessStatus, RuntimeService};
+use ya_runtime_sdk::runtime_api::server::{self, ProcessStatus, RuntimeService};
 
 struct ProcessData {
     status: Option<ProcessStatus>,
