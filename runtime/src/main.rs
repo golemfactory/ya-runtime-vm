@@ -271,7 +271,7 @@ async fn start(
     spawn(reader_to_log(stdout));
 
     let ga = GuestAgent::connected(socket_path, 10, move |notification, ga| {
-        let emitter = emitter.clone();
+        let mut emitter = emitter.clone();
         async move {
             let status = notification_into_status(notification, ga).await;
             emitter.emit(status).await;
@@ -415,7 +415,7 @@ async fn test() -> anyhow::Result<()> {
         start(
             std::env::temp_dir(),
             runtime.data.clone(),
-            EventEmitter::new(Box::new(e)),
+            EventEmitter::spawn(e),
         )
         .await
         .expect("Failed to start runtime");
