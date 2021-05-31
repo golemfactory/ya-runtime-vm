@@ -2763,7 +2763,7 @@ dependencies = [
 [[package]]
 name = "ya-runtime-sdk"
 version = "0.1.0"
-source = "git+https://github.com/golemfactory/ya-runtime-sdk.git?rev=450ab2cba09ea3d059b9de39d1561bb243729054#450ab2cba09ea3d059b9de39d1561bb243729054"
+source = "git+https://github.com/golemfactory/ya-runtime-sdk.git?rev=f6b8c6a5ede9a36d73ebb58be343a53c9231ea34#f6b8c6a5ede9a36d73ebb58be343a53c9231ea34"
 dependencies = [
  "anyhow",
  "directories",
@@ -2781,7 +2781,7 @@ dependencies = [
 [[package]]
 name = "ya-runtime-sdk-derive"
 version = "0.1.0"
-source = "git+https://github.com/golemfactory/ya-runtime-sdk.git?rev=450ab2cba09ea3d059b9de39d1561bb243729054#450ab2cba09ea3d059b9de39d1561bb243729054"
+source = "git+https://github.com/golemfactory/ya-runtime-sdk.git?rev=f6b8c6a5ede9a36d73ebb58be343a53c9231ea34#f6b8c6a5ede9a36d73ebb58be343a53c9231ea34"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2790,7 +2790,7 @@ dependencies = [
 
 [[package]]
 name = "ya-runtime-vm"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "bollard-stubs",
