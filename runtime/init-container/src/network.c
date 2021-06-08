@@ -17,7 +17,7 @@
 
 #include "network.h"
 
-static int alias_counter = 0;
+static unsigned int alias_counter = 0;
 
 struct ifreq6_stub {
     struct in6_addr addr;
