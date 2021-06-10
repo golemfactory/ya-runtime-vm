@@ -28,6 +28,17 @@ LIBURING_DIR ?= external/liburing
 OBJECTS = $(addprefix $(SRC_DIR)/,init.o communication.o process_bookkeeping.o cyclic_buffer.o)
 OBJECTS_EXT = $(addprefix $(SRC_DIR)/,network.o forward.o)
 
+# Below are the steps performed by this Makefile:
+# - download the kernel && kernel headers apk packages
+# - verify checksums of the downloaded packages
+# - extract the contents of the downloaded packages
+# - copy vmlinuz-virt from the extracted kernel package
+# - create a build directory for initramfs
+# - copy required kernel modules from the extracted kernel package to initramfs build directory
+# - bundle initramfs.cpio.gz
+# - build liburing
+# - compile init (https://en.wikipedia.org/wiki/Init) from sources
+
 .DEFAULT_GOAL = all
 .PHONY: all
 all: vmlinuz-virt initramfs.cpio.gz

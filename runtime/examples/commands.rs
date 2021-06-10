@@ -1,3 +1,5 @@
+use futures::future::BoxFuture;
+use futures::FutureExt;
 use std::{
     clone::Clone,
     collections::HashMap,
@@ -6,7 +8,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio::{process::Command, sync::Notify};
-use ya_runtime_api::server::{self, ProcessStatus, RuntimeService};
+use ya_runtime_sdk::runtime_api::server::{self, ProcessStatus, RuntimeService};
 
 struct ProcessData {
     status: Option<ProcessStatus>,
@@ -51,7 +53,7 @@ impl Events {
 }
 
 impl server::RuntimeEvent for Events {
-    fn on_process_status(&self, status: ProcessStatus) {
+    fn on_process_status<'a>(&self, status: ProcessStatus) -> BoxFuture<'a, ()> {
         log::debug!("event: {:?}", status);
         let mut processes = self.0.lock().unwrap();
         let process = processes.get_mut(&status.pid);
@@ -71,6 +73,7 @@ impl server::RuntimeEvent for Events {
                 }
             }
         }
+        futures::future::ready(()).boxed()
     }
 }
 

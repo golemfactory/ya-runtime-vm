@@ -4,3 +4,5 @@ members = [
     "gvmkit",
 ]
 
+[patch.crates-io]
+ya-runtime-sdk = { git = "https://github.com/golemfactory/ya-runtime-sdk.git", rev = "1de823377f32b8f67a968f51e8365736e2bbe64c" }

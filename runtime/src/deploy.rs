@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 use tokio_byteorder::LittleEndian;
 use uuid::Uuid;
-use ya_runtime_api::deploy::ContainerVolume;
+use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct Deployment {
