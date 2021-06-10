@@ -3,7 +3,6 @@ mod cpu;
 use cpu::CpuInfo;
 use futures::future::{FutureExt, TryFutureExt};
 use futures::lock::Mutex;
-use semver::{Version, VersionReq};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -351,35 +350,16 @@ impl Runtime {
 }
 
 impl server::RuntimeService for Runtime {
-    fn hello(&self, version: &str) -> server::AsyncResponse<String> {
-        let client_version = version.to_owned();
+    fn hello(&self, _version: &str) -> server::AsyncResponse<String> {
         let server_version = ya_runtime_api::PROTOCOL_VERSION;
         log::debug!("server version: {}", server_version);
 
-        async move {
-            let client = Version::parse(&client_version)?;
-            let mut server = Version::parse(server_version)?;
-            if server.major > 0 {
-                server.minor = 0;
-            }
-            server.patch = 0;
-
-            let required = VersionReq::parse(&format!("^{}", server))?;
-            if !required.matches(&client) {
-                return Err(anyhow::anyhow!(
-                    "Client version {} is incompatible with {}",
-                    client_version,
-                    server_version
-                ));
-            }
-
-            Ok::<_, anyhow::Error>(server_version.to_owned())
-        }
-        .map_err(|e| ya_runtime_api::server::ErrorResponse {
-            message: format!("Version error: {}", e),
-            ..Default::default()
-        })
-        .boxed_local()
+        async move { Ok::<_, anyhow::Error>(server_version.to_owned()) }
+            .map_err(|e| ya_runtime_api::server::ErrorResponse {
+                message: format!("Version error: {}", e),
+                ..Default::default()
+            })
+            .boxed_local()
     }
 
     fn run_process(

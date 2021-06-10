@@ -1,6 +1,6 @@
 [package]
 name = "ya-runtime-vm"
-version = "0.3.0"
+version = "0.2.9"
 authors = ["Golem Factory <contact@golem.network>"]
 edition = "2018"
 license = "GPL-3.0"
@@ -28,7 +28,6 @@ env_logger = "0.7.1"
 futures = "0.3"
 log = "0.4.8"
 raw-cpuid = "8.1.2"
-semver = "0.11"
 serde = { version = "^1.0", features = ["derive"] }
 serde_json = "1.0"
 strip-ansi-escapes = "0.1.0"
@@ -38,7 +37,7 @@ tokio-byteorder = "0.2"
 uuid = { version = "0.8", features = ["v4"] }
 
 [dependencies.ya-runtime-api]
-version = "0.2"
+version = "0.3"
 features = ["codec"]
 git = "https://github.com/golemfactory/yagna.git"
 branch = "mf/vpn"
