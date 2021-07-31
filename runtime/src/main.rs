@@ -23,7 +23,7 @@ use ya_runtime_sdk::{
 };
 use ya_runtime_vm::{
     cpu::CpuInfo,
-    deploy::Deployment,
+    deploy::{Deployment, Fs},
     guest_agent_comm::{GuestAgent, Notification, RedirectFdType, RemoteCommandResult},
 };
 
@@ -34,6 +34,7 @@ const FILE_INITRAMFS: &'static str = "initramfs.cpio.gz";
 const FILE_TEST_IMAGE: &'static str = "self-test.gvmi";
 const FILE_DEPLOYMENT: &'static str = "deployment.json";
 const DEFAULT_CWD: &'static str = "/";
+const USER_FS_TAG: &'static str = "userfs";
 
 #[derive(StructOpt, Clone, Default)]
 #[structopt(rename_all = "kebab-case")]
@@ -182,6 +183,9 @@ async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<serialize::json::V
         fs::create_dir_all(workdir.join(&vol.name)).await?;
     }
 
+    let rootfs_path = workdir.join(USER_FS_TAG);
+    fs::create_dir_all(&rootfs_path).await?;
+
     fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -230,7 +234,7 @@ async fn start(
         "-smp",
         deployment.cpu_cores.to_string().as_str(),
         "-append",
-        "console=ttyS0 panic=1",
+        format!("console=ttyS0 panic=1 - {}", deployment.init_args()).as_str(),
         "-device",
         "virtio-serial",
         "-device",
@@ -252,10 +256,22 @@ async fn start(
         "-no-reboot",
     ]);
 
+    match &deployment.config.fs {
+        Fs::Ram => {}
+        _ => {
+            cmd.arg("-virtfs");
+            cmd.arg(format!(
+                "local,id={tag},path={path},security_model=mapped,mount_tag={tag}",
+                tag = USER_FS_TAG,
+                path = work_dir.join(USER_FS_TAG).to_string_lossy(),
+            ));
+        }
+    }
+
     for (idx, volume) in deployment.volumes.iter().enumerate() {
         cmd.arg("-virtfs");
         cmd.arg(format!(
-            "local,id={tag},path={path},security_model=none,mount_tag={tag}",
+            "local,id={tag},path={path},security_model=mapped,mount_tag={tag}",
             tag = format!("mnt{}", idx),
             path = work_dir.join(&volume.name).to_string_lossy(),
         ));
@@ -306,6 +322,7 @@ async fn run_command(
     let env = deployment.env();
     let cwd = deployment
         .config
+        .container
         .working_dir
         .as_ref()
         .filter(|s| !s.trim().is_empty())
@@ -313,7 +330,7 @@ async fn run_command(
         .unwrap_or_else(|| DEFAULT_CWD);
 
     log::debug!("got run process: {:?}", run);
-    log::debug!("work dir: {:?}", deployment.config.working_dir);
+    log::debug!("work dir: {:?}", deployment.config.container.working_dir);
 
     let result = data
         .ga()
@@ -397,18 +414,21 @@ async fn test() -> anyhow::Result<()> {
             .expect("Test image not found");
 
         println!("Task package: {}", task_package.display());
-        let runtime_data = RuntimeData {
-            runtime: None,
-            ga: None,
-            deployment: Some(Deployment {
-                cpu_cores: 1,
-                mem_mib: 128,
-                task_package,
-                ..Deployment::default()
-            }),
+
+        let mut deployment = Deployment {
+            cpu_cores: 1,
+            mem_mib: 128,
+            task_package,
+            ..Deployment::default()
         };
+        deployment.config.fs = Fs::Ram;
+
         let runtime = Runtime {
-            data: Arc::new(Mutex::new(runtime_data)),
+            data: Arc::new(Mutex::new(RuntimeData {
+                runtime: None,
+                ga: None,
+                deployment: Some(deployment),
+            })),
         };
 
         println!("Starting runtime");

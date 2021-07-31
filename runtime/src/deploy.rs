@@ -19,7 +19,33 @@ pub struct Deployment {
     pub task_package: PathBuf,
     pub user: (u32, u32),
     pub volumes: Vec<ContainerVolume>,
-    pub config: ContainerConfig,
+    pub config: Config,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct Config {
+    #[serde(flatten)]
+    pub container: ContainerConfig,
+    #[serde(default)]
+    pub fs: Fs,
+}
+
+/// Root filesystem overlay mode
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Fs {
+    /// Mount the overlay on disk (default)
+    Disk,
+    /// Keep the overlay in RAM (limit: 128 MB)
+    Ram,
+    /// Mount the overlay on disk but keep /tmp in RAM (limit: 128 MB)
+    RamTmp,
+}
+
+impl Default for Fs {
+    fn default() -> Self {
+        Self::Disk
+    }
 }
 
 impl Deployment {
@@ -55,23 +81,32 @@ impl Deployment {
             return Err(anyhow::anyhow!("Invalid ContainerConfig crc32 sum"));
         }
 
-        let config: ContainerConfig = serde_json::from_str(&json)?;
+        let config: Config = serde_json::from_str(&json)?;
         Ok(Deployment {
             cpu_cores,
             mem_mib,
             task_package,
-            user: parse_user(config.user.as_ref())?,
-            volumes: parse_volumes(config.volumes.as_ref()),
+            user: parse_user(config.container.user.as_ref())?,
+            volumes: parse_volumes(config.container.volumes.as_ref()),
             config,
         })
     }
 
     pub fn env(&self) -> Vec<&str> {
         self.config
+            .container
             .env
             .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect())
             .unwrap_or_else(Vec::new)
+    }
+
+    pub fn init_args(&self) -> &'static str {
+        match &self.config.fs {
+            Fs::Ram => "-f ram",
+            Fs::RamTmp => "-f ram-tmp",
+            _ => "-f disk",
+        }
     }
 }
 
