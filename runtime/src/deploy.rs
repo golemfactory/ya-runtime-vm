@@ -3,11 +3,13 @@ use crc::crc32;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::SeekFrom;
-use std::path::PathBuf;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
+use std::path::{Path, PathBuf};
+use tokio::io::AsyncReadExt;
 use tokio_byteorder::LittleEndian;
 use uuid::Uuid;
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
+
+const VOLUME_OVERLAY_UPPER_DIR: &'static str = "upper";
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct Deployment {
@@ -18,7 +20,7 @@ pub struct Deployment {
     #[serde(default)]
     pub task_package: PathBuf,
     pub user: (u32, u32),
-    pub volumes: Vec<ContainerVolume>,
+    pub volumes: Vec<Volume>,
     pub config: Config,
 }
 
@@ -28,6 +30,39 @@ pub struct Config {
     pub container: ContainerConfig,
     #[serde(default)]
     pub fs: Fs,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct Volume {
+    pub base_name: String,
+    pub name: String,
+    pub path: String,
+}
+
+impl Volume {
+    pub fn tag(&self, idx: usize) -> String {
+        format!("mnt{}", idx)
+    }
+
+    pub fn base_dir<P: AsRef<Path>>(&self, path: P) -> String {
+        path.as_ref()
+            .join(&self.base_name)
+            .to_string_lossy()
+            .to_string()
+    }
+
+    pub fn dir<P: AsRef<Path>>(&self, path: P) -> String {
+        path.as_ref().join(&self.name).to_string_lossy().to_string()
+    }
+}
+
+impl Into<ContainerVolume> for Volume {
+    fn into(self) -> ContainerVolume {
+        ContainerVolume {
+            name: self.name,
+            path: self.path,
+        }
+    }
 }
 
 /// Root filesystem overlay mode
@@ -42,6 +77,15 @@ pub enum Fs {
     RamTmp,
 }
 
+impl Fs {
+    pub fn in_memory(&self) -> bool {
+        match self {
+            Self::Ram => true,
+            _ => false,
+        }
+    }
+}
+
 impl Default for Fs {
     fn default() -> Self {
         Self::Disk
@@ -49,15 +93,13 @@ impl Default for Fs {
 }
 
 impl Deployment {
-    pub async fn try_from_input<Input>(
-        mut input: Input,
+    pub async fn try_from_input(
+        task_package: PathBuf,
         cpu_cores: usize,
         mem_mib: usize,
-        task_package: PathBuf,
-    ) -> Result<Self, anyhow::Error>
-    where
-        Input: AsyncRead + AsyncSeek + Unpin,
-    {
+    ) -> Result<Self, anyhow::Error> {
+        let mut input = tokio::fs::File::open(&task_package).await?;
+
         let json_len: u32 = {
             let mut buf = [0; 8];
             input.seek(SeekFrom::End(-8)).await?;
@@ -101,6 +143,10 @@ impl Deployment {
             .unwrap_or_else(Vec::new)
     }
 
+    pub fn volumes(&self) -> Vec<ContainerVolume> {
+        self.volumes.iter().cloned().map(Into::into).collect()
+    }
+
     pub fn init_args(&self) -> &'static str {
         match &self.config.fs {
             Fs::Ram => "-f ram",
@@ -128,16 +174,21 @@ fn parse_user(user: Option<&String>) -> anyhow::Result<(u32, u32)> {
     Ok((uid, gid))
 }
 
-fn parse_volumes(volumes: Option<&HashMap<String, HashMap<(), ()>>>) -> Vec<ContainerVolume> {
+fn parse_volumes(volumes: Option<&HashMap<String, HashMap<(), ()>>>) -> Vec<Volume> {
     let volumes = match volumes {
         Some(v) => v,
         _ => return Vec::new(),
     };
     volumes
         .keys()
-        .map(|key| ContainerVolume {
-            name: format!("vol-{}", Uuid::new_v4()),
-            path: key.to_string(),
+        .map(|key| {
+            let base_name = format!("vol-{}", Uuid::new_v4());
+            let name = format!("{}/{}", base_name, VOLUME_OVERLAY_UPPER_DIR);
+            Volume {
+                base_name,
+                name,
+                path: key.to_string(),
+            }
         })
         .collect()
 }

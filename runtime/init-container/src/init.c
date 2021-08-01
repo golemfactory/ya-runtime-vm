@@ -309,16 +309,6 @@ end:
     return code;
 }
 
-static int mkdirsp(const char* paths[], size_t n, mode_t mode) {
-    int code = 0;
-    for (size_t i = 0; i < n; ++i) {
-        if ((code = mkdirp(paths[i], mode)) != 0) {
-            break;
-        }
-    }
-    return code;
-}
-
 static void setup_agent_directories(void) {
     char* paths[] = {
         OUTPUT_PATH_PREFIX,
@@ -918,49 +908,53 @@ out:
 }
 
 static uint32_t do_mount(const char* tag, char* path) {
-    char* dirs[] = { NULL, NULL, NULL };
-    char* vol_dir = NULL;
-    char* mnt_dir = NULL;
+    char* args_9p = "defaults,trans=virtio,version=9p2000.L,nodevmap,redirect_dir=on";
     char* args = NULL;
 
-    size_t dirs_sz = sizeof(dirs) / sizeof(dirs[0]);
+    size_t dirs_sz = 5;
+    char** dirs = NULL;
 
-    ALLOCC(asprintf(&vol_dir, "%s/%s", VOLUMES_PATH_PREFIX, tag));
-    ALLOCC(asprintf(&mnt_dir, "%s/userfs", vol_dir));
-    ALLOCC(asprintf(&dirs[0], "%s/imagefs", vol_dir));
-    ALLOCC(asprintf(&dirs[1], "%s/fs", mnt_dir));
-    ALLOCC(asprintf(&dirs[2], "%s/tmp", mnt_dir));
+    if ((dirs = malloc(sizeof(char*) * dirs_sz)) == NULL) {
+        return -ENOMEM;
+    }
+    memset(dirs, 0, dirs_sz);
 
-    const char* entry_dirs[] = { vol_dir, mnt_dir, path, dirs[0] };
-    const char* upper_dirs[] = { dirs[1], dirs[2] };
+    ALLOCC(asprintf(&dirs[0], "%s/%s",    VOLUMES_PATH_PREFIX, tag));
+    ALLOCC(asprintf(&dirs[1], "%s/mnt",   dirs[0]));
+    ALLOCC(asprintf(&dirs[2], "%s/lower", dirs[0]));
+    ALLOCC(asprintf(&dirs[3], "%s/upper", dirs[1]));
+    ALLOCC(asprintf(&dirs[4], "%s/work",  dirs[1]));
+    ALLOCC(asprintf(&args,
+                    "lowerdir=%s,upperdir=%s,workdir=%s",
+                    dirs[2], dirs[3], dirs[4]));
 
-    if (mkdirsp(entry_dirs, sizeof(entry_dirs) / sizeof(entry_dirs[0]), S_IRWXU) < 0) {
+    if (mkdirp(path, S_IRWXU) != 0)  goto end;
+    if (mkdirp(dirs[1], S_IRWXU) != 0)  goto end;
+    if (mkdirp(dirs[2], S_IRWXU) != 0)  goto end;
+
+    if (mount(tag, dirs[1], "9p", 0, args_9p) != 0) {
         goto end;
     }
-    if (mount(path, dirs[0], "none", MS_BIND | MS_REC, NULL) < 0) {
-        goto end;
-    }
-    if (mount(tag, mnt_dir, "9p", 0,
-              "defaults,trans=virtio,version=9p2000.L,nodevmap,redirect_dir=on") < 0) {
-        goto end;
-    }
-    if (mkdirsp(upper_dirs, sizeof(upper_dirs) / sizeof(upper_dirs[0]), S_IRWXU) < 0) {
+
+    if (mount(path, dirs[2], "none", MS_BIND | MS_REC, NULL) != 0) {
         goto end;
     }
 
-    ALLOCC(asprintf(&args, "lowerdir=%s,upperdir=%s,workdir=%s", dirs[0], dirs[1], dirs[2]));
-    CHECK(mount("overlay", path, "overlay", 0, args));
+    if (mkdirp(dirs[3], S_IRWXU) != 0)  goto end;
+    if (mkdirp(dirs[4], S_IRWXU) != 0)  goto end;
 
-    end:
-        if (vol_dir) free(vol_dir);
-        if (mnt_dir) free(mnt_dir);
-        if (args) free(args);
+    if (mount("overlay", path, "overlay", 0, args) != 0) {
+        goto end;
+    }
 
+end:
+    if (dirs) {
         for (size_t i = 0; i < dirs_sz; ++i) {
-            free(dirs[i]);
-        };
-
-        return errno == EEXIST ? 0 : errno;
+            if (dirs[i]) free(dirs[i]);
+        }
+        free(dirs);
+    }
+    return errno == EEXIST ? 0 : errno;
 }
 
 static void handle_mount(msg_id_t msg_id) {

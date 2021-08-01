@@ -167,24 +167,18 @@ impl ya_runtime_sdk::Runtime for Runtime {
 
 async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<serialize::json::Value> {
     let workdir = normalize_path(&workdir).await?;
-    let package_path = normalize_path(&cli.task_package.unwrap()).await?;
-    let package_file = fs::File::open(&package_path).await?;
+    let package = normalize_path(&cli.task_package.unwrap()).await?;
+    let deployment =
+        Deployment::try_from_input(package, cli.cpu_cores, (cli.mem_gib * 1024.) as usize)
+            .await
+            .expect("Error reading package metadata");
 
-    let deployment = Deployment::try_from_input(
-        package_file,
-        cli.cpu_cores,
-        (cli.mem_gib * 1024.) as usize,
-        package_path,
-    )
-    .await
-    .expect("Error reading package metadata");
-
-    for vol in &deployment.volumes {
-        fs::create_dir_all(workdir.join(&vol.name)).await?;
+    if !deployment.config.fs.in_memory() {
+        fs::create_dir_all(workdir.join(USER_FS_TAG)).await?;
     }
-
-    let rootfs_path = workdir.join(USER_FS_TAG);
-    fs::create_dir_all(&rootfs_path).await?;
+    for vol in &deployment.volumes {
+        fs::create_dir_all(vol.dir(&workdir)).await?;
+    }
 
     fs::OpenOptions::new()
         .create(true)
@@ -197,7 +191,7 @@ async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<serialize::json::V
 
     Ok(serialize::json::to_value(DeployResult {
         valid: Ok(Default::default()),
-        vols: deployment.volumes,
+        vols: deployment.volumes(),
         start_mode: StartMode::Blocking,
     })?)
 }
@@ -256,24 +250,21 @@ async fn start(
         "-no-reboot",
     ]);
 
-    match &deployment.config.fs {
-        Fs::Ram => {}
-        _ => {
-            cmd.arg("-virtfs");
-            cmd.arg(format!(
-                "local,id={tag},path={path},security_model=mapped,mount_tag={tag}",
-                tag = USER_FS_TAG,
-                path = work_dir.join(USER_FS_TAG).to_string_lossy(),
-            ));
-        }
-    }
-
-    for (idx, volume) in deployment.volumes.iter().enumerate() {
+    if !deployment.config.fs.in_memory() {
         cmd.arg("-virtfs");
         cmd.arg(format!(
             "local,id={tag},path={path},security_model=mapped,mount_tag={tag}",
-            tag = format!("mnt{}", idx),
-            path = work_dir.join(&volume.name).to_string_lossy(),
+            tag = USER_FS_TAG,
+            path = work_dir.join(USER_FS_TAG).to_string_lossy(),
+        ));
+    }
+
+    for (idx, vol) in deployment.volumes.iter().enumerate() {
+        cmd.arg("-virtfs");
+        cmd.arg(format!(
+            "local,id={tag},path={path},security_model=mapped,mount_tag={tag}",
+            tag = vol.tag(idx),
+            path = vol.base_dir(&work_dir), // note the `base_dir` here
         ));
     }
 
@@ -283,8 +274,7 @@ async fn start(
         .kill_on_drop(true)
         .spawn()?;
 
-    let stdout = runtime.stdout.take().unwrap();
-    spawn(reader_to_log(stdout));
+    spawn(reader_to_log(runtime.stdout.take().unwrap()));
 
     let ga = GuestAgent::connected(socket_path, 10, move |notification, ga| {
         let mut emitter = emitter.clone();
@@ -298,8 +288,8 @@ async fn start(
 
     {
         let mut ga = ga.lock().await;
-        for (idx, volume) in deployment.volumes.iter().enumerate() {
-            ga.mount(format!("mnt{}", idx).as_str(), volume.path.as_str())
+        for (idx, vol) in deployment.volumes.iter().enumerate() {
+            ga.mount(vol.tag(idx).as_str(), vol.path.as_str())
                 .await?
                 .expect("Mount failed");
         }
