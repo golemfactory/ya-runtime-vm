@@ -1403,8 +1403,6 @@ int main(int argc, char *argv[]) {
                 0,
                 "lowerdir=/mnt/imagefs,upperdir=/mnt/userfs/upper,workdir=/mnt/userfs/work"));
 
-    CHECK(mkdirp("/mnt/overlay/mnt/volumes", S_IRWXU));
-
     CHECK(umount2("/dev", MNT_DETACH));
     CHECK(chdir("/mnt/overlay"));
     CHECK(mount(".", "/", "none", MS_MOVE, NULL));
