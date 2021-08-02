@@ -67,7 +67,7 @@ impl Into<ContainerVolume> for Volume {
 
 /// Root filesystem overlay mode
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum Fs {
     /// Mount the overlay on disk (default)
     Disk,
@@ -147,12 +147,8 @@ impl Deployment {
         self.volumes.iter().cloned().map(Into::into).collect()
     }
 
-    pub fn init_args(&self) -> &'static str {
-        match &self.config.fs {
-            Fs::Ram => "-f ram",
-            Fs::RamTmp => "-f ram-tmp",
-            _ => "-f disk",
-        }
+    pub fn init_args(&self) -> String {
+        format!("-f {}", serde_json::to_string(&self.config.fs).unwrap())
     }
 }
 
