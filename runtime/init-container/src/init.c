@@ -1387,10 +1387,12 @@ int main(int argc, char *argv[]) {
                 NULL));
 
     if (args.fs != NULL && strcmp(args.fs, ARG_FS_RAM) == 0) {
+        fprintf(stderr, "mounting root fs as tmpfs\n");
         CHECK(mount("tmpfs", "/mnt/userfs", "tmpfs",
                     0,
                     "mode=0777,size=128M"));
     } else {
+        fprintf(stderr, "mounting root fs as 9p\n");
         CHECK(mount(USER_FS_TAG, "/mnt/userfs", "9p",
                     0,
                     "defaults,trans=virtio,version=9p2000.L,nodevmap,redirect_dir=on"));
@@ -1423,6 +1425,7 @@ int main(int argc, char *argv[]) {
                 "exec,mode=0755,size=2M"));
 
     if (args.fs != NULL && strcmp(args.fs, ARG_FS_RAM_TMP) == 0) {
+        fprintf(stderr, "mounting /tmp as tmpfs\n");
         CHECK(mount("tmpfs", "/tmp", "tmpfs",
                     MS_NOSUID,
                     "mode=0777"));

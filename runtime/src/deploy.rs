@@ -28,6 +28,7 @@ pub struct Deployment {
 pub struct Config {
     #[serde(flatten)]
     pub container: ContainerConfig,
+    #[serde(rename = "Filesystem")]
     #[serde(default)]
     pub fs: Fs,
 }
