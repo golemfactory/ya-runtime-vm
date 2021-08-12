@@ -18,8 +18,8 @@ use ya_runtime_sdk::{
     },
     serialize,
     server::Server,
-    Context, EmptyResponse, EventEmitter, OutputResponse, ProcessId, ProcessIdResponse,
-    RuntimeMode,
+    Context, EmptyResponse, EndpointResponse, EventEmitter, OutputResponse, ProcessId,
+    ProcessIdResponse, RuntimeMode,
 };
 use ya_runtime_vm::{
     cpu::CpuInfo,
@@ -40,11 +40,11 @@ const DEFAULT_CWD: &'static str = "/";
 pub struct Cli {
     /// GVMI image path
     #[structopt(short, long, required_ifs(
-        &[
-            ("command", "deploy"),
-            ("command", "start"),
-            ("command", "run")
-        ])
+    &[
+    ("command", "deploy"),
+    ("command", "start"),
+    ("command", "run")
+    ])
     )]
     task_package: Option<PathBuf>,
     /// Number of logical CPU cores
@@ -65,9 +65,16 @@ struct Runtime {
     data: Arc<Mutex<RuntimeData>>,
 }
 
+#[derive(Clone)]
+#[non_exhaustive]
+enum NetworkEndpoint {
+    Socket(PathBuf),
+}
+
 #[derive(Default)]
 struct RuntimeData {
     runtime: Option<process::Child>,
+    network: Option<NetworkEndpoint>,
     deployment: Option<Deployment>,
     ga: Option<Arc<Mutex<GuestAgent>>>,
 }
@@ -110,14 +117,14 @@ impl ya_runtime_sdk::Runtime for Runtime {
 
         async move {
             let deployment_file = std::fs::File::open(workdir.join(FILE_DEPLOYMENT))
-                .expect("Deployment file not found");
+                .expect("Unable to open the deployment file");
             let deployment: Deployment = serialize::json::from_reader(deployment_file)
                 .expect("Failed to read the deployment file");
-
             {
                 let mut data = data.lock().await;
                 data.deployment.replace(deployment);
             }
+
             start(workdir, data, emitter).await
         }
         .map_err(Into::into)
@@ -162,9 +169,19 @@ impl ya_runtime_sdk::Runtime for Runtime {
     fn test<'a>(&mut self, _: &mut Context<Self>) -> EmptyResponse<'a> {
         test().map_err(Into::into).boxed_local()
     }
+
+    fn join_network<'a>(
+        &mut self,
+        join: server::CreateNetwork,
+        _: &mut Context<Self>,
+    ) -> EndpointResponse<'a> {
+        join_network(self.data.clone(), join)
+            .map_err(Into::into)
+            .boxed_local()
+    }
 }
 
-async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<serialize::json::Value> {
+async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<Option<serialize::json::Value>> {
     let workdir = normalize_path(&workdir).await?;
     let package_path = normalize_path(&cli.task_package.unwrap()).await?;
     let package_file = fs::File::open(&package_path).await?;
@@ -181,7 +198,6 @@ async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<serialize::json::V
     for vol in &deployment.volumes {
         fs::create_dir_all(workdir.join(&vol.name)).await?;
     }
-
     fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -191,24 +207,28 @@ async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<serialize::json::V
         .write_all(serde_json::to_string(&deployment)?.as_bytes())
         .await?;
 
-    Ok(serialize::json::to_value(DeployResult {
+    Ok(Some(serialize::json::to_value(DeployResult {
         valid: Ok(Default::default()),
         vols: deployment.volumes,
         start_mode: StartMode::Blocking,
-    })?)
+    })?))
 }
 
 async fn start(
     work_dir: PathBuf,
     runtime_data: Arc<Mutex<RuntimeData>>,
     emitter: EventEmitter,
-) -> anyhow::Result<serialize::json::Value> {
-    let socket_name = uuid::Uuid::new_v4().to_simple().to_string();
-    let socket_path = std::env::temp_dir().join(format!("{}.sock", socket_name));
+) -> anyhow::Result<Option<serialize::json::Value>> {
     let runtime_dir = runtime_dir().expect("Unable to resolve current directory");
 
+    let uid = uuid::Uuid::new_v4().to_simple().to_string();
+    let manager_sock = std::env::temp_dir().join(format!("{}.sock", uid));
+    let net_sock = std::env::temp_dir().join(format!("{}_net.sock", uid));
+
     let mut data = runtime_data.lock().await;
-    let deployment = data.deployment().unwrap();
+    let deployment = data.deployment().expect("Missing deployment data");
+
+    let chardev = |n, p: &PathBuf| format!("socket,path={},server,nowait,id={}", p.display(), n);
 
     let mut cmd = process::Command::new(runtime_dir.join(FILE_RUNTIME));
     cmd.current_dir(&runtime_dir);
@@ -236,13 +256,13 @@ async fn start(
         "-device",
         "virtio-rng-pci",
         "-chardev",
-        format!(
-            "socket,path={},server,nowait,id=manager_cdev",
-            socket_path.display()
-        )
-        .as_str(),
+        chardev("manager_cdev", &manager_sock).as_str(),
+        "-chardev",
+        chardev("net_cdev", &net_sock).as_str(),
         "-device",
         "virtserialport,chardev=manager_cdev,name=manager_port",
+        "-device",
+        "virtserialport,chardev=net_cdev,name=net_port",
         "-drive",
         format!(
             "file={},cache=unsafe,readonly=on,format=raw,if=virtio",
@@ -270,7 +290,7 @@ async fn start(
     let stdout = runtime.stdout.take().unwrap();
     spawn(reader_to_log(stdout));
 
-    let ga = GuestAgent::connected(socket_path, 10, move |notification, ga| {
+    let ga = GuestAgent::connected(manager_sock, 10, move |notification, ga| {
         let mut emitter = emitter.clone();
         async move {
             let status = notification_into_status(notification, ga).await;
@@ -290,9 +310,10 @@ async fn start(
     }
 
     data.runtime.replace(runtime);
+    data.network.replace(NetworkEndpoint::Socket(net_sock));
     data.ga.replace(ga);
 
-    Ok(().into())
+    Ok(None)
 }
 
 async fn run_command(
@@ -370,21 +391,21 @@ async fn stop(runtime_data: Arc<Mutex<RuntimeData>>) -> Result<(), server::Error
     Ok(())
 }
 
-fn offer() -> anyhow::Result<serde_json::Value> {
+fn offer() -> anyhow::Result<Option<serde_json::Value>> {
     let cpu = CpuInfo::try_new()?;
     let model = format!(
         "Stepping {} Family {} Model {}",
         cpu.model.stepping, cpu.model.family, cpu.model.model
     );
 
-    Ok(serde_json::json!({
+    Ok(Some(serde_json::json!({
         "properties": {
             "golem.inf.cpu.vendor": cpu.model.vendor,
             "golem.inf.cpu.model": model,
             "golem.inf.cpu.capabilities": cpu.capabilities,
         },
         "constraints": ""
-    }))
+    })))
 }
 
 async fn test() -> anyhow::Result<()> {
@@ -398,14 +419,13 @@ async fn test() -> anyhow::Result<()> {
 
         println!("Task package: {}", task_package.display());
         let runtime_data = RuntimeData {
-            runtime: None,
-            ga: None,
             deployment: Some(Deployment {
                 cpu_cores: 1,
                 mem_mib: 128,
                 task_package,
-                ..Deployment::default()
+                ..Default::default()
             }),
+            ..Default::default()
         };
         let runtime = Runtime {
             data: Arc::new(Mutex::new(runtime_data)),
@@ -434,6 +454,40 @@ async fn test() -> anyhow::Result<()> {
     })
     .await;
     Ok(())
+}
+
+async fn join_network(
+    runtime_data: Arc<Mutex<RuntimeData>>,
+    join: server::CreateNetwork,
+) -> Result<String, server::ErrorResponse> {
+    let hosts = join.hosts;
+    let networks = join.networks;
+    let data = runtime_data.lock().await;
+
+    let endpoint = data
+        .network
+        .as_ref()
+        .map(|network| match network {
+            NetworkEndpoint::Socket(path) => path.display().to_string(),
+        })
+        .expect("No network endpoint");
+
+    let mutex = data.ga().unwrap();
+    let mut ga = mutex.lock().await;
+    convert_result(ga.add_hosts(hosts.iter()).await, "Updating network hosts")?;
+
+    for net in networks {
+        convert_result(
+            ga.add_address(&net.if_addr, &net.mask).await,
+            &format!("Adding interface address {} {}", net.if_addr, net.gateway),
+        )?;
+        convert_result(
+            ga.create_network(&net.addr, &net.mask, &net.gateway).await,
+            &format!("Creating network {} {}", net.addr, net.gateway),
+        )?;
+    }
+
+    Ok(endpoint)
 }
 
 async fn normalize_path<P: AsRef<Path>>(path: P) -> anyhow::Result<PathBuf> {

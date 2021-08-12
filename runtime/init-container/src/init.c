@@ -24,6 +24,8 @@
 
 #include "communication.h"
 #include "cyclic_buffer.h"
+#include "forward.h"
+#include "network.h"
 #include "process_bookkeeping.h"
 #include "proto.h"
 
@@ -41,8 +43,12 @@
         .path = NULL,               \
     }
 
+#define VPORT_CMD "/dev/vport0p1"
+#define VPORT_NET "/dev/vport0p2"
+
 #define MODE_RW_UGO (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)
 #define OUTPUT_PATH_PREFIX "/var/tmp/guest_agent_private/fds"
+
 
 struct new_process_args {
     char* bin;
@@ -71,8 +77,13 @@ struct epoll_fd_desc {
 extern char** environ;
 
 static int g_cmds_fd = -1;
+static int g_net_fd = -1;
 static int g_sig_fd = -1;
 static int g_epoll_fd = -1;
+static int g_tap_fd = -1;
+
+static char g_lo_name[16];
+static char g_tap_name[16];
 
 static struct process_desc* g_entrypoint_desc = NULL;
 
@@ -80,6 +91,7 @@ static noreturn void die(void) {
     sync();
     (void)close(g_epoll_fd);
     (void)close(g_sig_fd);
+    (void)close(g_net_fd);
     (void)close(g_cmds_fd);
 
     while (1) {
@@ -293,6 +305,51 @@ static void setup_agent_directories(void) {
     CHECK(create_dir_path(path));
 
     free(path);
+}
+
+static int add_network_hosts(char *entries[][2], int n) {
+    FILE *f;
+    if ((f = fopen("/etc/hosts", "a")) == 0) {
+        return -1;
+    }
+
+    for (int i = 0; i < n; ++i) {
+        fprintf(f, "%s\t%s\n", entries[i][0], entries[i][1]);
+    }
+
+    fflush(f);
+    fsync(fileno(f));
+    fclose(f);
+
+    return 0;
+}
+
+static void setup_network(void) {
+    char *hosts[][2] = {
+        {"127.0.0.1",   "localhost"},
+        {"::1",         "ip6-localhost ip6-loopback"},
+        {"fe00::0",     "ip6-localnet"},
+        {"ff00::0",     "ip6-mcastprefix"},
+        {"ff02::1",     "ip6-allnodes"},
+        {"ff02::2",     "ip6-allrouters"},
+    };
+
+    strcpy(g_lo_name, "lo");
+    strcpy(g_tap_name, "golem%d");
+
+    CHECK(net_create_lo(g_lo_name));
+    g_tap_fd = CHECK(net_create_tap(g_tap_name));
+    CHECK(net_if_mtu(g_tap_name, MTU));
+
+    CHECK(net_if_addr(g_lo_name, "127.0.0.1", "255.255.255.0"));
+    CHECK(add_network_hosts(hosts, sizeof(hosts) / sizeof(*hosts)));
+
+    CHECK(fwd_start(g_tap_fd, g_net_fd, MTU, false, true));
+    CHECK(fwd_start(g_net_fd, g_tap_fd, MTU, true, false));
+}
+
+static void stop_network(void) {
+    fwd_stop();
 }
 
 static void send_response_hdr(msg_id_t msg_id, enum GUEST_MSG_TYPE type) {
@@ -1079,6 +1136,7 @@ out_err:
     send_response_err(msg_id, ret);
 
 }
+
 static void send_output_available_notification(uint64_t id, uint32_t fd) {
     struct msg_hdr resp = {
         .msg_id = 0,
@@ -1134,6 +1192,147 @@ static void handle_output_available(struct epoll_fd_desc** epoll_fd_desc_ptr) {
     }
 }
 
+static void handle_net_ctl(msg_id_t msg_id) {
+    bool done = false;
+    uint16_t flags = 0;
+    char* addr = NULL;
+    char* mask = NULL;
+    char* gateway = NULL;
+    char* if_addr = NULL;
+    int ret = 0;
+
+    while (!done) {
+        uint8_t subtype = 0;
+        CHECK(recv_u8(g_cmds_fd, &subtype));
+
+        switch (subtype) {
+            case SUB_MSG_NET_CTL_END:
+                done = true;
+                break;
+            case SUB_MSG_NET_CTL_FLAGS:
+                CHECK(recv_u16(g_cmds_fd, &flags));
+                break;
+            case SUB_MSG_NET_CTL_ADDR:
+                CHECK(recv_bytes(g_cmds_fd, &addr, NULL, /*is_cstring=*/true));
+                break;
+            case SUB_MSG_NET_CTL_MASK:
+                CHECK(recv_bytes(g_cmds_fd, &mask, NULL, /*is_cstring=*/true));
+                break;
+            case SUB_MSG_NET_CTL_GATEWAY:
+                CHECK(recv_bytes(g_cmds_fd, &gateway, NULL, /*is_cstring=*/true));
+                break;
+            case SUB_MSG_NET_CTL_IF_ADDR:
+                CHECK(recv_bytes(g_cmds_fd, &if_addr, NULL, /*is_cstring=*/true));
+                break;
+            default:
+                fprintf(stderr, "Unknown MSG_NET_CTL subtype: %hhu\n",
+                        subtype);
+                die();
+        }
+    }
+
+    if (if_addr) {
+        if (strstr(if_addr, ":")) {
+            if ((ret = net_if_addr6(g_tap_name, if_addr)) < 0) {
+                perror("Error setting IPv6 address");
+                goto out_err;
+            }
+        } else {
+            if (!mask) {
+                ret = EINVAL;
+                goto out_err;
+            }
+            if ((ret = net_if_addr(g_tap_name, if_addr, mask)) < 0) {
+                perror("Error setting IPv4 address");
+                goto out_err;
+            }
+        }
+    }
+
+    if (addr || gateway) {
+        if (!addr || !gateway) {
+            ret = EINVAL;
+            goto out_err;
+        }
+
+        if (strstr(addr, ":")) {
+            if ((ret = net_route6(g_tap_name, addr, gateway)) < 0) {
+                perror("Error setting IPv6 route");
+                goto out_err;
+            }
+        } else {
+            if ((ret = net_route(g_tap_name, addr, mask, gateway)) < 0) {
+                perror("Error setting IPv4 route");
+                goto out_err;
+            }
+        }
+    }
+
+out_err:
+    if (addr) free(addr);
+    if (mask) free(mask);
+    if (gateway) free(gateway);
+
+    ret == 0
+        ? send_response_ok(msg_id)
+        : send_response_err(msg_id, ret);
+}
+
+static void handle_net_host(msg_id_t msg_id) {
+    bool done = false;
+    size_t cap = 8;
+    size_t sz = 0;
+    int ret = 0;
+
+    char* (*hosts)[][2] = malloc(sizeof(char*[cap][2]));
+    char *ip, *hostname;
+
+    while (!done) {
+        uint8_t subtype = 0;
+        CHECK(recv_u8(g_cmds_fd, &subtype));
+
+        switch (subtype) {
+            case SUB_MSG_NET_HOST_END:
+                done = true;
+                break;
+            case SUB_MSG_NET_HOST_ENTRY:
+                CHECK(recv_bytes(g_cmds_fd, &ip, NULL, /*is_cstring=*/true));
+                CHECK(recv_bytes(g_cmds_fd, &hostname, NULL, /*is_cstring=*/true));
+
+                if (sz == cap - 1) {
+                    cap *= 2;
+                    hosts = realloc(hosts, sizeof(char*[cap][2]));
+                    if (!hosts) {
+                        free(ip); free(hostname);
+                        ret = ENOMEM;
+                        goto out_err;
+                    }
+                }
+
+                (*hosts)[sz][0] = ip;
+                (*hosts)[sz++][1] = hostname;
+                break;
+            default:
+                fprintf(stderr, "Unknown MSG_NET_HOST subtype: %hhu\n",
+                        subtype);
+                die();
+        }
+    }
+
+    ret = add_network_hosts((*hosts), sz);
+
+out_err:
+    for (int i = sz - 1; i >= 0; --i) {
+        free((*hosts)[i][0]);
+        free((*hosts)[i][1]);
+    }
+    free((*hosts));
+
+    ret == 0
+        ? send_response_ok(msg_id)
+        : send_response_err(msg_id, ret);
+}
+
 static void handle_message(void) {
     struct msg_hdr msg_hdr;
 
@@ -1158,6 +1357,14 @@ static void handle_message(void) {
         case MSG_QUERY_OUTPUT:
             fprintf(stderr, "MSG_QUERY_OUTPUT\n");
             handle_query_output(msg_hdr.msg_id);
+            break;
+        case MSG_NET_CTL:
+            fprintf(stderr, "MSG_NET_CTL\n");
+            handle_net_ctl(msg_hdr.msg_id);
+            break;
+        case MSG_NET_HOST:
+            fprintf(stderr, "MSG_NET_HOST\n");
+            handle_net_host(msg_hdr.msg_id);
             break;
         case MSG_UPLOAD_FILE:
         case MSG_PUT_INPUT:
@@ -1280,22 +1487,26 @@ int main(void) {
     load_module("/squashfs.ko");
     load_module("/overlay.ko");
     load_module("/fscache.ko");
+    load_module("/af_packet.ko");
+    load_module("/ipv6.ko");
+    load_module("/tun.ko");
     load_module("/9pnet.ko");
     load_module("/9pnet_virtio.ko");
     load_module("/9p.ko");
 
-    g_cmds_fd = CHECK(open("/dev/vport0p1", O_RDWR | O_CLOEXEC));
+    g_cmds_fd = CHECK(open(VPORT_CMD, O_RDWR | O_CLOEXEC));
+    g_net_fd = CHECK(open(VPORT_NET, O_RDWR | O_CLOEXEC));
 
     CHECK(mkdir("/mnt", S_IRWXU));
     CHECK(mkdir("/mnt/image", S_IRWXU));
-    CHECK(mkdir("/mnt/overlay", S_IRWXU));    
+    CHECK(mkdir("/mnt/overlay", S_IRWXU));
     CHECK(mkdir("/mnt/newroot", DEFAULT_DIR_PERMS));
-    
+
     // 'workdir' and 'upperdir' have to be on the same filesystem
     CHECK(mount("tmpfs", "/mnt/overlay", "tmpfs",
                 MS_NOSUID,
                 "mode=0777,size=128M"));
-    
+
     CHECK(mkdir("/mnt/overlay/upper", S_IRWXU));
     CHECK(mkdir("/mnt/overlay/work", S_IRWXU));
 
@@ -1329,13 +1540,13 @@ int main(void) {
     create_dir("/dev/pts", DEFAULT_DIR_PERMS);
     create_dir("/dev/shm", DEFAULT_DIR_PERMS);
 
-    CHECK(mount("devpts", "/dev/pts", "devpts", 
+    CHECK(mount("devpts", "/dev/pts", "devpts",
                 MS_NOSUID | MS_NOEXEC,
                 "gid=5,mode=0620"));
     CHECK(mount("tmpfs", "/dev/shm", "tmpfs",
                 MS_NODEV | MS_NOSUID | MS_NOEXEC,
                 NULL));
-                
+
     if (access("/dev/null", F_OK) != 0) {
         CHECK(mknod("/dev/null",
                     MODE_RW_UGO | S_IFCHR,
@@ -1347,10 +1558,12 @@ int main(void) {
                     makedev(5, 2)));
     }
 
+    setup_network();
     setup_agent_directories();
 
     block_signals();
     setup_sigfd();
 
     main_loop();
+    stop_network();
 }

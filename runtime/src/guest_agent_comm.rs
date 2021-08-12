@@ -23,6 +23,12 @@ enum MsgType {
     #[allow(unused)]
     MsgUploadFile,
     MsgQueryOutput,
+    #[allow(unused)]
+    MsgPutInput,
+    #[allow(unused)]
+    MsgSyncFs,
+    MsgNetCtl,
+    MsgNetHost,
 }
 
 enum SubMsgQuitType {
@@ -58,6 +64,26 @@ enum SubMsgQueryOutputType {
     SubMsgQueryOutputFd(u8),
     SubMsgQueryOutputOff(u64),
     SubMsgQueryOutputLen(u64),
+}
+
+enum SubMsgNetCtlType<'a> {
+    SubMsgEnd,
+    SubMsgNetCtlFlags(u16),
+    SubMsgNetCtlAddr(&'a [u8]),
+    SubMsgNetCtlMask(&'a [u8]),
+    SubMsgNetCtlGateway(&'a [u8]),
+    SubMsgNetCtlIfAddr(&'a [u8]),
+}
+
+enum SubMsgNetCtlFlags {
+    #[allow(unused)]
+    Empty = 0,
+    Add,
+}
+
+enum SubMsgNetHostType<'a> {
+    SubMsgEnd,
+    SubMsgNetHostEntry(&'a [u8], &'a [u8]),
 }
 
 pub enum RedirectFdType<'a> {
@@ -106,7 +132,21 @@ impl SubMsgTrait<SubMsgQueryOutputType> for SubMsgQueryOutputType {
     const TYPE: u8 = MsgType::MsgQueryOutput as u8;
 }
 
+impl SubMsgTrait<SubMsgNetCtlType<'_>> for SubMsgNetCtlType<'_> {
+    const TYPE: u8 = MsgType::MsgNetCtl as u8;
+}
+
+impl SubMsgTrait<SubMsgNetHostType<'_>> for SubMsgNetHostType<'_> {
+    const TYPE: u8 = MsgType::MsgNetHost as u8;
+}
+
 impl EncodeInto for u8 {
+    fn encode_into(&self, buf: &mut Vec<u8>) {
+        buf.extend(&self.to_le_bytes());
+    }
+}
+
+impl EncodeInto for u16 {
     fn encode_into(&self, buf: &mut Vec<u8>) {
         buf.extend(&self.to_le_bytes());
     }
@@ -260,6 +300,51 @@ impl EncodeInto for SubMsgQueryOutputType {
             SubMsgQueryOutputType::SubMsgQueryOutputLen(len) => {
                 4u8.encode_into(buf);
                 len.encode_into(buf);
+            }
+        }
+    }
+}
+
+impl EncodeInto for SubMsgNetCtlType<'_> {
+    fn encode_into(&self, buf: &mut Vec<u8>) {
+        match self {
+            SubMsgNetCtlType::SubMsgEnd => {
+                0u8.encode_into(buf);
+            }
+            SubMsgNetCtlType::SubMsgNetCtlFlags(flags) => {
+                1u8.encode_into(buf);
+                flags.encode_into(buf);
+            }
+            SubMsgNetCtlType::SubMsgNetCtlAddr(addr) => {
+                2u8.encode_into(buf);
+                addr.encode_into(buf);
+            }
+            SubMsgNetCtlType::SubMsgNetCtlMask(mask) => {
+                3u8.encode_into(buf);
+                mask.encode_into(buf);
+            }
+            SubMsgNetCtlType::SubMsgNetCtlGateway(gateway) => {
+                4u8.encode_into(buf);
+                gateway.encode_into(buf);
+            }
+            SubMsgNetCtlType::SubMsgNetCtlIfAddr(addr) => {
+                5u8.encode_into(buf);
+                addr.encode_into(buf);
+            }
+        }
+    }
+}
+
+impl EncodeInto for SubMsgNetHostType<'_> {
+    fn encode_into(&self, buf: &mut Vec<u8>) {
+        match self {
+            SubMsgNetHostType::SubMsgEnd => {
+                0u8.encode_into(buf);
+            }
+            SubMsgNetHostType::SubMsgNetHostEntry(ip, hostname) => {
+                1u8.encode_into(buf);
+                ip.encode_into(buf);
+                hostname.encode_into(buf);
             }
         }
     }
@@ -578,6 +663,68 @@ impl GuestAgent {
 
         self.stream.write_all(msg.as_ref()).await?;
 
+        self.get_ok_response(msg_id).await
+    }
+
+    pub async fn add_hosts<'a, I, T, S>(&mut self, hosts: I) -> io::Result<RemoteCommandResult<()>>
+    where
+        I: Iterator<Item = (T, S)>,
+        T: AsRef<str>,
+        S: AsRef<str>,
+    {
+        let mut msg = Message::default();
+        let msg_id = self.get_new_msg_id();
+
+        msg.create_header(msg_id);
+        for (hostname, ip) in hosts {
+            msg.append_submsg(&SubMsgNetHostType::SubMsgNetHostEntry(
+                ip.as_ref().as_bytes(),
+                hostname.as_ref().as_bytes(),
+            ));
+        }
+        msg.append_submsg(&SubMsgNetHostType::SubMsgEnd);
+
+        self.stream.write_all(msg.as_ref()).await?;
+        self.get_ok_response(msg_id).await
+    }
+
+    pub async fn create_network(
+        &mut self,
+        addr: &str,
+        mask: &str,
+        gateway: &str,
+    ) -> io::Result<RemoteCommandResult<()>> {
+        let mut msg = Message::default();
+        let msg_id = self.get_new_msg_id();
+        let flags = SubMsgNetCtlFlags::Add as u16;
+
+        msg.create_header(msg_id);
+        msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlFlags(flags));
+        msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlAddr(addr.as_bytes()));
+        msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlMask(mask.as_bytes()));
+        msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlGateway(gateway.as_bytes()));
+        msg.append_submsg(&SubMsgNetCtlType::SubMsgEnd);
+
+        self.stream.write_all(msg.as_ref()).await?;
+        self.get_ok_response(msg_id).await
+    }
+
+    pub async fn add_address(
+        &mut self,
+        if_addr: &str,
+        mask: &str,
+    ) -> io::Result<RemoteCommandResult<()>> {
+        let mut msg = Message::default();
+        let msg_id = self.get_new_msg_id();
+        let flags = SubMsgNetCtlFlags::Add as u16;
+
+        msg.create_header(msg_id);
+        msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlFlags(flags));
+        msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlIfAddr(if_addr.as_bytes()));
+        msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlMask(mask.as_bytes()));
+        msg.append_submsg(&SubMsgNetCtlType::SubMsgEnd);
+
+        self.stream.write_all(msg.as_ref()).await?;
         self.get_ok_response(msg_id).await
     }
 
