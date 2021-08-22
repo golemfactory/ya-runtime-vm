@@ -21,6 +21,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <getopt.h>
 
 #include "communication.h"
 #include "cyclic_buffer.h"
@@ -43,6 +44,9 @@
 
 #define MODE_RW_UGO (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)
 #define OUTPUT_PATH_PREFIX "/var/tmp/guest_agent_private/fds"
+
+const char* ARG_FS_RAM = "ram";
+const char* ARG_FS_RAM_TMP = "ram-tmp";
 
 struct new_process_args {
     char* bin;
@@ -75,6 +79,9 @@ static int g_sig_fd = -1;
 static int g_epoll_fd = -1;
 
 static struct process_desc* g_entrypoint_desc = NULL;
+static struct cmd_args {
+    char* fs;
+} args = { NULL };
 
 static noreturn void die(void) {
     sync();
@@ -92,6 +99,15 @@ static noreturn void die(void) {
     __typeof__(x) _x = (x);                                             \
     if (_x == -1) {                                                     \
         fprintf(stderr, "Error at %s:%d: %m\n", __FILE__, __LINE__);    \
+        die();                                                          \
+    }                                                                   \
+    _x;                                                                 \
+})
+
+#define ALLOCC(x) ({                                                    \
+    __typeof__(x) _x = (x);                                             \
+    if (!_x) {                                                          \
+        fprintf(stderr, "OOM at %s:%d: %m\n", __FILE__, __LINE__);      \
         die();                                                          \
     }                                                                   \
     _x;                                                                 \
@@ -260,27 +276,35 @@ static void setup_sigfd(void) {
     g_sig_fd = CHECK(signalfd(g_sig_fd, &set, SFD_CLOEXEC));
 }
 
-static int create_dir_path(char* path) {
+static int mkdirp(const char* full_path, mode_t mode) {
     assert(path[0] == '/');
 
+    char* path = ALLOCC(strdup(full_path));
     char* next = path;
+    int code = 0;
+
     while (1) {
         next = strchr(next + 1, '/');
         if (!next) {
             break;
         }
         *next = '\0';
-        int ret = mkdir(path, DEFAULT_DIR_PERMS);
+        int ret = mkdir(path, mode);
         *next = '/';
         if (ret < 0 && errno != EEXIST) {
-            return -1;
+            code = -1;
+            goto end;
         }
     }
 
-    if (mkdir(path, DEFAULT_DIR_PERMS) < 0 && errno != EEXIST) {
-        return -1;
+    if (mkdir(path, mode) < 0 && errno != EEXIST) {
+        code = -1;
+        goto end;
     }
-    return 0;
+
+end:
+    free(path);
+    return code;
 }
 
 static void setup_agent_directories(void) {
@@ -290,8 +314,7 @@ static void setup_agent_directories(void) {
         die();
     }
 
-    CHECK(create_dir_path(path));
-
+    CHECK(mkdirp(path, DEFAULT_DIR_PERMS));
     free(path);
 }
 
@@ -878,7 +901,7 @@ out:
 }
 
 static uint32_t do_mount(const char* tag, char* path) {
-    if (create_dir_path(path) < 0) {
+    if (mkdirp(path, DEFAULT_DIR_PERMS) < 0) {
         return errno;
     }
     if (mount(tag, path, "9p", 0, "trans=virtio,version=9p2000.L") < 0) {
@@ -923,8 +946,8 @@ static void handle_mount(msg_id_t msg_id) {
     ret = do_mount(tag, path);
 
 out:
-    free(path);
-    free(tag);
+    if (path) free(path);
+    if (tag) free(tag);
     if (ret) {
         send_response_err(msg_id, ret);
     } else {
@@ -1254,19 +1277,39 @@ static noreturn void main_loop(void) {
     }
 }
 
-static void create_dir(const char *pathname, mode_t mode) {
-    if (mkdir(pathname, mode) < 0 && errno != EEXIST) {
-        fprintf(stderr, "mkdir(%s) failed with: %m\n", pathname);
-        die();
+struct cmd_args parse_args(int argc, char *argv[]) {
+    int parsing = 1;
+    while (parsing) {
+        static struct option options[] = {
+            {"fs", required_argument, 0, 'f'},
+            {0, 0, 0, 0}
+        };
+
+        int i = 0;
+        int c = getopt_long(argc, argv, "f:", options, &i);
+
+        switch (c) {
+            case -1:
+            case  0:
+                parsing = 0;
+                break;
+            case 'f':
+                args.fs = optarg;
+                continue;
+            default:
+                fprintf(stderr, "arg: %c\n", c);
+        }
     }
+
+    return args;
 }
 
-int main(void) {
+int main(int argc, char *argv[]) {
     setbuf(stdin, NULL);
     setbuf(stdout, NULL);
     setbuf(stderr, NULL);
 
-    create_dir("/dev", DEFAULT_DIR_PERMS);
+    mkdir("/dev", DEFAULT_DIR_PERMS);
     CHECK(mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID,
                 "mode=0755,size=2M"));
 
@@ -1277,6 +1320,11 @@ int main(void) {
     load_module("/rng-core.ko");
     load_module("/virtio-rng.ko");
     load_module("/virtio_blk.ko");
+    load_module("/crc16.ko");
+    load_module("/crc32c_generic.ko");
+    load_module("/mbcache.ko");
+    load_module("/jbd2.ko");
+    load_module("/ext4.ko");
     load_module("/squashfs.ko");
     load_module("/overlay.ko");
     load_module("/fscache.ko");
@@ -1286,32 +1334,46 @@ int main(void) {
 
     g_cmds_fd = CHECK(open("/dev/vport0p1", O_RDWR | O_CLOEXEC));
 
-    CHECK(mkdir("/mnt", S_IRWXU));
-    CHECK(mkdir("/mnt/image", S_IRWXU));
-    CHECK(mkdir("/mnt/overlay", S_IRWXU));    
-    CHECK(mkdir("/mnt/newroot", DEFAULT_DIR_PERMS));
-    
-    // 'workdir' and 'upperdir' have to be on the same filesystem
-    CHECK(mount("tmpfs", "/mnt/overlay", "tmpfs",
-                MS_NOSUID,
-                "mode=0777,size=128M"));
-    
-    CHECK(mkdir("/mnt/overlay/upper", S_IRWXU));
-    CHECK(mkdir("/mnt/overlay/work", S_IRWXU));
+    struct cmd_args args = parse_args(argc, argv);
 
-    CHECK(mount("/dev/vda", "/mnt/image", "squashfs", MS_RDONLY, ""));
-    CHECK(mount("overlay", "/mnt/newroot", "overlay", 0,
-                "lowerdir=/mnt/image,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work"));
+    mkdir("/mnt", DEFAULT_DIR_PERMS);
+    CHECK(mkdir("/mnt/imagefs", S_IRWXU));
+    CHECK(mkdir("/mnt/userfs", S_IRWXU));
+    CHECK(mkdir("/mnt/overlay", DEFAULT_DIR_PERMS));
+
+    CHECK(mount("/dev/vda", "/mnt/imagefs", "squashfs",
+                MS_RDONLY,
+                NULL));
+
+    if (args.fs != NULL && strcmp(args.fs, ARG_FS_RAM) == 0) {
+        fprintf(stderr, "mounting root fs as tmpfs\n");
+        CHECK(mount("tmpfs", "/mnt/userfs", "tmpfs",
+                    0,
+                    "rw,mode=0777,size=128M"));
+    } else {
+        fprintf(stderr, "mounting root fs as ext4\n");
+        CHECK(mount("/dev/vdb1", "/mnt/userfs", "ext4",
+                    0,
+                    "user_xattr"));
+    }
+
+    mkdir("/mnt/userfs/upper", DEFAULT_DIR_PERMS);
+    mkdir("/mnt/userfs/work", DEFAULT_DIR_PERMS);
+
+    CHECK(mount("overlay", "/mnt/overlay", "overlay",
+                0,
+                "lowerdir=/mnt/imagefs,"
+                "upperdir=/mnt/userfs/upper,"
+                "workdir=/mnt/userfs/work"));
 
     CHECK(umount2("/dev", MNT_DETACH));
-
-    CHECK(chdir("/mnt/newroot"));
+    CHECK(chdir("/mnt/overlay"));
     CHECK(mount(".", "/", "none", MS_MOVE, NULL));
     CHECK(chroot("."));
     CHECK(chdir("/"));
 
-    create_dir("/dev", DEFAULT_DIR_PERMS);
-    create_dir("/tmp", DEFAULT_DIR_PERMS);
+    mkdir("/dev", DEFAULT_DIR_PERMS);
+    mkdir("/tmp", DEFAULT_DIR_PERMS);
 
     CHECK(mount("proc", "/proc", "proc",
                 MS_NODEV | MS_NOSUID | MS_NOEXEC,
@@ -1322,12 +1384,16 @@ int main(void) {
     CHECK(mount("devtmpfs", "/dev", "devtmpfs",
                 MS_NOSUID,
                 "exec,mode=0755,size=2M"));
-    CHECK(mount("tmpfs", "/tmp", "tmpfs",
-                MS_NOSUID,
-                "mode=0777"));
 
-    create_dir("/dev/pts", DEFAULT_DIR_PERMS);
-    create_dir("/dev/shm", DEFAULT_DIR_PERMS);
+    if (args.fs != NULL && strcmp(args.fs, ARG_FS_RAM_TMP) == 0) {
+        fprintf(stderr, "mounting /tmp as tmpfs\n");
+        CHECK(mount("tmpfs", "/tmp", "tmpfs",
+                    MS_NOSUID,
+                    "mode=0777"));
+    }
+
+    mkdir("/dev/pts", DEFAULT_DIR_PERMS);
+    mkdir("/dev/shm", DEFAULT_DIR_PERMS);
 
     CHECK(mount("devpts", "/dev/pts", "devpts", 
                 MS_NOSUID | MS_NOEXEC,

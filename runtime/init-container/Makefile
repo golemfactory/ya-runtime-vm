@@ -59,6 +59,11 @@ initramfs.cpio.gz: init $(UNPACKED_DIR)
 	cp $(UNPACKED_DIR)/lib/modules/$(KERNEL_VER)/kernel/drivers/char/hw_random/virtio-rng.ko initramfs
 	cp $(UNPACKED_DIR)/lib/modules/$(KERNEL_VER)/kernel/drivers/char/virtio_console.ko initramfs
 	cp $(UNPACKED_DIR)/lib/modules/$(KERNEL_VER)/kernel/drivers/block/virtio_blk.ko initramfs
+	cp $(UNPACKED_DIR)/lib/modules/$(KERNEL_VER)/kernel/lib/crc16.ko initramfs
+	cp $(UNPACKED_DIR)/lib/modules/$(KERNEL_VER)/kernel/crypto/crc32c_generic.ko initramfs
+	cp $(UNPACKED_DIR)/lib/modules/$(KERNEL_VER)/kernel/fs/mbcache.ko initramfs
+	cp $(UNPACKED_DIR)/lib/modules/$(KERNEL_VER)/kernel/fs/jbd2/jbd2.ko initramfs
+	cp $(UNPACKED_DIR)/lib/modules/$(KERNEL_VER)/kernel/fs/ext4/ext4.ko initramfs
 	cp $(UNPACKED_DIR)/lib/modules/$(KERNEL_VER)/kernel/fs/squashfs/squashfs.ko initramfs
 	cp $(UNPACKED_DIR)/lib/modules/$(KERNEL_VER)/kernel/fs/overlayfs/overlay.ko initramfs
 	cp $(UNPACKED_DIR)/lib/modules/$(KERNEL_VER)/kernel/fs/fscache/fscache.ko initramfs

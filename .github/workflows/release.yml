@@ -122,6 +122,7 @@ jobs:
           cp runtime/conf/ya-runtime-vm.json "$TARGET_DIR/"
           cp -r runtime/poc/runtime "$TARGET_DIR/ya-runtime-vm/"
           cp "runtime/image/self-test.gvmi" "$TARGET_DIR/ya-runtime-vm/runtime/"
+          cp "runtime/image/rootfs.qcow2" "$TARGET_DIR/ya-runtime-vm/runtime/"
           cp "runtime/init-container/initramfs.cpio.gz" "$TARGET_DIR/ya-runtime-vm/runtime/"
           cp "runtime/init-container/vmlinuz-virt" "$TARGET_DIR/ya-runtime-vm/runtime/"
           (cd releases && tar czvf "ya-runtime-vm-${OS_NAME}-${TAG_NAME}.tar.gz" "ya-runtime-vm-${OS_NAME}-${TAG_NAME}")
