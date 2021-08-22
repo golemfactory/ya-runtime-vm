@@ -14,6 +14,8 @@ fn main() -> anyhow::Result<()> {
 
     let root_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let init_dir = root_dir.join("init-container").canonicalize().unwrap();
+    let include_dir = init_dir.join("include");
+    let src_dir = init_dir.join("src");
 
     let make_result = Command::new("make")
         .current_dir(&init_dir)
@@ -27,9 +29,6 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    let include_dir = init_dir.join("include");
-    let src_dir = init_dir.join("src");
-
     println!(
         "{}",
         format!(
@@ -37,10 +36,14 @@ fn main() -> anyhow::Result<()> {
         {rerun}={root}/Makefile
         {rerun}={include}/communication.h
         {rerun}={include}/cyclic_buffer.h
+        {rerun}={include}/forward.h
+        {rerun}={include}/network.h
         {rerun}={include}/process_bookkeeping.h
         {rerun}={include}/proto.h
         {rerun}={src}/communication.c
         {rerun}={src}/cyclic_buffer.c
+        {rerun}={src}/forward.c
+        {rerun}={src}/network.c
         {rerun}={src}/process_bookkeeping.c
         {rerun}={src}/init.c
         "#,

@@ -21,6 +21,10 @@ assets = [
     ["init-container/vmlinuz-virt", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
 ]
 
+[dependencies.ya-runtime-sdk]
+version = "0.1.1"
+features = ["macros"]
+
 [dependencies]
 anyhow = "1.0"
 bollard-stubs = "1.40.2"
@@ -36,13 +40,13 @@ structopt = "0.3"
 tokio = { version = "0.2", features = ["fs", "io-std", "io-util", "macros", "process", "rt-core", "rt-threaded", "sync", "time", "uds"] }
 tokio-byteorder = "0.2"
 uuid = { version = "0.8", features = ["v4"] }
-ya-runtime-sdk = { version = "0.1", features = ["macros"] }
 
 [dev-dependencies]
 tempdir = "0.3.7"
+pnet = "0.27.2"
 
 [build-dependencies]
-anyhow = "1.0.33"
+anyhow = "1.0"
 
 [lib]
 name = "ya_runtime_vm"

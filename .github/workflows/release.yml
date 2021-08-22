@@ -50,6 +50,7 @@ jobs:
       - name: Make
         run: |
           musl-gcc -v
+          git submodule init
           cd runtime/init-container
           make
       - uses: actions/upload-artifact@v2
