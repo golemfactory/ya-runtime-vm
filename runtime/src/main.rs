@@ -403,12 +403,7 @@ fn offer() -> anyhow::Result<Option<serde_json::Value>> {
             "golem.inf.cpu.vendor": cpu.model.vendor,
             "golem.inf.cpu.model": model,
             "golem.inf.cpu.capabilities": cpu.capabilities,
-            "golem.runtime.vm.capabilities": {
-                "net": {
-                    "localhost": {},
-                    "vpn": {}
-                }
-            }
+            "golem.runtime.capabilities": ["vpn"]
         },
         "constraints": ""
     })))
