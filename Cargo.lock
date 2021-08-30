@@ -2923,7 +2923,8 @@ dependencies = [
 [[package]]
 name = "ya-runtime-api"
 version = "0.4.0"
-source = "git+https://github.com/golemfactory/yagna.git?rev=fa2a42b985831e28e5b3d3032c8be8809ceb0514#fa2a42b985831e28e5b3d3032c8be8809ceb0514"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1bc77db6082cda669d10377934749f03f97d8230f3dcb52e65f8b2576d4a4001"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2939,8 +2940,8 @@ dependencies = [
 
 [[package]]
 name = "ya-runtime-sdk"
-version = "0.1.2"
-source = "git+https://github.com/golemfactory/ya-runtime-sdk.git?rev=aab814b6176db84907f62ffa300b9c770cb106dc#aab814b6176db84907f62ffa300b9c770cb106dc"
+version = "0.2.0"
+source = "git+https://github.com/golemfactory/ya-runtime-sdk?rev=ab0d1862343bf94abdee907ed92143a358cd7e7c#ab0d1862343bf94abdee907ed92143a358cd7e7c"
 dependencies = [
  "anyhow",
  "directories",
@@ -2958,7 +2959,7 @@ dependencies = [
 [[package]]
 name = "ya-runtime-sdk-derive"
 version = "0.1.0"
-source = "git+https://github.com/golemfactory/ya-runtime-sdk.git?rev=aab814b6176db84907f62ffa300b9c770cb106dc#aab814b6176db84907f62ffa300b9c770cb106dc"
+source = "git+https://github.com/golemfactory/ya-runtime-sdk?rev=ab0d1862343bf94abdee907ed92143a358cd7e7c#ab0d1862343bf94abdee907ed92143a358cd7e7c"
 dependencies = [
  "proc-macro2",
  "quote",
