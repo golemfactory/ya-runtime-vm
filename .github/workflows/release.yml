@@ -51,6 +51,7 @@ jobs:
         run: |
           musl-gcc -v
           git submodule init
+          git submodule update
           cd runtime/init-container
           make
       - uses: actions/upload-artifact@v2
