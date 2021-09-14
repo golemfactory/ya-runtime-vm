@@ -253,7 +253,7 @@ async fn start(
     if !deployment.config.fs.in_memory() {
         cmd.arg("-virtfs");
         cmd.arg(format!(
-            "local,id={tag},path={path},security_model=mapped,mount_tag={tag}",
+            "local,id={tag},path={path},security_model=mapped,fmode=777,dmode=777,mount_tag={tag}",
             tag = USER_FS_TAG,
             path = work_dir.join(USER_FS_TAG).to_string_lossy(),
         ));
@@ -262,7 +262,7 @@ async fn start(
     for (idx, vol) in deployment.volumes.iter().enumerate() {
         cmd.arg("-virtfs");
         cmd.arg(format!(
-            "local,id={tag},path={path},security_model=mapped,mount_tag={tag}",
+            "local,id={tag},path={path},security_model=mapped,fmode=777,dmode=777,mount_tag={tag}",
             tag = vol.tag(idx),
             path = vol.base_dir(&work_dir), // note the `base_dir` here
         ));
