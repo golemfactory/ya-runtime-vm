@@ -23,7 +23,7 @@ use ya_runtime_sdk::{
 };
 use ya_runtime_vm::{
     cpu::CpuInfo,
-    deploy::Deployment,
+    deploy::{Deployment, Fs},
     guest_agent_comm::{GuestAgent, Notification, RedirectFdType, RemoteCommandResult},
 };
 
@@ -32,6 +32,7 @@ const FILE_RUNTIME: &'static str = "vmrt";
 const FILE_VMLINUZ: &'static str = "vmlinuz-virt";
 const FILE_INITRAMFS: &'static str = "initramfs.cpio.gz";
 const FILE_TEST_IMAGE: &'static str = "self-test.gvmi";
+const FILE_ROOT_FS: &'static str = "rootfs.qcow2";
 const FILE_DEPLOYMENT: &'static str = "deployment.json";
 const DEFAULT_CWD: &'static str = "/";
 
@@ -183,21 +184,23 @@ impl ya_runtime_sdk::Runtime for Runtime {
 
 async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<Option<serialize::json::Value>> {
     let workdir = normalize_path(&workdir).await?;
-    let package_path = normalize_path(&cli.task_package.unwrap()).await?;
-    let package_file = fs::File::open(&package_path).await?;
+    let package = normalize_path(&cli.task_package.unwrap()).await?;
+    let deployment =
+        Deployment::try_from_input(package, cli.cpu_cores, (cli.mem_gib * 1024.) as usize)
+            .await
+            .expect("Error reading package metadata");
 
-    let deployment = Deployment::try_from_input(
-        package_file,
-        cli.cpu_cores,
-        (cli.mem_gib * 1024.) as usize,
-        package_path,
-    )
-    .await
-    .expect("Error reading package metadata");
-
+    if !deployment.config.fs.in_memory() {
+        let rootfs_path = runtime_dir()?
+            .join(FILE_ROOT_FS)
+            .canonicalize()
+            .map_err(|e| anyhow::anyhow!("Root FS image not found: {}", e))?;
+        fs::copy(rootfs_path, workdir.join(FILE_ROOT_FS)).await?;
+    }
     for vol in &deployment.volumes {
         fs::create_dir_all(workdir.join(&vol.name)).await?;
     }
+
     fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -219,8 +222,7 @@ async fn start(
     runtime_data: Arc<Mutex<RuntimeData>>,
     emitter: EventEmitter,
 ) -> anyhow::Result<Option<serialize::json::Value>> {
-    let runtime_dir = runtime_dir().expect("Unable to resolve current directory");
-
+    let runtime_dir = runtime_dir()?;
     let uid = uuid::Uuid::new_v4().to_simple().to_string();
     let manager_sock = std::env::temp_dir().join(format!("{}.sock", uid));
     let net_sock = std::env::temp_dir().join(format!("{}_net.sock", uid));
@@ -250,7 +252,7 @@ async fn start(
         "-smp",
         deployment.cpu_cores.to_string().as_str(),
         "-append",
-        "console=ttyS0 panic=1",
+        format!("console=ttyS0 panic=1 - {}", deployment.init_args()).as_str(),
         "-device",
         "virtio-serial",
         "-device",
@@ -272,6 +274,14 @@ async fn start(
         "-no-reboot",
     ]);
 
+    if !deployment.config.fs.in_memory() {
+        cmd.arg("-drive");
+        cmd.arg(format!(
+            "file={},cache=unsafe,format=qcow2,if=virtio",
+            path = work_dir.join(FILE_ROOT_FS).to_string_lossy(),
+        ));
+    }
+
     for (idx, volume) in deployment.volumes.iter().enumerate() {
         cmd.arg("-virtfs");
         cmd.arg(format!(
@@ -287,8 +297,7 @@ async fn start(
         .kill_on_drop(true)
         .spawn()?;
 
-    let stdout = runtime.stdout.take().unwrap();
-    spawn(reader_to_log(stdout));
+    spawn(reader_to_log(runtime.stdout.take().unwrap()));
 
     let ga = GuestAgent::connected(manager_sock, 10, move |notification, ga| {
         let mut emitter = emitter.clone();
@@ -327,6 +336,7 @@ async fn run_command(
     let env = deployment.env();
     let cwd = deployment
         .config
+        .container
         .working_dir
         .as_ref()
         .filter(|s| !s.trim().is_empty())
@@ -334,7 +344,7 @@ async fn run_command(
         .unwrap_or_else(|| DEFAULT_CWD);
 
     log::debug!("got run process: {:?}", run);
-    log::debug!("work dir: {:?}", deployment.config.working_dir);
+    log::debug!("work dir: {:?}", deployment.config.container.working_dir);
 
     let result = data
         .ga()
@@ -410,26 +420,30 @@ fn offer() -> anyhow::Result<Option<serde_json::Value>> {
 }
 
 async fn test() -> anyhow::Result<()> {
-    server::run_async(|e| async {
-        let ctx = Context::try_new().expect("Failed to initialize context");
-        let task_package = runtime_dir()
-            .expect("Runtime directory not found")
-            .join(FILE_TEST_IMAGE)
-            .canonicalize()
-            .expect("Test image not found");
+    let ctx =
+        Context::try_new().map_err(|e| anyhow::anyhow!("Failed to initialize context: {}", e))?;
+    let task_package = runtime_dir()?
+        .join(FILE_TEST_IMAGE)
+        .canonicalize()
+        .map_err(|e| anyhow::anyhow!("Test image not found: {}", e))?;
 
+    server::run_async(|e| async move {
         println!("Task package: {}", task_package.display());
-        let runtime_data = RuntimeData {
-            deployment: Some(Deployment {
-                cpu_cores: 1,
-                mem_mib: 128,
-                task_package,
-                ..Default::default()
-            }),
-            ..Default::default()
+        let mut deployment = Deployment {
+            cpu_cores: 1,
+            mem_mib: 128,
+            task_package,
+            ..Deployment::default()
         };
+        deployment.config.fs = Fs::Ram;
+
         let runtime = Runtime {
-            data: Arc::new(Mutex::new(runtime_data)),
+            data: Arc::new(Mutex::new(RuntimeData {
+                runtime: None,
+                network: None,
+                deployment: Some(deployment),
+                ga: None,
+            })),
         };
 
         println!("Starting runtime");
@@ -589,10 +603,11 @@ async fn reader_to_log<T: io::AsyncRead + Unpin>(reader: T) {
     }
 }
 
-fn runtime_dir() -> io::Result<PathBuf> {
-    Ok(std::env::current_exe()?
+fn runtime_dir() -> anyhow::Result<PathBuf> {
+    Ok(std::env::current_exe()
+        .map_err(|e| anyhow::anyhow!("Unable to resolve runtime binary path: {}", e))?
         .parent()
-        .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?
+        .ok_or_else(|| anyhow::anyhow!("Unable to resolve parent of the runtime binary"))?
         .to_path_buf()
         .join(DIR_RUNTIME))
 }
