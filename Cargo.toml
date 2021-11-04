@@ -3,3 +3,7 @@ members = [
     "runtime",
     "gvmkit",
 ]
+
+[patch.crates-io]
+ya-runtime-sdk = { git = "https://github.com/golemfactory/ya-runtime-sdk.git", rev = "c07389550475ff1dbe9cbc3331e5a4417f1760c7" }
+ya-runtime-api = { git = "https://github.com/golemfactory/yagna.git", rev = "a69fbd1317c48245c046de29ad8437729da9b3aa"}

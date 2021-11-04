@@ -1,5 +1,6 @@
+use std::convert::TryFrom;
+
 use raw_cpuid::CpuId;
-use serde::export::TryFrom;
 
 pub struct CpuInfo {
     pub model: CpuModel,

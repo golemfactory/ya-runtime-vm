@@ -165,11 +165,18 @@ enum SUB_MSG_NET_CTL {
     SUB_MSG_NET_CTL_GATEWAY,
     /* Network interface address. (BYTES) */
     SUB_MSG_NET_CTL_IF_ADDR,
+    /* Network interface kind. (u16) */
+    SUB_MSG_NET_CTL_IF,
 };
 
 enum SUB_MSG_NET_CTL_FLAGS {
-    EMPTY = 0,
-    ADD,
+    SUB_MSG_NET_CTL_FLAG_EMPTY = 0,
+    SUB_MSG_NET_CTL_FLAG_ADD,
+};
+
+enum SUB_MSG_NET_IF {
+    SUB_MSG_NET_IF_VPN = 0,
+    SUB_MSG_NET_IF_INET,
 };
 
 enum SUB_MSG_NET_HOST {
