@@ -8,7 +8,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio::{process::Command, sync::Notify};
-use ya_runtime_sdk::runtime_api::server::{self, ProcessStatus, RuntimeService};
+use ya_runtime_sdk::runtime_api::server::{self, ProcessStatus, RuntimeService, RuntimeStatus};
 
 struct ProcessData {
     status: Option<ProcessStatus>,
@@ -52,7 +52,7 @@ impl Events {
     }
 }
 
-impl server::RuntimeEvent for Events {
+impl server::RuntimeHandler for Events {
     fn on_process_status<'a>(&self, status: ProcessStatus) -> BoxFuture<'a, ()> {
         log::debug!("event: {:?}", status);
         let mut processes = self.0.lock().unwrap();
@@ -73,6 +73,10 @@ impl server::RuntimeEvent for Events {
                 }
             }
         }
+        futures::future::ready(()).boxed()
+    }
+
+    fn on_runtime_status<'a>(&self, _status: RuntimeStatus) -> BoxFuture<'a, ()> {
         futures::future::ready(()).boxed()
     }
 }
