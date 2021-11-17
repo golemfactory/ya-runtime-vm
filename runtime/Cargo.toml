@@ -10,7 +10,6 @@ assets = [
     ["target/release/ya-runtime-vm", "usr/lib/yagna/plugins/ya-runtime-vm/", "755"],
     ["conf/ya-runtime-vm.json", "usr/lib/yagna/plugins/", "644"],
     ["image/self-test.gvmi", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
-    ["image/rootfs.qcow2", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
 
     ["poc/runtime/vmrt", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "755"],
     ["poc/runtime/bios-256k.bin", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
