@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::path::PathBuf;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 use tokio_byteorder::LittleEndian;
 use uuid::Uuid;
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
@@ -19,53 +19,19 @@ pub struct Deployment {
     pub task_package: PathBuf,
     pub user: (u32, u32),
     pub volumes: Vec<ContainerVolume>,
-    pub config: Config,
-}
-
-#[derive(Debug, Default, Deserialize, Serialize)]
-pub struct Config {
-    #[serde(flatten)]
-    pub container: ContainerConfig,
-    #[serde(rename = "Filesystem")]
-    #[serde(default)]
-    pub fs: Fs,
-}
-
-/// Root filesystem overlay mode
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Fs {
-    /// Mount the overlay on disk (default)
-    Disk,
-    /// Keep the overlay in RAM (limit: 128 MB)
-    Ram,
-    /// Mount the overlay on disk but keep /tmp in RAM (limit: 128 MB)
-    RamTmp,
-}
-
-impl Fs {
-    pub fn in_memory(&self) -> bool {
-        match self {
-            Self::Ram => true,
-            _ => false,
-        }
-    }
-}
-
-impl Default for Fs {
-    fn default() -> Self {
-        Self::Disk
-    }
+    pub config: ContainerConfig,
 }
 
 impl Deployment {
-    pub async fn try_from_input(
-        task_package: PathBuf,
+    pub async fn try_from_input<Input>(
+        mut input: Input,
         cpu_cores: usize,
         mem_mib: usize,
-    ) -> Result<Self, anyhow::Error> {
-        let mut input = tokio::fs::File::open(&task_package).await?;
-
+        task_package: PathBuf,
+    ) -> Result<Self, anyhow::Error>
+    where
+        Input: AsyncRead + AsyncSeek + Unpin,
+    {
         let json_len: u32 = {
             let mut buf = [0; 8];
             input.seek(SeekFrom::End(-8)).await?;
@@ -89,28 +55,23 @@ impl Deployment {
             return Err(anyhow::anyhow!("Invalid ContainerConfig crc32 sum"));
         }
 
-        let config: Config = serde_json::from_str(&json)?;
+        let config: ContainerConfig = serde_json::from_str(&json)?;
         Ok(Deployment {
             cpu_cores,
             mem_mib,
             task_package,
-            user: parse_user(config.container.user.as_ref())?,
-            volumes: parse_volumes(config.container.volumes.as_ref()),
+            user: parse_user(config.user.as_ref())?,
+            volumes: parse_volumes(config.volumes.as_ref()),
             config,
         })
     }
 
     pub fn env(&self) -> Vec<&str> {
         self.config
-            .container
             .env
             .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect())
             .unwrap_or_else(Vec::new)
-    }
-
-    pub fn init_args(&self) -> String {
-        format!("-f {}", serde_json::to_string(&self.config.fs).unwrap())
     }
 }
 
