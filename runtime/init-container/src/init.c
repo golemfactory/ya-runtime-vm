@@ -149,17 +149,46 @@ static void cleanup_fd_desc(struct redir_fd_desc* fd_desc) {
         case REDIRECT_FD_PIPE_BLOCKING:
         case REDIRECT_FD_PIPE_CYCLIC:
             if (fd_desc->buffer.fds[0] != -1) {
-                CHECK(close(fd_desc->buffer.fds[0]));
+                close(fd_desc->buffer.fds[0]);
             }
             if (fd_desc->buffer.fds[1] != -1) {
-                CHECK(close(fd_desc->buffer.fds[1]));
+                close(fd_desc->buffer.fds[1]);
             }
-            CHECK(cyclic_buffer_deinit(&fd_desc->buffer.cb));
+            cyclic_buffer_deinit(&fd_desc->buffer.cb);
             break;
         default:
             break;
     }
     fd_desc->type = REDIRECT_FD_INVALID;
+}
+
+static bool redir_buffers_empty(struct redir_fd_desc *redirs, size_t len) {
+    FILE *f;
+    for (size_t fd = 0; fd < len; ++fd) {
+        switch (redirs[fd].type) {
+            case REDIRECT_FD_FILE:
+                if ((f = fopen(redirs[fd].path, "r")) == 0) {
+                    continue;
+                }
+                fseek(f, 0, SEEK_END);
+                bool empty = ftell(f) == 0;
+                fclose(f);
+
+                if (!empty) {
+                    return false;
+                }
+                break;
+            case REDIRECT_FD_PIPE_BLOCKING:
+            case REDIRECT_FD_PIPE_CYCLIC:
+                if (cyclic_buffer_data_size(&redirs[fd].buffer.cb) != 0) {
+                    return false;
+                }
+                break;
+            default:
+                break;
+        }
+    }
+    return true;
 }
 
 __attribute__((unused)) static void delete_proc(struct process_desc* proc_desc) {
@@ -254,6 +283,10 @@ static void handle_sigchld(void) {
         fprintf(stderr, "Entrypoint exited\n");
         CHECK(kill(-1, SIGKILL));
         die();
+    }
+
+    if (redir_buffers_empty(proc_desc->redirs, 3)) {
+        delete_proc(proc_desc);
     }
 }
 
@@ -464,9 +497,24 @@ static bool redirect_fd_to_path(int fd, const char* path) {
     return true;
 }
 
+// lives in a separate memory segment (after forking)
+static int child_pipe = -1;
+
+static void close_child_pipe() {
+    if (child_pipe != -1) {
+        char c = '\0';
+        /* Can't do anything with errors here. */
+        (void)write(child_pipe, &c, sizeof(c));
+        close(child_pipe);
+    }
+}
+
 static noreturn void child_wrapper(int parent_pipe[2],
                                    struct new_process_args* new_proc_args,
                                    struct redir_fd_desc fd_descs[3]) {
+    child_pipe = parent_pipe[1];
+    atexit(close_child_pipe);
+
     if (close(parent_pipe[0]) < 0) {
         goto out;
     }
@@ -523,12 +571,8 @@ static noreturn void child_wrapper(int parent_pipe[2],
                  new_proc_args->argv,
                  new_proc_args->envp ?: environ);
 
-out: ;
-    int ecode = errno;
-    char c = '\0';
-    /* Can't do anything with errors here. */
-    (void)write(parent_pipe[1], &c, sizeof(c));
-    exit(ecode);
+out:
+    exit(errno);
 }
 
 /* 0 is considered an invalid ID. */
@@ -1130,11 +1174,14 @@ static void handle_query_output(msg_id_t msg_id) {
             die();
     }
 
+    if (!proc_desc->is_alive && redir_buffers_empty(proc_desc->redirs, 3)) {
+        delete_proc(proc_desc);
+    }
+
     return;
 
 out_err:
     send_response_err(msg_id, ret);
-
 }
 
 static void send_output_available_notification(uint64_t id, uint32_t fd) {
