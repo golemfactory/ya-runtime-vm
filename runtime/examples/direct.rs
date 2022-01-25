@@ -1,4 +1,5 @@
 use futures::FutureExt;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::{
     env,
@@ -77,11 +78,11 @@ async fn run_process_with_output(
 fn get_project_dir() -> PathBuf {
     PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
         .canonicalize()
-        .unwrap()
+        .expect("invalid manifest dir")
 }
 
 fn get_root_dir() -> PathBuf {
-    get_project_dir().join("..").canonicalize().unwrap()
+    get_project_dir().parent().unwrap().to_owned()
 }
 
 fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
@@ -160,16 +161,23 @@ async fn main() -> io::Result<()> {
     let inner_path = temp_path.join("inner");
 
     std::fs::create_dir_all(&inner_path).expect("Failed to create a dir inside temp dir");
-
     let notifications = Arc::new(Notifications::new());
+
     let mount_args = [
         ("tag0", temp_path.display()),
         ("tag1", inner_path.display()),
     ];
-    let child = spawn_vm(&temp_path, &mount_args);
-
+    /*
+        let child = spawn_vm(&temp_path, &mount_args);
+    */
     let ns = notifications.clone();
-    let ga_mutex = GuestAgent::connected(temp_path.join("manager.sock"), 10, move |n, _g| {
+    /*
+        #[cfg(windows)]
+        let socket_address : SocketAddr = "127.0.0.1:9003".parse().unwrap();
+        #[cfg(unix)]
+        let socket_address = temp_path.join("manager.sock");
+    */
+    let ga_mutex = GuestAgent::connected("127.0.0.1:9003", 10, move |n, _g| {
         let notifications = ns.clone();
         async move { notifications.clone().handle(n) }.boxed()
     })
@@ -205,21 +213,21 @@ async fn main() -> io::Result<()> {
     println!("Output:");
     io::stdout().write_all(&out)?;
 
-    run_process_with_output(
-        &mut ga,
-        &notifications,
-        "/bin/ls",
-        &["ls", "-al", "/mnt/mnt1/tag1"],
-    )
-    .await?;
-
+    /*
+        run_process_with_output(
+            &mut ga,
+            &notifications,
+            "/bin/ls",
+            &["ls", "-al", "/mnt/mnt1/tag1"],
+        )
+        .await?;
+    */
     let fds = [
         None,
-        Some(RedirectFdType::RedirectFdFile(
-            "/mnt/mnt1/tag1/write_test".as_bytes(),
-        )),
+        Some(RedirectFdType::RedirectFdFile("/write_test".as_bytes())),
         None,
     ];
+
     let id = ga
         .run_process("/bin/echo", &["echo", "WRITE TEST"], None, 0, 0, &fds, None)
         .await?
@@ -227,6 +235,7 @@ async fn main() -> io::Result<()> {
     println!("Spawned process with id: {}", id);
     notifications.process_died.notified().await;
 
+    /*
     run_process_with_output(
         &mut ga,
         &notifications,
@@ -234,6 +243,7 @@ async fn main() -> io::Result<()> {
         &["cat", "/mnt/mnt1/tag1/write_test"],
     )
     .await?;
+     */
 
     let id = ga
         .run_process("/bin/sleep", &["sleep", "10"], None, 0, 0, &no_redir, None)
@@ -250,7 +260,7 @@ async fn main() -> io::Result<()> {
             &[
                 "bash",
                 "-c",
-                "for i in {1..8000}; do echo -ne a >> /big; done; cat /big",
+                "for i in {1..30}; do echo -ne a >> /big; sleep 1; done; cat /big",
             ],
             None,
             0,
@@ -276,6 +286,7 @@ async fn main() -> io::Result<()> {
         out.iter().filter(|x| **x != 0x61).count()
     );
     notifications.output_available.notified().await;
+    ga.quit().await?.expect("Quit failed");
     let out = ga
         .query_output(id, 1, 0, u64::MAX)
         .await?
@@ -318,13 +329,12 @@ async fn main() -> io::Result<()> {
         out.len(),
         out.iter().filter(|x| **x != 0x62).count()
     );
+
     let out = ga
         .query_output(id, 1, 0, u64::MAX)
         .await?
         .expect("Output query failed");
     println!("Big output 2: {}, expected 0", out.len());
-
-    // ga.quit().await?.expect("Quit failed");
 
     let id = ga
         .run_entrypoint("/bin/sleep", &["sleep", "2"], None, 0, 0, &no_redir, None)
@@ -334,8 +344,8 @@ async fn main() -> io::Result<()> {
     notifications.process_died.notified().await;
 
     /* VM should quit now. */
-    let e = child.await.expect("failed to wait on child");
-    println!("{:?}", e);
+    //let e = child.await.expect("failed to wait on child");
+    //println!("{:?}", e);
 
     Ok(())
 }

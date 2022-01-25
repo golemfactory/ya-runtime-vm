@@ -1,6 +1,7 @@
 use futures::future::FutureExt;
 use futures::lock::Mutex;
 use futures::TryFutureExt;
+use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -68,7 +69,10 @@ struct Runtime {
 #[derive(Clone)]
 #[non_exhaustive]
 enum NetworkEndpoint {
+    #[cfg(unix)]
     Socket(PathBuf),
+    #[cfg(windows)]
+    Socket(String),
 }
 
 #[derive(Default)]
@@ -222,13 +226,32 @@ async fn start(
     let runtime_dir = runtime_dir().expect("Unable to resolve current directory");
 
     let uid = uuid::Uuid::new_v4().to_simple().to_string();
+    #[cfg(unix)]
     let manager_sock = std::env::temp_dir().join(format!("{}.sock", uid));
+    #[cfg(windows)]
+    let manager_sock = "127.0.0.1:9003";
+
+    #[cfg(unix)]
     let net_sock = std::env::temp_dir().join(format!("{}_net.sock", uid));
+
+    #[cfg(windows)]
+    let net_sock = "127.0.0.1:9004";
 
     let mut data = runtime_data.lock().await;
     let deployment = data.deployment().expect("Missing deployment data");
 
+    #[cfg(unix)]
     let chardev = |n, p: &PathBuf| format!("socket,path={},server,nowait,id={}", p.display(), n);
+    #[cfg(windows)]
+    let chardev = |n, p: &str| {
+        let addr: SocketAddr = p.parse().unwrap();
+        format!(
+            "socket,host={},port={},server,nowait,id={}",
+            addr.ip(),
+            addr.port(),
+            n
+        )
+    };
 
     let mut cmd = process::Command::new(runtime_dir.join(FILE_RUNTIME));
     cmd.current_dir(&runtime_dir);
@@ -310,7 +333,8 @@ async fn start(
     }
 
     data.runtime.replace(runtime);
-    data.network.replace(NetworkEndpoint::Socket(net_sock));
+    data.network
+        .replace(NetworkEndpoint::Socket(net_sock.to_owned()));
     data.ga.replace(ga);
 
     Ok(None)
@@ -470,7 +494,8 @@ async fn join_network(
         .network
         .as_ref()
         .map(|network| match network {
-            NetworkEndpoint::Socket(path) => path.display().to_string(),
+            // TODO: unix
+            NetworkEndpoint::Socket(path) => path.clone(),
         })
         .expect("No network endpoint");
 
