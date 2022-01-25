@@ -2,14 +2,20 @@ use futures::channel::mpsc;
 use futures::future::{BoxFuture, FutureExt};
 use futures::lock::Mutex;
 use futures::{SinkExt, StreamExt};
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::{io, marker::PhantomData};
+#[cfg(windows)]
+use tokio::net::TcpStream;
+#[cfg(unix)]
+use tokio::net::UnixStream;
 use tokio::{
     io::{split, AsyncWriteExt, ReadHalf, WriteHalf},
-    net::UnixStream,
     spawn, time,
 };
+
+use tokio::io::AsyncWrite;
 
 pub use crate::response_parser::Notification;
 use crate::response_parser::{parse_one_response, GuestAgentMessage, Response, ResponseWithId};
@@ -97,8 +103,22 @@ struct Message<T> {
     phantom: PhantomData<T>,
 }
 
+#[cfg(unix)]
+type PlatformStream = UnixStream;
+#[cfg(windows)]
+type PlatformStream = TcpStream;
+
+#[cfg(unix)]
+type PlatformAddr = Path;
+
+#[cfg(windows)]
+type PlatformAddr = SocketAddr;
+
+type OutputStream = WriteHalf<PlatformStream>;
+type InputStream = ReadHalf<PlatformStream>;
+
 pub struct GuestAgent {
-    stream: WriteHalf<UnixStream>,
+    stream: OutputStream,
     last_msg_id: u64,
     responses: mpsc::Receiver<ResponseWithId>,
     responses_reader_handle: Option<tokio::task::JoinHandle<io::Error>>,
@@ -383,7 +403,7 @@ pub type RemoteCommandResult<T> = Result<T, /* exit code */ u32>;
 
 fn reader<'f, F>(
     agent: Arc<Mutex<GuestAgent>>,
-    mut stream: ReadHalf<UnixStream>,
+    mut stream: InputStream,
     mut notification_handler: F,
     mut responses: mpsc::Sender<ResponseWithId>,
 ) -> BoxFuture<'f, io::Error>
@@ -415,18 +435,17 @@ where
 }
 
 impl GuestAgent {
-    pub async fn connected<F, P>(
-        path: P,
+    pub async fn connected<F>(
+        path: &str,
         timeout: u32,
         notification_handler: F,
     ) -> io::Result<Arc<Mutex<GuestAgent>>>
     where
         F: FnMut(Notification, Arc<Mutex<GuestAgent>>) -> BoxFuture<'static, ()> + Send + 'static,
-        P: AsRef<Path>,
     {
         let mut timeout_remaining = timeout;
         loop {
-            match UnixStream::connect(&path).await {
+            match PlatformStream::connect(path).await {
                 Ok(s) => {
                     let (stream_read, stream_write) = split(s);
                     let (response_send, response_receive) = mpsc::channel(10);

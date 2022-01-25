@@ -54,3 +54,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "ya-runtime-vm"
 path = "src/main.rs"
+
+
+[target.'cfg(windows)'.dependencies]
+tokio = { version = "0.2", features = ["fs", "io-std", "io-util", "macros", "process", "rt-core", "rt-threaded", "sync", "time", "net"] }
