@@ -160,7 +160,6 @@ async fn simple_run_command(ga_mutex: &Arc<Mutex<GuestAgent>>, bin: &str, argv: 
 
     io::stdout().write_all(std::format!("Command started: {0}\n", argv.join(" ")).as_str().as_bytes())?;
 
-    let no_redir = [None, None, None];
     let id = ga
         .run_process(
             bin,
@@ -168,7 +167,11 @@ async fn simple_run_command(ga_mutex: &Arc<Mutex<GuestAgent>>, bin: &str, argv: 
             None,
             0,
             0,
-            &no_redir,
+            &[
+                None,
+                Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
+                None,
+            ],
             Some(dir),
         )
         .await?
@@ -237,9 +240,9 @@ async fn main() -> io::Result<()> {
     delay_for(Duration::from_millis(1000)).await;
     simple_run_command(&ga_mutex, "/bin/ls", &["ls", "-la"], "/dev", Some(&notifications)).await?;
     delay_for(Duration::from_millis(1000)).await;
+    simple_run_command(&ga_mutex, "/bin/bash", &["bash", "-c",  "for i in {1..30}; do echo -ne a >> /big; sleep 1; done; cat /big"], "/dev", Some(&notifications)).await?;
     //simple_run_command(&ga_mutex, "/bin/cat", &["cat", ".env"], "/dev", Some(&notifications)).await?;
     delay_for(Duration::from_millis(1000)).await;
-
 
     if false {
         let mut ga = ga_mutex.lock().await;
