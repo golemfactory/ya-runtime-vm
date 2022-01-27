@@ -15,6 +15,7 @@
 #include <sys/mount.h>
 #include <sys/reboot.h>
 #include <sys/signalfd.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/sysmacros.h>
@@ -994,7 +995,12 @@ static uint32_t do_mount(const char* tag, char* path) {
     if (create_dir_path(path) < 0) {
         return errno;
     }
-    int buf_size = asprintf(&mount_cmd, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L", g_p9_fd, g_p9_fd);
+    int fds[2];
+    if (socketpair(AF_LOCAL, SOCK_STREAM, 0, fds) == -1) {
+        return 0;
+    }
+
+    int buf_size = asprintf(&mount_cmd, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L", fds[0], fds[0]);
     if (buf_size < 0) {
         return errno;
     }
