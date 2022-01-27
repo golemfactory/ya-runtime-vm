@@ -11,7 +11,7 @@ int readn(int fd, void* buf, size_t size) {
     while (size) {
         ssize_t ret = read(fd, buf, size);
         if (ret == 0) {
-            puts("Waiting for host connection ...");
+            puts("readn: WAITING FOR HOST (1) ...");
             sleep(1);
             continue;
         }
@@ -123,7 +123,7 @@ int writen(int fd, const void* buf, size_t size) {
     while (size) {
         ssize_t ret = write(fd, buf, size);
         if (ret == 0) {
-            puts("Waiting for host connection ...");
+            puts("writen: WAITING FOR HOST (2) ...");
             sleep(1);
             continue;
         }
@@ -161,7 +161,7 @@ int send_bytes_cyclic_buffer(int fd, struct cyclic_buffer* cb, uint64_t size) {
     while (size) {
         ssize_t ret = cyclic_buffer_write(fd, cb, size);
         if (ret == 0) {
-            puts("Waiting for host connection ...");
+            puts("send_bytes_cyclic_buffer: WAITING FOR HOST (1) ...");
             sleep(1);
             continue;
         }

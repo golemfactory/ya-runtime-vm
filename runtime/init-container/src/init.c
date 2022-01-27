@@ -45,6 +45,7 @@
 
 #define VPORT_CMD "/dev/vport0p1"
 #define VPORT_NET "/dev/vport0p2"
+#define VPORT_P9 "/dev/vport0p3"
 
 #define MODE_RW_UGO (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)
 #define OUTPUT_PATH_PREFIX "/var/tmp/guest_agent_private/fds"
@@ -78,6 +79,7 @@ extern char** environ;
 
 static int g_cmds_fd = -1;
 static int g_net_fd = -1;
+static int g_p9_fd = -1;
 static int g_sig_fd = -1;
 static int g_epoll_fd = -1;
 static int g_tap_fd = -1;
@@ -92,6 +94,7 @@ static noreturn void die(void) {
     (void)close(g_epoll_fd);
     (void)close(g_sig_fd);
     (void)close(g_net_fd);
+    (void)close(g_p9_fd);
     (void)close(g_cmds_fd);
 
     while (1) {
@@ -381,8 +384,16 @@ static void setup_network(void) {
     CHECK(fwd_start(g_net_fd, g_tap_fd, MTU, true, false));
 }
 
+static void setup_p9(void) {
+
+}
+
 static void stop_network(void) {
     fwd_stop();
+}
+
+static void stop_p9(void) {
+
 }
 
 static void send_response_hdr(msg_id_t msg_id, enum GUEST_MSG_TYPE type) {
@@ -1543,6 +1554,7 @@ int main(void) {
 
     g_cmds_fd = CHECK(open(VPORT_CMD, O_RDWR | O_CLOEXEC));
     g_net_fd = CHECK(open(VPORT_NET, O_RDWR | O_CLOEXEC));
+    g_p9_fd = CHECK(open(VPORT_P9, O_RDWR | O_CLOEXEC));
 
     CHECK(mkdir("/mnt", S_IRWXU));
     CHECK(mkdir("/mnt/image", S_IRWXU));
@@ -1606,6 +1618,8 @@ int main(void) {
     }
 
     setup_network();
+    setup_p9();
+
     setup_agent_directories();
 
     block_signals();
@@ -1613,4 +1627,5 @@ int main(void) {
 
     main_loop();
     stop_network();
+    stop_p9();
 }

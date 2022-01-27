@@ -2,8 +2,7 @@ use futures::channel::mpsc;
 use futures::future::{BoxFuture, FutureExt};
 use futures::lock::Mutex;
 use futures::{SinkExt, StreamExt};
-use std::net::SocketAddr;
-use std::path::Path;
+//use std::net::SocketAddr;
 use std::sync::Arc;
 use std::{io, marker::PhantomData};
 #[cfg(windows)]
@@ -14,8 +13,6 @@ use tokio::{
     io::{split, AsyncWriteExt, ReadHalf, WriteHalf},
     spawn, time,
 };
-
-use tokio::io::AsyncWrite;
 
 pub use crate::response_parser::Notification;
 use crate::response_parser::{parse_one_response, GuestAgentMessage, Response, ResponseWithId};
@@ -111,8 +108,10 @@ type PlatformStream = TcpStream;
 #[cfg(unix)]
 type PlatformAddr = Path;
 
+/*
 #[cfg(windows)]
 type PlatformAddr = SocketAddr;
+*/
 
 type OutputStream = WriteHalf<PlatformStream>;
 type InputStream = ReadHalf<PlatformStream>;

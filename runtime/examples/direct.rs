@@ -1,5 +1,4 @@
 use futures::FutureExt;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::{
     env,
@@ -17,6 +16,8 @@ struct Notifications {
     process_died: sync::Notify,
     output_available: sync::Notify,
 }
+use futures::lock::Mutex;
+use tokio::time::{delay_for, Duration};
 
 impl Notifications {
     fn new() -> Self {
@@ -29,11 +30,11 @@ impl Notifications {
     fn handle(&self, notification: Notification) {
         match notification {
             Notification::OutputAvailable { id, fd } => {
-                println!("Process {} has output available on fd {}", id, fd);
+                log::debug!("Process {} has output available on fd {}", id, fd);
                 self.output_available.notify();
             }
             Notification::ProcessDied { id, reason } => {
-                println!("Process {} died with {:?}", id, reason);
+                log::debug!("Process {} died with {:?}", id, reason);
                 self.process_died.notify();
             }
         }
@@ -154,6 +155,40 @@ fn spawn_vm<'a, P: AsRef<Path>>(temp_path: P, mount_args: &'a [(&'a str, impl To
     cmd.spawn().expect("failed to spawn VM")
 }
 
+async fn simple_run_command(ga_mutex: &Arc<Mutex<GuestAgent>>, bin: &str, argv: &[&str], dir: &str, notifications: Option<&Arc<Notifications>>) -> io::Result<()> {
+    let mut ga = ga_mutex.lock().await;
+
+    io::stdout().write_all(std::format!("Command started: {0}\n", argv.join(" ")).as_str().as_bytes())?;
+
+    let no_redir = [None, None, None];
+    let id = ga
+        .run_process(
+            bin,
+            argv,
+            None,
+            0,
+            0,
+            &no_redir,
+            Some(dir),
+        )
+        .await?
+        .expect("Run process failed");
+    //println!("Spawned process with id: {}", id);
+    if let Some(notifications) = notifications {
+        notifications.process_died.notified().await;
+    }
+    let out = ga
+        .query_output(id, 1, 0, u64::MAX)
+        .await?
+        .expect("Output query failed");
+    //println!("Output:");
+    io::stdout().write_all(&out)?;
+
+    io::stdout().write_all(std::format!("Command finished: {0}\n", argv.join(" ")).as_str().as_bytes())?;
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let temp_dir = tempdir::TempDir::new("ya-vm-direct").expect("Failed to create temp dir");
@@ -163,13 +198,18 @@ async fn main() -> io::Result<()> {
     std::fs::create_dir_all(&inner_path).expect("Failed to create a dir inside temp dir");
     let notifications = Arc::new(Notifications::new());
 
-    let mount_args = [
-        ("tag0", temp_path.display()),
-        ("tag1", inner_path.display()),
-    ];
-    /*
-        let child = spawn_vm(&temp_path, &mount_args);
-    */
+    log::info!("Temp path: {:?}", temp_path);
+
+    let should_spawn_vm = false;
+    if should_spawn_vm {
+        let mount_args = [
+            ("tag0", temp_path.display()),
+            ("tag1", inner_path.display()),
+        ];
+
+        let _child = spawn_vm(&temp_path, &mount_args);
+    }
+
     let ns = notifications.clone();
     /*
         #[cfg(windows)]
@@ -182,38 +222,38 @@ async fn main() -> io::Result<()> {
         async move { notifications.clone().handle(n) }.boxed()
     })
     .await?;
-    let mut ga = ga_mutex.lock().await;
 
-    let no_redir = [None, None, None];
 
+
+/*
     for (i, (tag, _)) in mount_args.iter().enumerate() {
         ga.mount(tag, &format!("/mnt/mnt{}/{}", i, tag))
             .await?
             .expect("Mount failed");
-    }
+    }*/
 
-    let id = ga
-        .run_process(
-            "/bin/ls",
-            &["ls", "-al", "."],
-            None,
-            0,
-            0,
-            &no_redir,
-            Some("/mnt"),
-        )
-        .await?
-        .expect("Run process failed");
-    println!("Spawned process with id: {}", id);
-    notifications.process_died.notified().await;
-    let out = ga
-        .query_output(id, 1, 0, u64::MAX)
-        .await?
-        .expect("Output query failed");
-    println!("Output:");
-    io::stdout().write_all(&out)?;
+    let no_redir = [None, None, None];
 
-    /*
+    delay_for(Duration::from_millis(1000)).await;
+    simple_run_command(&ga_mutex, "/bin/ls", &["ls", "-la"], "/dev", Some(&notifications)).await?;
+    delay_for(Duration::from_millis(1000)).await;
+    //simple_run_command(&ga_mutex, "/bin/cat", &["cat", ".env"], "/dev", Some(&notifications)).await?;
+    delay_for(Duration::from_millis(1000)).await;
+
+
+    if false {
+        let mut ga = ga_mutex.lock().await;
+
+
+        //run_ls(&ga_mutex, &notifications, "/").await?;
+        //run_ls(&ga_mutex, &notifications, "/bin").await?;
+        //run_ls(&ga_mutex, &notifications, "/dev").await?;
+        //run_ls(&ga_mutex, &notifications, "/mnt").await?;
+        //run_cat(&ga_mutex, &notifications, "/dev", ".env").await?;
+
+
+
+
         run_process_with_output(
             &mut ga,
             &notifications,
@@ -221,131 +261,130 @@ async fn main() -> io::Result<()> {
             &["ls", "-al", "/mnt/mnt1/tag1"],
         )
         .await?;
-    */
-    let fds = [
-        None,
-        Some(RedirectFdType::RedirectFdFile("/write_test".as_bytes())),
-        None,
-    ];
 
-    let id = ga
-        .run_process("/bin/echo", &["echo", "WRITE TEST"], None, 0, 0, &fds, None)
-        .await?
-        .expect("Run process failed");
-    println!("Spawned process with id: {}", id);
-    notifications.process_died.notified().await;
-
-    /*
-    run_process_with_output(
-        &mut ga,
-        &notifications,
-        "/bin/cat",
-        &["cat", "/mnt/mnt1/tag1/write_test"],
-    )
-    .await?;
-     */
-
-    let id = ga
-        .run_process("/bin/sleep", &["sleep", "10"], None, 0, 0, &no_redir, None)
-        .await?
-        .expect("Run process failed");
-    println!("Spawned process with id: {}", id);
-
-    ga.kill(id).await?.expect("Kill failed");
-    notifications.process_died.notified().await;
-
-    let id = ga
-        .run_process(
-            "/bin/bash",
-            &[
-                "bash",
-                "-c",
-                "for i in {1..30}; do echo -ne a >> /big; sleep 1; done; cat /big",
-            ],
+        let fds = [
             None,
-            0,
-            0,
-            &[
-                None,
-                Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
-                None,
-            ],
+            Some(RedirectFdType::RedirectFdFile("/write_test".as_bytes())),
             None,
+        ];
+        let mut ga = ga_mutex.lock().await;
+
+        let id = ga
+            .run_process("/bin/echo", &["echo", "WRITE TEST"], None, 0, 0, &fds, None)
+            .await?
+            .expect("Run process failed");
+        println!("Spawned process with id: {}", id);
+        notifications.process_died.notified().await;
+
+        run_process_with_output(
+            &mut ga,
+            &notifications,
+            "/bin/cat",
+            &["cat", "/mnt/mnt1/tag1/write_test"],
         )
-        .await?
-        .expect("Run process failed");
-    println!("Spawned process with id: {}", id);
-    notifications.output_available.notified().await;
-    let out = ga
-        .query_output(id, 1, 0, u64::MAX)
-        .await?
-        .expect("Output query failed");
-    println!(
-        "Big output 1: {} {}",
-        out.len(),
-        out.iter().filter(|x| **x != 0x61).count()
-    );
-    notifications.output_available.notified().await;
-    ga.quit().await?.expect("Quit failed");
-    let out = ga
-        .query_output(id, 1, 0, u64::MAX)
-        .await?
-        .expect("Output query failed");
-    println!(
-        "Big output 2: {} {}",
-        out.len(),
-        out.iter().filter(|x| **x != 0x61).count()
-    );
+        .await?;
 
-    let id = ga
-        .run_process(
-            "/bin/bash",
-            &[
-                "bash",
-                "-c",
-                "echo > /big; for i in {1..4000}; do echo -ne a >> /big; done; for i in {1..4096}; do echo -ne b >> /big; done; cat /big",
-            ],
-            None,
-            0,
-            0,
-            &[
+        let id = ga
+            .run_process("/bin/sleep", &["sleep", "10"], None, 0, 0, &no_redir, None)
+            .await?
+            .expect("Run process failed");
+        println!("Spawned process with id: {}", id);
+
+        ga.kill(id).await?.expect("Kill failed");
+        notifications.process_died.notified().await;
+
+        let id = ga
+            .run_process(
+                "/bin/bash",
+                &[
+                    "bash",
+                    "-c",
+                    "for i in {1..30}; do echo -ne a >> /big; sleep 1; done; cat /big",
+                ],
                 None,
-                Some(RedirectFdType::RedirectFdPipeCyclic(0x1000)),
+                0,
+                0,
+                &[
+                    None,
+                    Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
+                    None,
+                ],
                 None,
-            ],
-            None,
-        )
-        .await?
-        .expect("Run process failed");
-    println!("Spawned process with id: {}", id);
-    notifications.process_died.notified().await;
-    notifications.output_available.notified().await;
-    let out = ga
-        .query_output(id, 1, 0, u64::MAX)
-        .await?
-        .expect("Output query failed");
-    println!(
-        "Big output 1: {} {}",
-        out.len(),
-        out.iter().filter(|x| **x != 0x62).count()
-    );
+            )
+            .await?
+            .expect("Run process failed");
+        println!("Spawned process with id: {}", id);
+        notifications.output_available.notified().await;
+        let out = ga
+            .query_output(id, 1, 0, u64::MAX)
+            .await?
+            .expect("Output query failed");
+        println!(
+            "Big output 1: {} {}",
+            out.len(),
+            out.iter().filter(|x| **x != 0x61).count()
+        );
+        notifications.output_available.notified().await;
+        ga.quit().await?.expect("Quit failed");
+        let out = ga
+            .query_output(id, 1, 0, u64::MAX)
+            .await?
+            .expect("Output query failed");
+        println!(
+            "Big output 2: {} {}",
+            out.len(),
+            out.iter().filter(|x| **x != 0x61).count()
+        );
 
-    let out = ga
-        .query_output(id, 1, 0, u64::MAX)
-        .await?
-        .expect("Output query failed");
-    println!("Big output 2: {}, expected 0", out.len());
+        let id = ga
+            .run_process(
+                "/bin/bash",
+                &[
+                    "bash",
+                    "-c",
+                    "echo > /big; for i in {1..4000}; do echo -ne a >> /big; done; for i in {1..4096}; do echo -ne b >> /big; done; cat /big",
+                ],
+                None,
+                0,
+                0,
+                &[
+                    None,
+                    Some(RedirectFdType::RedirectFdPipeCyclic(0x1000)),
+                    None,
+                ],
+                None,
+            )
+            .await?
+            .expect("Run process failed");
+        println!("Spawned process with id: {}", id);
+        notifications.process_died.notified().await;
+        notifications.output_available.notified().await;
+        let out = ga
+            .query_output(id, 1, 0, u64::MAX)
+            .await?
+            .expect("Output query failed");
+        println!(
+            "Big output 1: {} {}",
+            out.len(),
+            out.iter().filter(|x| **x != 0x62).count()
+        );
 
-    let id = ga
-        .run_entrypoint("/bin/sleep", &["sleep", "2"], None, 0, 0, &no_redir, None)
-        .await?
-        .expect("Run process failed");
-    println!("Spawned process with id: {}", id);
-    notifications.process_died.notified().await;
+        let out = ga
+            .query_output(id, 1, 0, u64::MAX)
+            .await?
+            .expect("Output query failed");
+        println!("Big output 2: {}, expected 0", out.len());
 
-    /* VM should quit now. */
-    //let e = child.await.expect("failed to wait on child");
-    //println!("{:?}", e);
+        let id = ga
+            .run_entrypoint("/bin/sleep", &["sleep", "2"], None, 0, 0, &no_redir, None)
+            .await?
+            .expect("Run process failed");
+        println!("Spawned process with id: {}", id);
+        notifications.process_died.notified().await;
 
+        /* VM should quit now. */
+        //let e = child.await.expect("failed to wait on child");
+        //println!("{:?}", e);
+    }
     Ok(())
 }
