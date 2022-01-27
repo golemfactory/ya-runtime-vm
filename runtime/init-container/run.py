@@ -10,7 +10,7 @@ command += '-append "console=ttyS0 panic=1" '
 command += "-device virtio-serial "
 command += "-chardev socket,id=manager_cdev,host=127.0.0.1,port=9003,server,nowait "
 command += "-chardev socket,id=net_cdev,host=127.0.0.1,port=9004,server,nowait "
-command += "-chardev socket,id=p9_cdev,host=127.0.0.1,port=9005,server,nowait "
+command += "-chardev socket,id=p9_cdev,host=127.0.0.1,port=9005,server "
 command += "-device virtserialport,chardev=manager_cdev,name=manager_port "
 command += "-device virtserialport,chardev=net_cdev,name=net_port "
 command += "-device virtserialport,chardev=p9_cdev,name=p9_port "

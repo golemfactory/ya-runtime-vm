@@ -11,8 +11,13 @@ use tokio::{
     sync,
 };
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
+use ya_runtime_vm::guest_agent_9p::{GuestAgent9p, Notification9p};
 
 struct Notifications {
+    process_died: sync::Notify,
+    output_available: sync::Notify,
+}
+struct Notifications9p {
     process_died: sync::Notify,
     output_available: sync::Notify,
 }
@@ -34,6 +39,28 @@ impl Notifications {
                 self.output_available.notify();
             }
             Notification::ProcessDied { id, reason } => {
+                log::debug!("Process {} died with {:?}", id, reason);
+                self.process_died.notify();
+            }
+        }
+    }
+}
+
+impl Notifications9p {
+    fn new() -> Self {
+        Notifications9p {
+            process_died: sync::Notify::new(),
+            output_available: sync::Notify::new(),
+        }
+    }
+
+    fn handle(&self, notification: Notification9p) {
+        match notification {
+            Notification9p::OutputAvailable { id, fd } => {
+                log::debug!("Process {} has output available on fd {}", id, fd);
+                self.output_available.notify();
+            }
+            Notification9p::ProcessDied { id, reason } => {
                 log::debug!("Process {} died with {:?}", id, reason);
                 self.process_died.notify();
             }
@@ -169,7 +196,7 @@ async fn simple_run_command(ga_mutex: &Arc<Mutex<GuestAgent>>, bin: &str, argv: 
             0,
             &[
                 None,
-                Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
+                Some(RedirectFdType::RedirectFdPipeBlocking(0x100000)),
                 None,
             ],
             Some(dir),
@@ -200,20 +227,22 @@ async fn main() -> io::Result<()> {
 
     std::fs::create_dir_all(&inner_path).expect("Failed to create a dir inside temp dir");
     let notifications = Arc::new(Notifications::new());
+    let notifications2 = Arc::new(Notifications9p::new());
 
     log::info!("Temp path: {:?}", temp_path);
-
+    let mount_args = [
+        ("tag0", temp_path.display()),
+        ("tag1", inner_path.display()),
+    ];
     let should_spawn_vm = false;
     if should_spawn_vm {
-        let mount_args = [
-            ("tag0", temp_path.display()),
-            ("tag1", inner_path.display()),
-        ];
+
 
         let _child = spawn_vm(&temp_path, &mount_args);
     }
 
     let ns = notifications.clone();
+    let ns2 = notifications2.clone();
     /*
         #[cfg(windows)]
         let socket_address : SocketAddr = "127.0.0.1:9003".parse().unwrap();
@@ -226,22 +255,32 @@ async fn main() -> io::Result<()> {
     })
     .await?;
 
+    /*
+    let ga_mutex2 = GuestAgent9p::connected("127.0.0.1:9005", 10, move |n, _g| {
+        let notifications2 = ns2.clone();
+        async move { notifications2.clone().handle(n) }.boxed()
+    }).await?;*/
 
 
-/*
+
+    let mut ga = ga_mutex.lock().await;
+
     for (i, (tag, _)) in mount_args.iter().enumerate() {
         ga.mount(tag, &format!("/mnt/mnt{}/{}", i, tag))
             .await?
             .expect("Mount failed");
-    }*/
+    }
 
     let no_redir = [None, None, None];
 
     delay_for(Duration::from_millis(1000)).await;
     simple_run_command(&ga_mutex, "/bin/ls", &["ls", "-la"], "/dev", Some(&notifications)).await?;
     delay_for(Duration::from_millis(1000)).await;
-    simple_run_command(&ga_mutex, "/bin/bash", &["bash", "-c",  "for i in {1..30}; do echo -ne a >> /big; sleep 1; done; cat /big"], "/dev", Some(&notifications)).await?;
-    //simple_run_command(&ga_mutex, "/bin/cat", &["cat", ".env"], "/dev", Some(&notifications)).await?;
+    simple_run_command(&ga_mutex, "/bin/bash", &["bash", "-c",  "mkdir host_files  > /result.log 2> /error.log; echo output:; cat /result.log; echo errors:;cat /error.log"], "/mnt", Some(&notifications)).await?;
+    delay_for(Duration::from_millis(1000)).await;
+    //simple_run_command(&ga_mutex, "/bin/bash", &["bash", "-c",  "echo DUPA >> /dev/vport0p3"], "/dev", Some(&notifications)).await?;
+
+    simple_run_command(&ga_mutex, "/bin/bash", &["bash", "-c",  "mount -t 9p -o trans=fd,rfdno=/dev/vport0p3,wfdno=/dev/vport0p3,version=9p2000.L hostshare /mnt/host_files > /result.log 2> /error.log; echo output:; cat /result.log; echo errors:;cat /error.log"], "/dev", Some(&notifications)).await?;
     delay_for(Duration::from_millis(1000)).await;
 
     if false {

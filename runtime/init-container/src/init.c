@@ -990,12 +990,19 @@ out:
 }
 
 static uint32_t do_mount(const char* tag, char* path) {
+    char* mount_cmd = NULL;
     if (create_dir_path(path) < 0) {
         return errno;
     }
-    if (mount(tag, path, "9p", 0, "trans=virtio,version=9p2000.L") < 0) {
+    int buf_size = asprintf(&mount_cmd, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L", g_p9_fd, g_p9_fd);
+    if (buf_size < 0) {
         return errno;
     }
+    write(g_p9_fd, mount_cmd, buf_size);
+    if (mount(tag, path, "9p", 0, mount_cmd) < 0) {
+        return errno;
+    }
+    free(mount_cmd);
     return 0;
 }
 
@@ -1554,7 +1561,7 @@ int main(void) {
 
     g_cmds_fd = CHECK(open(VPORT_CMD, O_RDWR | O_CLOEXEC));
     g_net_fd = CHECK(open(VPORT_NET, O_RDWR | O_CLOEXEC));
-    g_p9_fd = CHECK(open(VPORT_P9, O_RDWR | O_CLOEXEC));
+    g_p9_fd = CHECK(open(VPORT_P9, O_RDWR));
 
     CHECK(mkdir("/mnt", S_IRWXU));
     CHECK(mkdir("/mnt/image", S_IRWXU));
