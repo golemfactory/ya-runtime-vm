@@ -84,6 +84,7 @@ static int g_net_fd = -1;
 static int g_p9_fd = -1;
 static int g_p9_socket_fds[2] = {-1, -1};
 static pthread_t g_p9_tunnel_thread1;
+static pthread_t g_p9_tunnel_thread2;
 
 
 static int g_sig_fd = -1;
@@ -1008,12 +1009,36 @@ static int create_p9_socket_descriptors() {
 
 
 
+static void* tunnel_from_p9_virtio_to_sock() {
+    const int bufferSize = 4096;
+    char* buffer = malloc(bufferSize);
+
+    while (true) {
+        ssize_t bytes_read = read(g_p9_fd, buffer, bufferSize);
+        printf("RECEIVE MESSAGE %ld", bytes_read);
+        if (bytes_read == 0) {
+            free(buffer);
+            return NULL;
+        }
+        if (bytes_read == -1) {
+            free(buffer);
+            return (void*)(int64_t)errno;
+        }
+        if (write(g_p9_socket_fds[1], buffer, bytes_read) == -1) {
+            return (void*)(int64_t)errno;
+        }
+    }
+}
+
+
 static void* tunnel_from_p9_sock_to_virtio() {
     const int bufferSize = 4096;
     char* buffer = malloc(bufferSize);
 
     while (true) {
         ssize_t bytes_read = recv(g_p9_socket_fds[1], buffer, bufferSize, 0);
+        printf("SEND MESSAGE %ld", bytes_read);
+
         if (bytes_read == 0) {
             free(buffer);
             return NULL;
@@ -1041,10 +1066,10 @@ static uint32_t do_mount(const char* tag, char* path) {
         return errno;
     }
     //DEBUG CODE - TODO REMOVE
-    write(mount_socked_fd, mount_cmd, buf_size);
-    /*if (mount(tag, path, "9p", 0, mount_cmd) < 0) {
+    //write(mount_socked_fd, mount_cmd, buf_size);
+    if (mount(tag, path, "9p", 0, mount_cmd) < 0) {
         return errno;
-    }*/
+    }
     free(mount_cmd);
     return 0;
 }
@@ -1608,8 +1633,7 @@ int main(void) {
     CHECK(create_p9_socket_descriptors()); //sets static variable g_p9_socket_fds
 
 	CHECK(pthread_create(&g_p9_tunnel_thread1, NULL, &tunnel_from_p9_sock_to_virtio, NULL));
-
-
+	CHECK(pthread_create(&g_p9_tunnel_thread2, NULL, &tunnel_from_p9_virtio_to_sock, NULL));
 
     CHECK(mkdir("/mnt", S_IRWXU));
     CHECK(mkdir("/mnt/image", S_IRWXU));
