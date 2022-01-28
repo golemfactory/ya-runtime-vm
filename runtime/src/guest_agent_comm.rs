@@ -678,8 +678,10 @@ impl GuestAgent {
         ));
 
         msg.append_submsg(&SubMsgMountVolumeType::SubMsgEnd);
+        log::debug!("Send message");
 
         self.stream.write_all(msg.as_ref()).await?;
+        log::debug!("self.get_ok_response");
 
         self.get_ok_response(msg_id).await
     }

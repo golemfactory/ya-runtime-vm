@@ -6,6 +6,7 @@ use std::{
     process::Stdio,
     sync::Arc,
 };
+use std::str;
 use tokio::{
     process::{Child, Command},
     sync,
@@ -22,6 +23,7 @@ struct Notifications9p {
     output_available: sync::Notify,
 }
 use futures::lock::Mutex;
+use log::debug;
 use tokio::time::{delay_for, Duration};
 
 impl Notifications {
@@ -185,7 +187,8 @@ fn spawn_vm<'a, P: AsRef<Path>>(temp_path: P, mount_args: &'a [(&'a str, impl To
 async fn simple_run_command(ga_mutex: &Arc<Mutex<GuestAgent>>, bin: &str, argv: &[&str], dir: &str, notifications: Option<&Arc<Notifications>>) -> io::Result<()> {
     let mut ga = ga_mutex.lock().await;
 
-    io::stdout().write_all(std::format!("Command started: {0}\n", argv.join(" ")).as_str().as_bytes())?;
+    log::debug!("Command started: {0}", argv.join(" "));
+    //io::stdout().write_all(std::format!("Command started: {0}\n", argv.join(" ")).as_str().as_bytes())?;
 
     let id = ga
         .run_process(
@@ -196,7 +199,7 @@ async fn simple_run_command(ga_mutex: &Arc<Mutex<GuestAgent>>, bin: &str, argv: 
             0,
             &[
                 None,
-                Some(RedirectFdType::RedirectFdPipeBlocking(0x100000)),
+                None,
                 None,
             ],
             Some(dir),
@@ -205,34 +208,37 @@ async fn simple_run_command(ga_mutex: &Arc<Mutex<GuestAgent>>, bin: &str, argv: 
         .expect("Run process failed");
     //println!("Spawned process with id: {}", id);
     if let Some(notifications) = notifications {
-        notifications.process_died.notified().await;
+        //notifications.process_died.notified().await;
+        //notifications.output_available.notified().await;
     }
+    delay_for(Duration::from_millis(1000)).await;
+    log::debug!("{}", "QUERY OUTPUT");
     let out = ga
         .query_output(id, 1, 0, u64::MAX)
         .await?
         .expect("Output query failed");
-    //println!("Output:");
-    io::stdout().write_all(&out)?;
 
-    io::stdout().write_all(std::format!("Command finished: {0}\n", argv.join(" ")).as_str().as_bytes())?;
+    //println!("Output:");
+    log::debug!("{}", str::from_utf8(&out).unwrap_or("CANNOT CONVERT"));
+
+    log::debug!("Command finished: {0}", argv.join(" "));
 
     Ok(())
 }
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
+    env_logger::init();
     let temp_dir = tempdir::TempDir::new("ya-vm-direct").expect("Failed to create temp dir");
     let temp_path = temp_dir.path();
     let inner_path = temp_path.join("inner");
 
     std::fs::create_dir_all(&inner_path).expect("Failed to create a dir inside temp dir");
     let notifications = Arc::new(Notifications::new());
-    let notifications2 = Arc::new(Notifications9p::new());
 
     log::info!("Temp path: {:?}", temp_path);
     let mount_args = [
         ("tag0", temp_path.display()),
-        ("tag1", inner_path.display()),
     ];
     let should_spawn_vm = false;
     if should_spawn_vm {
@@ -242,37 +248,29 @@ async fn main() -> io::Result<()> {
     }
 
     let ns = notifications.clone();
-    let ns2 = notifications2.clone();
-    /*
-        #[cfg(windows)]
-        let socket_address : SocketAddr = "127.0.0.1:9003".parse().unwrap();
-        #[cfg(unix)]
-        let socket_address = temp_path.join("manager.sock");
-    */
     let ga_mutex = GuestAgent::connected("127.0.0.1:9003", 10, move |n, _g| {
         let notifications = ns.clone();
         async move { notifications.clone().handle(n) }.boxed()
     })
     .await?;
 
-    /*
-    let ga_mutex2 = GuestAgent9p::connected("127.0.0.1:9005", 10, move |n, _g| {
-        let notifications2 = ns2.clone();
-        async move { notifications2.clone().handle(n) }.boxed()
-    }).await?;*/
+    {
 
-
-
-    let mut ga = ga_mutex.lock().await;
-
-    for (i, (tag, _)) in mount_args.iter().enumerate() {
-        ga.mount(tag, &format!("/mnt/mnt{}/{}", i, tag))
-            .await?
-            .expect("Mount failed");
+        let mut ga = ga_mutex.lock().await;
+        log::debug!("start_mount");
+        for (i, (tag, _)) in mount_args.iter().enumerate() {
+            ga.mount(tag, &format!("/mnt/mnt{}/{}", i, tag))
+                .await?
+                .expect("Mount failed");
+        }
     }
+    log::debug!("end mnt loop");
+    delay_for(Duration::from_millis(1000)).await;
+    log::debug!("end delay");
 
     let no_redir = [None, None, None];
 
+    simple_run_command(&ga_mutex, "/bin/ls", &["ls", "-la"], "/mnt/mnt0/tag0", Some(&notifications)).await?;
     delay_for(Duration::from_millis(1000)).await;
     simple_run_command(&ga_mutex, "/bin/ls", &["ls", "-la"], "/dev", Some(&notifications)).await?;
     delay_for(Duration::from_millis(1000)).await;
@@ -280,7 +278,7 @@ async fn main() -> io::Result<()> {
     delay_for(Duration::from_millis(1000)).await;
     //simple_run_command(&ga_mutex, "/bin/bash", &["bash", "-c",  "echo DUPA >> /dev/vport0p3"], "/dev", Some(&notifications)).await?;
 
-    simple_run_command(&ga_mutex, "/bin/bash", &["bash", "-c",  "mount -t 9p -o trans=fd,rfdno=/dev/vport0p3,wfdno=/dev/vport0p3,version=9p2000.L hostshare /mnt/host_files > /result.log 2> /error.log; echo output:; cat /result.log; echo errors:;cat /error.log"], "/dev", Some(&notifications)).await?;
+    //simple_run_command(&ga_mutex, "/bin/bash", &["bash", "-c",  "mount -t 9p -o trans=fd,rfdno=/dev/vport0p3,wfdno=/dev/vport0p3,version=9p2000.L hostshare /mnt/host_files > /result.log 2> /error.log; echo output:; cat /result.log; echo errors:;cat /error.log"], "/dev", Some(&notifications)).await?;
     delay_for(Duration::from_millis(1000)).await;
 
     if false {

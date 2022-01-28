@@ -1063,13 +1063,18 @@ static uint32_t do_mount(const char* tag, char* path) {
     int mount_socked_fd = g_p9_socket_fds[0];
     int buf_size = asprintf(&mount_cmd, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L", mount_socked_fd, mount_socked_fd);
     if (buf_size < 0) {
+        free(mount_cmd);
         return errno;
     }
+
     //DEBUG CODE - TODO REMOVE
     //write(mount_socked_fd, mount_cmd, buf_size);
+    printf("Starting mount: ");
     if (mount(tag, path, "9p", 0, mount_cmd) < 0) {
+        printf("Mount finished with error: %d", errno);
         return errno;
     }
+    printf("Mount finished");
     free(mount_cmd);
     return 0;
 }
@@ -1113,8 +1118,10 @@ out:
     free(path);
     free(tag);
     if (ret) {
+        printf("returning response ERROR");
         send_response_err(msg_id, ret);
     } else {
+        printf("returning response SUCCESS");
         send_response_ok(msg_id);
     }
 }
