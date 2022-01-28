@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -81,6 +82,10 @@ extern char** environ;
 static int g_cmds_fd = -1;
 static int g_net_fd = -1;
 static int g_p9_fd = -1;
+static int g_p9_socket_fds[2] = {-1, -1};
+static pthread_t g_p9_tunnel_thread1;
+
+
 static int g_sig_fd = -1;
 static int g_epoll_fd = -1;
 static int g_tap_fd = -1;
@@ -990,24 +995,56 @@ out:
     }
 }
 
+static int create_p9_socket_descriptors() {
+    if (g_p9_socket_fds[0] != -1 || g_p9_socket_fds[1] != -1) {
+        //socket pair already created
+        return -1;
+    }
+    if (socketpair(AF_LOCAL, SOCK_STREAM, 0, g_p9_socket_fds) == -1) {
+        return errno;
+    }
+    return 0;
+}
+
+
+
+static void* tunnel_from_p9_sock_to_virtio() {
+    const int bufferSize = 4096;
+    char* buffer = malloc(bufferSize);
+
+    while (true) {
+        ssize_t bytes_read = recv(g_p9_socket_fds[1], buffer, bufferSize, 0);
+        if (bytes_read == 0) {
+            free(buffer);
+            return NULL;
+        }
+        if (bytes_read == -1) {
+            free(buffer);
+            return (void*)(int64_t)errno;
+        }
+        if (write(g_p9_fd, buffer, bytes_read) == -1) {
+            return (void*)(int64_t)errno;
+        }
+    }
+}
+
 static uint32_t do_mount(const char* tag, char* path) {
+    tag = tag;
     char* mount_cmd = NULL;
     if (create_dir_path(path) < 0) {
         return errno;
     }
-    int fds[2];
-    if (socketpair(AF_LOCAL, SOCK_STREAM, 0, fds) == -1) {
-        return 0;
-    }
 
-    int buf_size = asprintf(&mount_cmd, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L", fds[0], fds[0]);
+    int mount_socked_fd = g_p9_socket_fds[0];
+    int buf_size = asprintf(&mount_cmd, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L", mount_socked_fd, mount_socked_fd);
     if (buf_size < 0) {
         return errno;
     }
-    write(g_p9_fd, mount_cmd, buf_size);
-    if (mount(tag, path, "9p", 0, mount_cmd) < 0) {
+    //DEBUG CODE - TODO REMOVE
+    write(mount_socked_fd, mount_cmd, buf_size);
+    /*if (mount(tag, path, "9p", 0, mount_cmd) < 0) {
         return errno;
-    }
+    }*/
     free(mount_cmd);
     return 0;
 }
@@ -1568,6 +1605,11 @@ int main(void) {
     g_cmds_fd = CHECK(open(VPORT_CMD, O_RDWR | O_CLOEXEC));
     g_net_fd = CHECK(open(VPORT_NET, O_RDWR | O_CLOEXEC));
     g_p9_fd = CHECK(open(VPORT_P9, O_RDWR));
+    CHECK(create_p9_socket_descriptors()); //sets static variable g_p9_socket_fds
+
+	CHECK(pthread_create(&g_p9_tunnel_thread1, NULL, &tunnel_from_p9_sock_to_virtio, NULL));
+
+
 
     CHECK(mkdir("/mnt", S_IRWXU));
     CHECK(mkdir("/mnt/image", S_IRWXU));
