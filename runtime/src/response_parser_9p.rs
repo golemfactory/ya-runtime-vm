@@ -1,6 +1,5 @@
 use std::convert::TryFrom;
 use std::io;
-use std::io::stdout;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 #[derive(Debug)]
@@ -47,14 +46,14 @@ pub enum Notification9p {
 }
 
 #[derive(Debug)]
-pub struct ResponseWithId {
+pub struct ResponseCustomP9 {
     pub id: u64,
     pub resp: Response,
 }
 
 #[derive(Debug)]
-pub enum GuestAgentMessage {
-    Response(ResponseWithId),
+pub enum GuestAgentMessage9p {
+    Response(ResponseCustomP9),
     Notification(Notification9p),
 }
 
@@ -83,78 +82,16 @@ async fn recv_bytes<T: AsyncRead + Unpin>(stream: &mut T) -> io::Result<Vec<u8>>
     Ok(buf)
 }
 
-pub async fn parse_one_response<T: AsyncRead + Unpin>(
+pub async fn parse_one_response_9p<T: AsyncRead + Unpin>(
     stream: &mut T,
-) -> io::Result<GuestAgentMessage> {
+) -> io::Result<GuestAgentMessage9p> {
     let id = recv_u64(stream).await?;
 
-    //std::io::stdout().write_all(std::format!("Parsed ID: {}", id).as_bytes())?;
     let typ = recv_u8(stream).await?;
-    match typ {
-        0 => Ok(GuestAgentMessage::Response(ResponseWithId {
-            id: id,
-            resp: Response::Ok,
-        })),
-        1 => {
-            let val = recv_u64(stream).await?;
-            Ok(GuestAgentMessage::Response(ResponseWithId {
-                id: id,
-                resp: Response::OkU64(val),
-            }))
-        }
-        2 => {
-            let buf = recv_bytes(stream).await?;
-            Ok(GuestAgentMessage::Response(ResponseWithId {
-                id: id,
-                resp: Response::OkBytes(buf),
-            }))
-        }
-        3 => {
-            let code = recv_u32(stream).await?;
-            Ok(GuestAgentMessage::Response(ResponseWithId {
-                id: id,
-                resp: Response::Err(code),
-            }))
-        }
-        4 => {
-            if id == 0 {
-                let proc_id = recv_u64(stream).await?;
-                let fd = recv_u32(stream).await?;
-                Ok(GuestAgentMessage::Notification(
-                    Notification9p::OutputAvailable {
-                        id: proc_id,
-                        fd: fd,
-                    },
-                ))
-            } else {
-                Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Invalid response message ID",
-                ))
-            }
-        }
-        5 => {
-            if id == 0 {
-                let proc_id = recv_u64(stream).await?;
-                let status = recv_u8(stream).await?;
-                let type_ = ExitType::try_from(recv_u8(stream).await?)?;
-                Ok(GuestAgentMessage::Notification(Notification9p::ProcessDied {
-                    id: proc_id,
-                    reason: ExitReason {
-                        status: status,
-                        type_: type_,
-                    },
-                }))
-            } else {
-                Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Invalid response message ID",
-                ))
-            }
-        }
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Invalid response type",
-        )),
-    }
+
+    Ok(GuestAgentMessage9p::Response(ResponseCustomP9 {
+        id: 0,
+        resp: Response::Err(0),
+    }))
+
 }

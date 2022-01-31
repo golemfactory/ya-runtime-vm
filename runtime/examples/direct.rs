@@ -13,18 +13,22 @@ use tokio::{
 };
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
 use ya_runtime_vm::guest_agent_9p::{GuestAgent9p, Notification9p};
+use futures::lock::Mutex;
+use log::debug;
+use tokio::net::TcpStream;
+use tokio::time::{delay_for, Duration};
+
 
 struct Notifications {
     process_died: sync::Notify,
     output_available: sync::Notify,
 }
+
 struct Notifications9p {
     process_died: sync::Notify,
     output_available: sync::Notify,
 }
-use futures::lock::Mutex;
-use log::debug;
-use tokio::time::{delay_for, Duration};
+
 
 impl Notifications {
     fn new() -> Self {
@@ -59,16 +63,15 @@ impl Notifications9p {
     fn handle(&self, notification: Notification9p) {
         match notification {
             Notification9p::OutputAvailable { id, fd } => {
-                log::debug!("Process {} has output available on fd {}", id, fd);
-                self.output_available.notify();
+                log::debug!("9p  {} has output available on fd {}", id, fd);
             }
             Notification9p::ProcessDied { id, reason } => {
-                log::debug!("Process {} died with {:?}", id, reason);
-                self.process_died.notify();
+                log::debug!("9p  {} died with {:?}", id, reason);
             }
         }
     }
 }
+
 
 async fn run_process_with_output(
     ga: &mut GuestAgent,
@@ -208,7 +211,7 @@ async fn simple_run_command(ga_mutex: &Arc<Mutex<GuestAgent>>, bin: &str, argv: 
         .expect("Run process failed");
     //println!("Spawned process with id: {}", id);
     if let Some(notifications) = notifications {
-        //notifications.process_died.notified().await;
+        notifications.process_died.notified().await;
         //notifications.output_available.notified().await;
     }
     delay_for(Duration::from_millis(1000)).await;
@@ -235,6 +238,7 @@ async fn main() -> io::Result<()> {
 
     std::fs::create_dir_all(&inner_path).expect("Failed to create a dir inside temp dir");
     let notifications = Arc::new(Notifications::new());
+    let notifications9p = Arc::new(Notifications9p::new());
 
     log::info!("Temp path: {:?}", temp_path);
     let mount_args = [
@@ -254,8 +258,15 @@ async fn main() -> io::Result<()> {
     })
     .await?;
 
-    {
+    let ns9p = notifications9p.clone();
+    let ga_pp = GuestAgent9p::connected("127.0.0.1:9005", 10, move |n, _g| {
+        let notifications = ns9p.clone();
+        async move { notifications.clone().handle(n) }.boxed()
+    })
+    .await?;
 
+
+    {
         let mut ga = ga_mutex.lock().await;
         log::debug!("start_mount");
         for (i, (tag, _)) in mount_args.iter().enumerate() {
@@ -274,7 +285,7 @@ async fn main() -> io::Result<()> {
     delay_for(Duration::from_millis(1000)).await;
     simple_run_command(&ga_mutex, "/bin/ls", &["ls", "-la"], "/dev", Some(&notifications)).await?;
     delay_for(Duration::from_millis(1000)).await;
-    simple_run_command(&ga_mutex, "/bin/bash", &["bash", "-c",  "mkdir host_files  > /result.log 2> /error.log; echo output:; cat /result.log; echo errors:;cat /error.log"], "/mnt", Some(&notifications)).await?;
+    simple_run_command(&ga_mutex, "/bin/bash", &["bash", "-c",  "mkdir /mnt/mnt0/tag0/host_files  > /result.log 2> /error.log; echo output:; cat /result.log; echo errors:;cat /error.log"], "/mnt", Some(&notifications)).await?;
     delay_for(Duration::from_millis(1000)).await;
     //simple_run_command(&ga_mutex, "/bin/bash", &["bash", "-c",  "echo DUPA >> /dev/vport0p3"], "/dev", Some(&notifications)).await?;
 
