@@ -24,9 +24,9 @@ struct Notifications {
     output_available: sync::Notify,
 }
 
-struct Notifications9p {
-    process_died: sync::Notify,
-    output_available: sync::Notify,
+struct Servers9p {
+
+
 }
 
 
@@ -52,23 +52,16 @@ impl Notifications {
     }
 }
 
-impl Notifications9p {
+impl Servers9p {
     fn new() -> Self {
-        Notifications9p {
-            process_died: sync::Notify::new(),
-            output_available: sync::Notify::new(),
+        Servers9p{
         }
     }
 
     fn handle(&self, notification: Notification9p) {
-        match notification {
-            Notification9p::OutputAvailable { id, fd } => {
-                log::debug!("9p  {} has output available on fd {}", id, fd);
-            }
-            Notification9p::ProcessDied { id, reason } => {
-                log::debug!("9p  {} died with {:?}", id, reason);
-            }
-        }
+        log::debug!("Received 9p message, forward it to proper server with tag: {0}", notification.tag);
+
+        notification.bytes_to_9p_server;
     }
 }
 
@@ -238,11 +231,12 @@ async fn main() -> io::Result<()> {
 
     std::fs::create_dir_all(&inner_path).expect("Failed to create a dir inside temp dir");
     let notifications = Arc::new(Notifications::new());
-    let notifications9p = Arc::new(Notifications9p::new());
+    let servers9p = Arc::new(Servers9p::new());
 
     log::info!("Temp path: {:?}", temp_path);
     let mount_args = [
         ("tag0", temp_path.display()),
+        ("tag1", inner_path.display()),
     ];
     let should_spawn_vm = false;
     if should_spawn_vm {
@@ -258,7 +252,7 @@ async fn main() -> io::Result<()> {
     })
     .await?;
 
-    let ns9p = notifications9p.clone();
+    let ns9p = servers9p.clone();
     let ga_pp = GuestAgent9p::connected("127.0.0.1:9005", 10, move |n, _g| {
         let notifications = ns9p.clone();
         async move { notifications.clone().handle(n) }.boxed()

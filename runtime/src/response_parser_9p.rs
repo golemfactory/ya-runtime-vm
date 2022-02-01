@@ -40,15 +40,15 @@ pub struct ExitReason {
 }
 
 #[derive(Debug)]
-pub enum Notification9p {
-    OutputAvailable { id: u64, fd: u32 },
-    ProcessDied { id: u64, reason: ExitReason },
+pub struct Notification9p {
+    pub tag: u8,
+    pub bytes_to_9p_server: Vec<u8>,
 }
 
 #[derive(Debug)]
 pub struct ResponseCustomP9 {
-    pub id: u64,
-    pub resp: Response,
+    pub tag: u8,
+    pub resp: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -82,16 +82,36 @@ async fn recv_bytes<T: AsyncRead + Unpin>(stream: &mut T) -> io::Result<Vec<u8>>
     Ok(buf)
 }
 
+async fn recv_bytes_32<T: AsyncRead + Unpin>(stream: &mut T) -> io::Result<Vec<u8>> {
+    let len = recv_u32(stream).await?;
+    let mut buf = vec![0; len as usize];
+    stream.read_exact(buf.as_mut_slice()).await?;
+    Ok(buf)
+}
+
 pub async fn parse_one_response_9p<T: AsyncRead + Unpin>(
     stream: &mut T,
 ) -> io::Result<GuestAgentMessage9p> {
-    let id = recv_u64(stream).await?;
+    log::debug!("parse_one_response_9p...");
 
-    let typ = recv_u8(stream).await?;
+    let tag = recv_u8(stream).await?;
 
-    Ok(GuestAgentMessage9p::Response(ResponseCustomP9 {
-        id: 0,
-        resp: Response::Err(0),
+    log::debug!("Got response: tag: {}", tag);
+
+    //let bytes_num = recv_u32(stream).await?;
+
+    //log::debug!("Got response: bytes_num: {}", bytes_num);
+
+    let resp = recv_bytes_32(stream).await?;
+
+    let chars: Vec<char> = resp.iter().map(|byte| *byte as char).collect();
+    log::debug!("Got response: bytes: {:?}", chars);
+
+
+
+    Ok(GuestAgentMessage9p::Notification(Notification9p {
+        tag,
+        bytes_to_9p_server: resp,
     }))
 
 }

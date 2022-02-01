@@ -82,9 +82,12 @@ extern char** environ;
 static int g_cmds_fd = -1;
 static int g_net_fd = -1;
 static int g_p9_fd = -1;
-static int g_p9_socket_fds[2] = {-1, -1};
-static pthread_t g_p9_tunnel_thread1;
-static pthread_t g_p9_tunnel_thread2;
+#define MAX_P9_VOLUMES (100)
+static int g_p9_current_channel = 0;
+static int g_p9_socket_fds[MAX_P9_VOLUMES][2];
+static pthread_t g_p9_tunnel_thread_sender[MAX_P9_VOLUMES];
+static pthread_mutex_t g_p9_tunnel_mutex_sender;
+static pthread_t g_p9_tunnel_thread_receiver;
 
 
 static int g_sig_fd = -1;
@@ -996,14 +999,17 @@ out:
     }
 }
 
-static int create_p9_socket_descriptors() {
-    if (g_p9_socket_fds[0] != -1 || g_p9_socket_fds[1] != -1) {
-        //socket pair already created
+static int initialize_p9_socket_descriptors() {
+    for (int i = 0; i < MAX_P9_VOLUMES; i++) {
+        g_p9_socket_fds[i][0] = -1;
+        g_p9_socket_fds[i][1] = -1;
+    }
+
+    if (pthread_mutex_init(&g_p9_tunnel_mutex_sender, NULL) == -1) {
+        printf("pthread_mutex_init error");
         return -1;
     }
-    if (socketpair(AF_LOCAL, SOCK_STREAM, 0, g_p9_socket_fds) == -1) {
-        return errno;
-    }
+
     return 0;
 }
 
@@ -1015,6 +1021,9 @@ static void* tunnel_from_p9_virtio_to_sock() {
 
     while (true) {
         ssize_t bytes_read = read(g_p9_fd, buffer, bufferSize);
+        uint8_t channel = 0;
+
+
         printf("RECEIVE MESSAGE %ld", bytes_read);
         if (bytes_read == 0) {
             free(buffer);
@@ -1024,20 +1033,34 @@ static void* tunnel_from_p9_virtio_to_sock() {
             free(buffer);
             return (void*)(int64_t)errno;
         }
-        if (write(g_p9_socket_fds[1], buffer, bytes_read) == -1) {
+        if (write(g_p9_socket_fds[channel][1], buffer, bytes_read) == -1) {
             return (void*)(int64_t)errno;
         }
+
+
     }
 }
 
 
-static void* tunnel_from_p9_sock_to_virtio() {
+static void* tunnel_from_p9_sock_to_virtio(void *data) {
+    intptr_t channel_wide_int = (intptr_t)data;
+    uint8_t channel = channel_wide_int;
+    assert(channel_wide_int < MAX_P9_VOLUMES);
+    assert(channel == channel_wide_int);
+
+    printf("P9 sender thread started channel: %d\n", channel);
+
     const int bufferSize = 4096;
     char* buffer = malloc(bufferSize);
 
     while (true) {
-        ssize_t bytes_read = recv(g_p9_socket_fds[1], buffer, bufferSize, 0);
-        printf("SEND MESSAGE %ld", bytes_read);
+        ssize_t bytes_read = recv(g_p9_socket_fds[channel][1], buffer, bufferSize, 0);
+
+        if (pthread_mutex_lock(&g_p9_tunnel_mutex_sender)) {
+            printf("pthread_mutex_lock failed");
+            return (void*)(int64_t)errno;
+        }
+        printf("send message to channel %d, length: %ld", channel, bytes_read);
 
         if (bytes_read == 0) {
             free(buffer);
@@ -1047,20 +1070,50 @@ static void* tunnel_from_p9_sock_to_virtio() {
             free(buffer);
             return (void*)(int64_t)errno;
         }
+        if (write(g_p9_fd, &channel, 1) == -1) {
+            return (void*)(int64_t)errno;
+        }
+        int bytes_read_to_send = (int)bytes_read;
+        assert(sizeof(bytes_read_to_send) == 4);
+        if (write(g_p9_fd, &bytes_read_to_send, sizeof(bytes_read_to_send)) == -1) {
+            return (void*)(int64_t)errno;
+        }
         if (write(g_p9_fd, buffer, bytes_read) == -1) {
+            return (void*)(int64_t)errno;
+        }
+
+        if (pthread_mutex_unlock(&g_p9_tunnel_mutex_sender)) {
+            printf("pthread_mutex_unlock failed");
             return (void*)(int64_t)errno;
         }
     }
 }
 
-static uint32_t do_mount(const char* tag, char* path) {
+static uint32_t do_mount(const char* tag, uint8_t channel, char* path) {
+    if (channel >= MAX_P9_VOLUMES) {
+        printf("ERROR: channel >= MAX_P9_VOLUMES");
+        return -1;
+    }
+    if (g_p9_socket_fds[channel][0] != -1 || g_p9_socket_fds[channel][1] != -1) {
+        printf("Looks like do mount called twice with the same channel");
+        return -1;
+    }
+
+    if (socketpair(AF_LOCAL, SOCK_STREAM, 0, g_p9_socket_fds[channel]) == -1) {
+        return errno;
+    }
+
+    //for every socket pair we need one reader
+    uintptr_t channel_wide_int = channel;
+    CHECK(pthread_create(&g_p9_tunnel_thread_sender[channel], NULL, &tunnel_from_p9_sock_to_virtio, (void*) channel_wide_int));
+
     tag = tag;
     char* mount_cmd = NULL;
     if (create_dir_path(path) < 0) {
         return errno;
     }
 
-    int mount_socked_fd = g_p9_socket_fds[0];
+    int mount_socked_fd = g_p9_socket_fds[channel][0];
     int buf_size = asprintf(&mount_cmd, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L", mount_socked_fd, mount_socked_fd);
     if (buf_size < 0) {
         free(mount_cmd);
@@ -1068,12 +1121,17 @@ static uint32_t do_mount(const char* tag, char* path) {
     }
 
     //DEBUG CODE - TODO REMOVE
-    //write(mount_socked_fd, mount_cmd, buf_size);
+    for (int i = 0; i < 10; i++) {
+        write(mount_socked_fd, mount_cmd, buf_size);
+        usleep(100 * 1000);
+    }
+
     printf("Starting mount: ");
-    if (mount(tag, path, "9p", 0, mount_cmd) < 0) {
+
+    /*if (mount(tag, path, "9p", 0, mount_cmd) < 0) {
         printf("Mount finished with error: %d", errno);
         return errno;
-    }
+    }*/
     printf("Mount finished");
     free(mount_cmd);
     return 0;
@@ -1112,7 +1170,8 @@ static void handle_mount(msg_id_t msg_id) {
         goto out;
     }
 
-    ret = do_mount(tag, path);
+    ret = do_mount(tag, g_p9_current_channel, path);
+    g_p9_current_channel += 1;
 
 out:
     free(path);
@@ -1637,10 +1696,8 @@ int main(void) {
     g_cmds_fd = CHECK(open(VPORT_CMD, O_RDWR | O_CLOEXEC));
     g_net_fd = CHECK(open(VPORT_NET, O_RDWR | O_CLOEXEC));
     g_p9_fd = CHECK(open(VPORT_P9, O_RDWR));
-    CHECK(create_p9_socket_descriptors()); //sets static variable g_p9_socket_fds
-
-	CHECK(pthread_create(&g_p9_tunnel_thread1, NULL, &tunnel_from_p9_sock_to_virtio, NULL));
-	CHECK(pthread_create(&g_p9_tunnel_thread2, NULL, &tunnel_from_p9_virtio_to_sock, NULL));
+    CHECK(initialize_p9_socket_descriptors()); //sets static variable g_p9_socket_fds
+	CHECK(pthread_create(&g_p9_tunnel_thread_receiver, NULL, &tunnel_from_p9_virtio_to_sock, NULL));
 
     CHECK(mkdir("/mnt", S_IRWXU));
     CHECK(mkdir("/mnt/image", S_IRWXU));

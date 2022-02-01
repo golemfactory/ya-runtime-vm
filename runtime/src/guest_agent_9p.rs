@@ -61,7 +61,9 @@ fn reader<'f, F>(
                         let _ = tx.send(notification).await;
                     }
                     GuestAgentMessage9p::Response(resp) => {
-                        responses.send(resp).await.expect("failed to send response");
+                        //forward message to proper P9 server
+
+                        //responses.send(resp).await.expect("failed to send response");
                     }
                 },
                 Err(err) => return err,
@@ -80,10 +82,12 @@ impl GuestAgent9p {
     where
         F: FnMut(Notification9p, Arc<Mutex<GuestAgent9p>>) -> BoxFuture<'static, ()> + Send + 'static,
     {
+        log::debug!("Connecting GuestAgent9p...");
         let mut timeout_remaining = timeout;
         loop {
             match PlatformStream::connect(path).await {
                 Ok(s) => {
+                    log::debug!("TcpStream object received: {:?}", s);
                     let (stream_read, stream_write) = split(s);
                     let (response_send, response_receive) = mpsc::channel(10);
                     let ga = Arc::new(Mutex::new(GuestAgent9p {
