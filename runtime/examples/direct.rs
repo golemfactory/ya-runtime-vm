@@ -313,7 +313,7 @@ async fn main() -> io::Result<()> {
         }
     }
     log::debug!("end mnt loop");
-    delay_for(Duration::from_millis(100000)).await;
+    delay_for(Duration::from_millis(1000)).await;
     log::debug!("end delay");
 
     let no_redir = [None, None, None];

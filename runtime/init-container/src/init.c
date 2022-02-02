@@ -1150,16 +1150,16 @@ static uint32_t do_mount(const char* tag, uint8_t channel, char* path) {
     }
 
     //DEBUG CODE - TODO REMOVE
-    for (int i = 0; i < 10; i++) {
+    /*for (int i = 0; i < 10; i++) {
         write(mount_socked_fd, mount_cmd, buf_size);
         usleep(100 * 1000);
-    }
+    }*/
 
     printf("Starting mount: ");
-    /*if (mount(tag, path, "9p", 0, mount_cmd) < 0) {
+    if (mount(tag, path, "9p", 0, mount_cmd) < 0) {
         printf("Mount finished with error: %d", errno);
         return errno;
-    }*/
+    }
     printf("Mount finished");
     free(mount_cmd);
     return 0;
