@@ -83,6 +83,7 @@ static int g_cmds_fd = -1;
 static int g_net_fd = -1;
 static int g_p9_fd = -1;
 #define MAX_P9_VOLUMES (100)
+#define MAX_PACKET_SIZE (16384)
 static int g_p9_current_channel = 0;
 static int g_p9_socket_fds[MAX_P9_VOLUMES][2];
 static pthread_t g_p9_tunnel_thread_sender[MAX_P9_VOLUMES];
@@ -1016,29 +1017,57 @@ static int initialize_p9_socket_descriptors() {
 
 
 static void* tunnel_from_p9_virtio_to_sock() {
-    const int bufferSize = 4096;
+    const int bufferSize = MAX_PACKET_SIZE;
     char* buffer = malloc(bufferSize);
 
     while (true) {
-        ssize_t bytes_read = read(g_p9_fd, buffer, bufferSize);
-        uint8_t channel = 0;
+        ssize_t bytes_read = 0;
 
+        uint8_t channel = 0;
+        bytes_read = read(g_p9_fd, &channel, sizeof(channel));
+        if (bytes_read == 0) {
+            goto success;
+        }
+
+        if (bytes_read != sizeof(channel)) {
+            printf("Error during read from g_p9_fd");
+            goto error;
+        }
+
+        uint16_t packet_size = 0;
+        bytes_read = read(g_p9_fd, &packet_size, sizeof(packet_size));
+        if (bytes_read != sizeof(packet_size)) {
+            printf("Error during read from g_p9_fd");
+            goto error;
+        }
+
+        if (packet_size > MAX_PACKET_SIZE) {
+            printf("Maximum packet size exceeded");
+            goto error;
+        }
+
+        bytes_read = read(g_p9_fd, buffer, packet_size);
+        if (bytes_read != packet_size) {
+            printf("Error during read from g_p9_fd");
+            goto error;
+        }
 
         printf("RECEIVE MESSAGE %ld", bytes_read);
-        if (bytes_read == 0) {
-            free(buffer);
-            return NULL;
-        }
         if (bytes_read == -1) {
-            free(buffer);
-            return (void*)(int64_t)errno;
+            printf("Error during read from g_p9_fd");
+            goto error;
         }
         if (write(g_p9_socket_fds[channel][1], buffer, bytes_read) == -1) {
-            return (void*)(int64_t)errno;
+            printf("Error writing to g_p9_socket_fds");
+            goto error;
         }
-
-
     }
+success:
+    free(buffer);
+    return (void*)0;
+error:
+    free(buffer);
+    return (void*)-1;
 }
 
 
@@ -1060,7 +1089,7 @@ static void* tunnel_from_p9_sock_to_virtio(void *data) {
             printf("pthread_mutex_lock failed");
             return (void*)(int64_t)errno;
         }
-        printf("send message to channel %d, length: %ld", channel, bytes_read);
+        printf("send message to channel %d, length: %ld\n", channel, bytes_read);
 
         if (bytes_read == 0) {
             free(buffer);
@@ -1127,7 +1156,6 @@ static uint32_t do_mount(const char* tag, uint8_t channel, char* path) {
     }
 
     printf("Starting mount: ");
-
     /*if (mount(tag, path, "9p", 0, mount_cmd) < 0) {
         printf("Mount finished with error: %d", errno);
         return errno;
