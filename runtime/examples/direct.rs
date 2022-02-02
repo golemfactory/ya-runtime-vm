@@ -17,6 +17,7 @@ use futures::lock::Mutex;
 use log::debug;
 use tokio::net::TcpStream;
 use tokio::time::{delay_for, Duration};
+use ya_runtime_vm::raw_socket_comm::RawSocketCommunication;
 
 
 struct Notifications {
@@ -53,15 +54,10 @@ impl Notifications {
 }
 
 impl Servers9p {
-    fn new() -> Self {
-        Servers9p{
-        }
-    }
+
 
     fn handle(&self, notification: Notification9p) {
         log::debug!("Received 9p message, forward it to proper server with tag: {0}", notification.tag);
-
-        notification.bytes_to_9p_server;
     }
 }
 
@@ -118,6 +114,24 @@ fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
         .unwrap()
         .display()
         .to_string()
+}
+fn spawn_9p_server(mount_point : String, port: i32) -> Child {
+    let root_dir = get_root_dir();
+    let project_dir = get_project_dir();
+    let runtime_dir = project_dir.join("poc").join("runtime");
+    let init_dir = project_dir.join("init-container");
+
+    let mut cmd = Command::new("C:/scx1332/FileServer9p/rust-9p/example/unpfs/target/debug/unpfs.exe");
+
+    cmd.current_dir(runtime_dir).args(&[
+        "--mount-point",
+        mount_point.as_str(),
+        "--network-address",
+        std::format!("127.0.0.1:{}", port).as_str(),
+        "--network-protocol",
+        "tcp"]);
+    cmd.stdin(Stdio::null());
+    cmd.spawn().expect("failed to spawn p9 server")
 }
 
 fn spawn_vm<'a, P: AsRef<Path>>(temp_path: P, mount_args: &'a [(&'a str, impl ToString)]) -> Child {
@@ -231,7 +245,6 @@ async fn main() -> io::Result<()> {
 
     std::fs::create_dir_all(&inner_path).expect("Failed to create a dir inside temp dir");
     let notifications = Arc::new(Notifications::new());
-    let servers9p = Arc::new(Servers9p::new());
 
     log::info!("Temp path: {:?}", temp_path);
     let mount_args = [
@@ -245,6 +258,10 @@ async fn main() -> io::Result<()> {
         let _child = spawn_vm(&temp_path, &mount_args);
     }
 
+
+
+
+
     let ns = notifications.clone();
     let ga_mutex = GuestAgent::connected("127.0.0.1:9003", 10, move |n, _g| {
         let notifications = ns.clone();
@@ -252,14 +269,40 @@ async fn main() -> io::Result<()> {
     })
     .await?;
 
+
+
+    log::debug!("Spawn p9 servers...");
+    {
+        for (i, (tag, _)) in mount_args.iter().enumerate() {
+            let _ = spawn_9p_server(std::format!("C:/golem/ya-runtime-vm/runtime/temp{}", i), 9101 + i as i32);
+        }
+    }
+    delay_for(Duration::from_millis(1000)).await;
+
+    log::debug!("Connect to p9 servers...");
+
+    let mut vmp9stream: std::net::TcpStream = std::net::TcpStream::connect(std::format!("127.0.0.1:{}", 9005))?;
+
+    let mut p9streams: Vec<std::net::TcpStream> = vec![];
+    {
+        for (i, (tag, _)) in mount_args.iter().enumerate() {
+            let mut stream = std::net::TcpStream::connect(std::format!("127.0.0.1:{}", 9101 + i as i32))?;
+            p9streams.push(stream);
+        }
+    }
+
+    let mut r = RawSocketCommunication::new();
+    r.start_raw_comm(vmp9stream, p9streams);
+
+    /*
+    let servers9p = Arc::new(Servers9p{writeHalfs: p9streams});
+
     let ns9p = servers9p.clone();
     let ga_pp = GuestAgent9p::connected("127.0.0.1:9005", 10, move |n, _g| {
         let notifications = ns9p.clone();
         async move { notifications.clone().handle(n) }.boxed()
-    })
-    .await?;
-
-
+    }).await?;
+*/
     {
         let mut ga = ga_mutex.lock().await;
         log::debug!("start_mount");
@@ -270,7 +313,7 @@ async fn main() -> io::Result<()> {
         }
     }
     log::debug!("end mnt loop");
-    delay_for(Duration::from_millis(1000)).await;
+    delay_for(Duration::from_millis(100000)).await;
     log::debug!("end delay");
 
     let no_redir = [None, None, None];
@@ -431,5 +474,6 @@ async fn main() -> io::Result<()> {
         //let e = child.await.expect("failed to wait on child");
         //println!("{:?}", e);
     }
+    r.finish_raw_comm();
     Ok(())
 }

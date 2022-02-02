@@ -1079,7 +1079,7 @@ static void* tunnel_from_p9_sock_to_virtio(void *data) {
 
     printf("P9 sender thread started channel: %d\n", channel);
 
-    const int bufferSize = 4096;
+    const int bufferSize = MAX_PACKET_SIZE;
     char* buffer = malloc(bufferSize);
 
     while (true) {
@@ -1102,8 +1102,8 @@ static void* tunnel_from_p9_sock_to_virtio(void *data) {
         if (write(g_p9_fd, &channel, 1) == -1) {
             return (void*)(int64_t)errno;
         }
-        int bytes_read_to_send = (int)bytes_read;
-        assert(sizeof(bytes_read_to_send) == 4);
+        uint16_t bytes_read_to_send = (uint16_t)bytes_read;
+        assert(sizeof(bytes_read_to_send) == 2);
         if (write(g_p9_fd, &bytes_read_to_send, sizeof(bytes_read_to_send)) == -1) {
             return (void*)(int64_t)errno;
         }
