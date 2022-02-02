@@ -116,6 +116,7 @@ impl RawSocketCommunication {
                                 break;
                             }
                         };
+                        TODO add mutex here
 
                         let channel_u8 = channel as u8;
                         let mut channel_bytes = channel_u8.to_le_bytes();
