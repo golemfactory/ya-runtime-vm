@@ -1,10 +1,11 @@
 use std::cell::RefCell;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::cell::UnsafeCell;
 use std::io::prelude::*;
 use std::net::{Shutdown, TcpStream};
 use std::convert::TryInto;
+
 
 pub struct RawSocketCommunication {
     vm_stream_thread : Option<std::thread::JoinHandle<()>>,
@@ -16,7 +17,8 @@ pub struct RawSocketCommunication {
 pub struct SharedUnsafeData {
     tri: i32,
     vm_stream: std::net::TcpStream,
-    p9_streams: Vec<std::net::TcpStream>
+    p9_streams: Vec<std::net::TcpStream>,
+    vm_stream_write_mutex: Mutex::<i32>,
 }
 
 #[derive(Copy, Clone)]
@@ -26,6 +28,8 @@ pub struct SharedUnsafeDataPointer {
 unsafe impl Send for SharedUnsafeDataPointer {}
 
 const MAX_PACKET_SIZE : usize = 16384;
+
+const TEST_CONCURRENT_ACCESS : bool = true;
 
 
 impl RawSocketCommunication {
@@ -37,7 +41,7 @@ impl RawSocketCommunication {
 
         let number_of_p9_threads = p9_streams.len();
 
-        self.shared_unsafe_data = Some(UnsafeCell::new(SharedUnsafeData{tri: 1, vm_stream, p9_streams }));
+        self.shared_unsafe_data = Some(UnsafeCell::new(SharedUnsafeData{tri: 1, vm_stream, p9_streams, vm_stream_write_mutex: Mutex::new(0) }));
 
 
         let unsafe_data = SharedUnsafeDataPointer{obj_ptr: self.shared_unsafe_data.as_ref().unwrap().get()};
@@ -88,6 +92,7 @@ impl RawSocketCommunication {
 
 
 
+
                     /*if read_size_packet != packet_size {
                         log::error!("read_size_packet != packet_size");
                         break;
@@ -116,17 +121,39 @@ impl RawSocketCommunication {
                                 break;
                             }
                         };
-                        TODO add mutex here
+                        {
+                            //critical section for writing to common socket
+                            let _write_guard = (*unsafe_data.obj_ptr).vm_stream_write_mutex.lock().unwrap();
 
-                        let channel_u8 = channel as u8;
-                        let mut channel_bytes = channel_u8.to_le_bytes();
-                        (*unsafe_data.obj_ptr).vm_stream.write(&mut channel_bytes);
+                            log::debug!("Sending message back: channel:{}, packet_size:{}", channel, bytes_read);
 
-                        let bytes_read_u16 = bytes_read as u16;
-                        let mut packet_size_bytes = bytes_read_u16.to_le_bytes();
+                            let channel_u8 = channel as u8;
+                            let mut channel_bytes = channel_u8.to_le_bytes();
+                            (*unsafe_data.obj_ptr).vm_stream.write(&mut channel_bytes);
 
-                        (*unsafe_data.obj_ptr).vm_stream.write(&mut packet_size_bytes);
-                        (*unsafe_data.obj_ptr).vm_stream.write(&mut message_buffer[0..bytes_read]);
+                            if TEST_CONCURRENT_ACCESS {
+                                std::thread::sleep(Duration::from_millis(50));
+                            }
+
+                            let bytes_read_u16 = bytes_read as u16;
+                            let mut packet_size_bytes = bytes_read_u16.to_le_bytes();
+
+                            (*unsafe_data.obj_ptr).vm_stream.write(&mut packet_size_bytes);
+
+                            if TEST_CONCURRENT_ACCESS {
+                                std::thread::sleep(Duration::from_millis(50));
+                                let split_send = bytes_read / 2;
+                                (*unsafe_data.obj_ptr).vm_stream.write(&mut message_buffer[0..split_send]);
+                                std::thread::sleep(Duration::from_millis(50));
+                                (*unsafe_data.obj_ptr).vm_stream.write(&mut message_buffer[split_send..bytes_read]);
+                            }
+                            else {
+                                (*unsafe_data.obj_ptr).vm_stream.write(&mut message_buffer[0..bytes_read]);
+                            }
+
+
+                            drop(_write_guard);
+                        }
                     }
                 }
             }));

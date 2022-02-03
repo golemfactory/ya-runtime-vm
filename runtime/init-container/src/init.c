@@ -1014,7 +1014,26 @@ static int initialize_p9_socket_descriptors() {
     return 0;
 }
 
-
+int read_exact(int fd, void* buf, size_t size) {
+    int bytes_read = 0;
+    while (size) {
+        ssize_t ret = read(fd, buf, size);
+        if (ret == 0) {
+            return 0;
+        }
+        if (ret < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            /* `errno` should be set. */
+            return ret;
+        }
+        bytes_read += ret;
+        buf = (char*)buf + ret;
+        size -= ret;
+    }
+    return bytes_read;
+}
 
 static void* tunnel_from_p9_virtio_to_sock() {
     const int bufferSize = MAX_PACKET_SIZE;
@@ -1024,37 +1043,38 @@ static void* tunnel_from_p9_virtio_to_sock() {
         ssize_t bytes_read = 0;
 
         uint8_t channel = 0;
-        bytes_read = read(g_p9_fd, &channel, sizeof(channel));
+        bytes_read = read_exact(g_p9_fd, &channel, sizeof(channel));
         if (bytes_read == 0) {
             goto success;
         }
+        printf("Start receive message channel: %d", channel);
 
         if (bytes_read != sizeof(channel)) {
-            printf("Error during read from g_p9_fd");
+            printf("Error during read from g_p9_fd: bytes_read != sizeof(channel)\n");
             goto error;
         }
 
         uint16_t packet_size = 0;
-        bytes_read = read(g_p9_fd, &packet_size, sizeof(packet_size));
+        bytes_read = read_exact(g_p9_fd, &packet_size, sizeof(packet_size));
         if (bytes_read != sizeof(packet_size)) {
-            printf("Error during read from g_p9_fd");
+            printf("Error during read from g_p9_fd: bytes_read != sizeof(packet_size)\n");
             goto error;
         }
 
         if (packet_size > MAX_PACKET_SIZE) {
-            printf("Maximum packet size exceeded");
+            printf("Error: Maximum packet size exceeded: packet_size > MAX_PACKET_SIZE\n");
             goto error;
         }
 
-        bytes_read = read(g_p9_fd, buffer, packet_size);
+        bytes_read = read_exact(g_p9_fd, buffer, packet_size);
         if (bytes_read != packet_size) {
-            printf("Error during read from g_p9_fd");
+            printf("Error during read from g_p9_fd: bytes_read != packet_size\n");
             goto error;
         }
 
         printf("RECEIVE MESSAGE %ld", bytes_read);
         if (bytes_read == -1) {
-            printf("Error during read from g_p9_fd");
+            printf("Error during read from g_p9_fd: bytes_read == -1\n");
             goto error;
         }
         if (write(g_p9_socket_fds[channel][1], buffer, bytes_read) == -1) {
