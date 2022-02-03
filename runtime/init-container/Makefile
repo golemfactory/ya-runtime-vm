@@ -6,6 +6,8 @@ ifneq ($(DEBUG), "")
 CFLAGS += -DNDEBUG
 endif
 
+CFLAGS += -DBUILD_FOR_WIN_P9=1
+
 ifneq ($(findstring $(MAKEFLAGS),s),s)
 ifndef V
 	QUIET_CC = @echo '    '   CC $@;
@@ -25,7 +27,7 @@ SRC_DIR ?= src
 TEST_DIR ?= tests
 LIBURING_DIR ?= external/liburing
 
-OBJECTS = $(addprefix $(SRC_DIR)/,init.o communication.o process_bookkeeping.o cyclic_buffer.o)
+OBJECTS = $(addprefix $(SRC_DIR)/,init.o communication.o communication_win_p9.o process_bookkeeping.o cyclic_buffer.o)
 OBJECTS_EXT = $(addprefix $(SRC_DIR)/,network.o forward.o)
 
 # Below are the steps performed by this Makefile:
