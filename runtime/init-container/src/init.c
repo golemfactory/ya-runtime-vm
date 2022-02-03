@@ -2,7 +2,6 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -16,7 +15,6 @@
 #include <sys/mount.h>
 #include <sys/reboot.h>
 #include <sys/signalfd.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/sysmacros.h>
@@ -49,7 +47,9 @@
 
 #define VPORT_CMD "/dev/vport0p1"
 #define VPORT_NET "/dev/vport0p2"
+#if BUILD_FOR_WIN_P9
 #define VPORT_P9 "/dev/vport0p3"
+#endif
 
 #define MODE_RW_UGO (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)
 #define OUTPUT_PATH_PREFIX "/var/tmp/guest_agent_private/fds"
@@ -83,8 +83,6 @@ extern char** environ;
 
 static int g_cmds_fd = -1;
 static int g_net_fd = -1;
-
-
 static int g_sig_fd = -1;
 static int g_epoll_fd = -1;
 static int g_tap_fd = -1;
@@ -99,7 +97,9 @@ static noreturn void die(void) {
     (void)close(g_epoll_fd);
     (void)close(g_sig_fd);
     (void)close(g_net_fd);
+#if BUILD_FOR_WIN_P9
     (void)close(g_p9_fd);
+#endif
     (void)close(g_cmds_fd);
 
     while (1) {
@@ -394,16 +394,8 @@ static void setup_network(void) {
     CHECK(fwd_start(g_net_fd, g_tap_fd, MTU, true, false));
 }
 
-static void setup_p9(void) {
-
-}
-
 static void stop_network(void) {
     fwd_stop();
-}
-
-static void stop_p9(void) {
-
 }
 
 static void send_response_hdr(msg_id_t msg_id, enum GUEST_MSG_TYPE type) {
@@ -999,17 +991,14 @@ out:
     }
 }
 
-
-
-
 #if !BUILD_FOR_WIN_P9
-static uint32_t do_mount(const char* tag, uint8_t channel, char* path) {
-
-    //TODO - original implementation
-    tag = tag;
-    channel = channel;
-    path = path;
-
+static uint32_t do_mount(const char* tag, char* path) {
+    if (create_dir_path(path) < 0) {
+        return errno;
+    }
+    if (mount(tag, path, "9p", 0, "trans=virtio,version=9p2000.L") < 0) {
+        return errno;
+    }
     return 0;
 }
 #endif
@@ -1048,19 +1037,18 @@ static void handle_mount(msg_id_t msg_id) {
     }
 #if BUILD_FOR_WIN_P9
     ret = do_mount_win_p9(tag, g_p9_current_channel, path);
+    g_p9_current_channel += 1;	
 #else
-    ret = do_mount(tag, g_p9_current_channel, path);
+    ret = do_mount(tag, path);
 #endif
-    g_p9_current_channel += 1;
+
 
 out:
     free(path);
     free(tag);
     if (ret) {
-        printf("returning response ERROR");
         send_response_err(msg_id, ret);
     } else {
-        printf("returning response SUCCESS");
         send_response_ok(msg_id);
     }
 }
@@ -1575,8 +1563,10 @@ int main(void) {
 
     g_cmds_fd = CHECK(open(VPORT_CMD, O_RDWR | O_CLOEXEC));
     g_net_fd = CHECK(open(VPORT_NET, O_RDWR | O_CLOEXEC));
+#if BUILD_FOR_WIN_P9
     g_p9_fd = CHECK(open(VPORT_P9, O_RDWR));
     CHECK(initialize_p9_socket_descriptors()); //sets static variable g_p9_socket_fds
+#endif	
 
     CHECK(mkdir("/mnt", S_IRWXU));
     CHECK(mkdir("/mnt/image", S_IRWXU));
@@ -1640,8 +1630,6 @@ int main(void) {
     }
 
     setup_network();
-    setup_p9();
-
     setup_agent_directories();
 
     block_signals();
@@ -1649,5 +1637,4 @@ int main(void) {
 
     main_loop();
     stop_network();
-    stop_p9();
 }

@@ -1,4 +1,7 @@
 #define _GNU_SOURCE
+
+#if BUILD_FOR_WIN_P9
+
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -36,7 +39,7 @@ pthread_t g_p9_tunnel_thread_receiver;
 //HACK - move it somewhere else
 int create_dir_path(char* path);
 
-int read_exact(int fd, void* buf, size_t size) {
+static int read_exact(int fd, void* buf, size_t size) {
     int bytes_read = 0;
     while (size) {
         ssize_t ret = read(fd, buf, size);
@@ -56,9 +59,6 @@ int read_exact(int fd, void* buf, size_t size) {
     }
     return bytes_read;
 }
-
-
-
 
 static void* tunnel_from_p9_virtio_to_sock() {
     const int bufferSize = MAX_PACKET_SIZE;
@@ -96,13 +96,15 @@ static void* tunnel_from_p9_virtio_to_sock() {
             goto error;
         }
 
+#if WIN_P9_EXTRA_DEBUG_INFO
         printf("RECEIVE MESSAGE %ld\n", bytes_read);
+#endif
         if (bytes_read == -1) {
             printf("Error during read from g_p9_fd: bytes_read == -1\n");
             goto error;
         }
         if (write(g_p9_socket_fds[channel][1], buffer, bytes_read) == -1) {
-            printf("Error writing to g_p9_socket_fds");
+            printf("Error writing to g_p9_socket_fds\n");
             goto error;
         }
     }
@@ -121,7 +123,9 @@ static void* tunnel_from_p9_sock_to_virtio(void *data) {
     assert(channel_wide_int < MAX_P9_VOLUMES);
     assert(channel == channel_wide_int);
 
+#if WIN_P9_EXTRA_DEBUG_INFO
     printf("P9 sender thread started channel: %d\n", channel);
+#endif
 
     const int bufferSize = MAX_PACKET_SIZE;
     char* buffer = malloc(bufferSize);
@@ -130,10 +134,12 @@ static void* tunnel_from_p9_sock_to_virtio(void *data) {
         ssize_t bytes_read = recv(g_p9_socket_fds[channel][1], buffer, bufferSize, 0);
 
         if (pthread_mutex_lock(&g_p9_tunnel_mutex_sender)) {
-            printf("pthread_mutex_lock failed");
+            printf("pthread_mutex_lock failed\n");
             return (void*)(int64_t)errno;
         }
+#if WIN_P9_EXTRA_DEBUG_INFO
         printf("send message to channel %d, length: %ld\n", channel, bytes_read);
+#endif
 
         if (bytes_read == 0) {
             free(buffer);
@@ -156,7 +162,7 @@ static void* tunnel_from_p9_sock_to_virtio(void *data) {
         }
 
         if (pthread_mutex_unlock(&g_p9_tunnel_mutex_sender)) {
-            printf("pthread_mutex_unlock failed");
+            printf("pthread_mutex_unlock failed\n");
             return (void*)(int64_t)errno;
         }
     }
@@ -170,11 +176,11 @@ int initialize_p9_socket_descriptors() {
     }
 
     if (pthread_mutex_init(&g_p9_tunnel_mutex_sender, NULL) == -1) {
-        printf("Error: pthread_mutex_init error");
+        printf("Error: pthread_mutex_init error\n");
         return -1;
     }
 	if (pthread_create(&g_p9_tunnel_thread_receiver, NULL, &tunnel_from_p9_virtio_to_sock, NULL) == -1) {
-        printf("Error: pthread_create failed pthread_create(&g_p9_tunnel_thread_receiver...");
+        printf("Error: pthread_create failed pthread_create(&g_p9_tunnel_thread_receiver...\n");
         return -1;
 	}
 
@@ -183,11 +189,11 @@ int initialize_p9_socket_descriptors() {
 
 uint32_t do_mount_win_p9(const char* tag, uint8_t channel, char* path) {
     if (channel >= MAX_P9_VOLUMES) {
-        printf("ERROR: channel >= MAX_P9_VOLUMES");
+        printf("ERROR: channel >= MAX_P9_VOLUMES\n");
         return -1;
     }
     if (g_p9_socket_fds[channel][0] != -1 || g_p9_socket_fds[channel][1] != -1) {
-        printf("Error: Looks like do mount called twice with the same channel");
+        printf("Error: Looks like do mount called twice with the same channel\n");
         return -1;
     }
 
@@ -198,7 +204,7 @@ uint32_t do_mount_win_p9(const char* tag, uint8_t channel, char* path) {
     //for every socket pair we need one reader
     uintptr_t channel_wide_int = channel;
     if (pthread_create(&g_p9_tunnel_thread_sender[channel], NULL, &tunnel_from_p9_sock_to_virtio, (void*) channel_wide_int) == -1) {
-        printf("Error: pthread_create failed");
+        printf("Error: pthread_create failed\n");
         return -1;
     }
 
@@ -221,12 +227,14 @@ uint32_t do_mount_win_p9(const char* tag, uint8_t channel, char* path) {
         usleep(100 * 1000);
     }*/
 
-    printf("Starting mount: ");
+    printf("Starting mount...\n");
     if (mount(tag, path, "9p", 0, mount_cmd) < 0) {
-        printf("Mount finished with error: %d", errno);
+        printf("Mount finished with error: %d\n", errno);
         return errno;
     }
-    printf("Mount finished");
+    printf("Mount finished\n");
     free(mount_cmd);
     return 0;
 }
+
+#endif //BUILD_FOR_WIN_P9
