@@ -1412,6 +1412,7 @@ static void handle_message(void) {
         case MSG_RUN_PROCESS:
             fprintf(stderr, "MSG_RUN_PROCESS\n");
             handle_run_process(msg_hdr.msg_id);
+            fprintf(stderr, "MSG_PROCESS_FINISHED\n");
             break;
         case MSG_KILL_PROCESS:
             fprintf(stderr, "MSG_KILL_PROCESS\n");
@@ -1477,6 +1478,7 @@ static noreturn void main_loop(void) {
     CHECK(epoll_ctl(g_epoll_fd, EPOLL_CTL_ADD, g_sig_fd, &event));
 
     while (1) {
+        fprintf(stderr, "epoll_wait started...\n");
         if (epoll_wait(g_epoll_fd, &event, 1, -1) < 0) {
             if (errno == EINTR || errno == EAGAIN) {
                 continue;
@@ -1484,6 +1486,7 @@ static noreturn void main_loop(void) {
             fprintf(stderr, "epoll failed: %m\n");
             die();
         }
+        fprintf(stderr, "epoll_wait ended...\n");
 
         if (event.events & EPOLLNVAL) {
             fprintf(stderr, "epoll error event: 0x%04hx\n", event.events);
