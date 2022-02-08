@@ -3,14 +3,22 @@ use futures::lock::Mutex;
 use futures::TryFutureExt;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::time::Duration;
+use anyhow::anyhow;
 use structopt::StructOpt;
 use tokio::{
     fs,
     io::{self, AsyncBufReadExt, AsyncWriteExt},
-    process, spawn,
+    process::Child,
+    process, spawn
 };
+use log::LevelFilter;
+use log4rs::append::file::FileAppender;
+use log4rs::encode::pattern::PatternEncoder;
+use log4rs::config::{Appender, Config, Root};
+use tokio::time::delay_for;
 
 use ya_runtime_sdk::{
     runtime_api::{
@@ -27,9 +35,14 @@ use ya_runtime_vm::{
     deploy::Deployment,
     guest_agent_comm::{GuestAgent, Notification, RedirectFdType, RemoteCommandResult},
 };
+use ya_runtime_vm::raw_socket_comm::RawSocketCommunication;
 
 const DIR_RUNTIME: &'static str = "runtime";
+#[cfg(unix)]
 const FILE_RUNTIME: &'static str = "vmrt";
+#[cfg(windows)]
+const FILE_RUNTIME: &'static str = "qemu-system-x86_64.exe";
+
 const FILE_VMLINUZ: &'static str = "vmlinuz-virt";
 const FILE_INITRAMFS: &'static str = "initramfs.cpio.gz";
 const FILE_TEST_IMAGE: &'static str = "self-test.gvmi";
@@ -78,6 +91,7 @@ enum NetworkEndpoint {
 #[derive(Default)]
 struct RuntimeData {
     runtime: Option<process::Child>,
+    runtime_p9: Vec<process::Child>,
     network: Option<NetworkEndpoint>,
     deployment: Option<Deployment>,
     ga: Option<Arc<Mutex<GuestAgent>>>,
@@ -112,6 +126,8 @@ impl ya_runtime_sdk::Runtime for Runtime {
     }
 
     fn start<'a>(&mut self, ctx: &mut Context<Self>) -> OutputResponse<'a> {
+        log::info!("ya_runtime_sdk::Runtime - start");
+
         let emitter = ctx
             .emitter
             .clone()
@@ -218,11 +234,42 @@ async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<Option<serialize::
     })?))
 }
 
+fn spawn_9p_server(mount_point : String, port: i32) -> anyhow::Result<Child> {
+    let runtime_dir = runtime_dir().expect("Unable to resolve current directory").to_str().expect("Unable to resolve current directory").to_string();
+
+    let exe_path = "C:/scx1332/FileServer9p/rust-9p/example/unpfs/target/release/unpfs.exe";
+    let mut cmd = process::Command::new(&exe_path);
+    cmd.env("RUST_LOG", "error");
+
+    log::debug!("Running unfps.exe. Mount point: {}, port: {}", mount_point, port);
+
+    let local_address = std::format!("127.0.0.1:{}", port);
+    let args = &[
+        "--mount-point",
+        mount_point.as_str(),
+        "--network-address",
+        local_address.as_str(),
+        "--network-protocol",
+        "tcp"];
+
+
+    cmd.current_dir(&runtime_dir).args(args);
+
+    log::debug!("Running VM in runtime directory: {}\nCommand: {} {}\n", &runtime_dir, &exe_path, args.join(" "));
+
+    cmd.stdin(Stdio::null());
+    cmd.kill_on_drop(true);
+    //TODO - fix unwrap
+    let child = cmd.spawn().unwrap();
+    Ok(child)
+}
+
 async fn start(
     work_dir: PathBuf,
     runtime_data: Arc<Mutex<RuntimeData>>,
     emitter: EventEmitter,
 ) -> anyhow::Result<Option<serialize::json::Value>> {
+    log::error!("DUPADUPA");
     let runtime_dir = runtime_dir().expect("Unable to resolve current directory");
 
     let uid = uuid::Uuid::new_v4().to_simple().to_string();
@@ -236,6 +283,9 @@ async fn start(
 
     #[cfg(windows)]
     let net_sock = "127.0.0.1:9004";
+
+    #[cfg(windows)]
+    let p9_sock = "127.0.0.1:9005";
 
     let mut data = runtime_data.lock().await;
     let deployment = data.deployment().expect("Missing deployment data");
@@ -252,12 +302,34 @@ async fn start(
             n
         )
     };
+    #[cfg(windows)]
+        let chardev_wait = |n, p: &str| {
+        let addr: SocketAddr = p.parse().unwrap();
+        format!(
+            "socket,host={},port={},server,id={}",
+            addr.ip(),
+            addr.port(),
+            n
+        )
+    };
 
     let mut cmd = process::Command::new(runtime_dir.join(FILE_RUNTIME));
     cmd.current_dir(&runtime_dir);
-    cmd.args(&[
+
+
+    let tmp0 = format!("{}M", deployment.mem_mib);
+    let tmp1 = format!(
+        "file={},cache=unsafe,readonly=on,format=raw,if=virtio",
+        deployment.task_package.display()
+    );
+    let chardev1 = chardev("manager_cdev", &manager_sock);
+    let chardev2 = chardev("net_cdev", &net_sock);
+    let chardev3 = chardev_wait("p9_cdev", &p9_sock);
+
+    let cpu_string = deployment.cpu_cores.to_string();
+    let args = &[
         "-m",
-        format!("{}M", deployment.mem_mib).as_str(),
+        tmp0.as_str(),
         "-nographic",
         "-vga",
         "none",
@@ -267,34 +339,40 @@ async fn start(
         FILE_INITRAMFS,
         "-net",
         "none",
-        "-enable-kvm",
-        "-cpu",
-        "host",
+        /*   "-enable-kvm",*/
+        /*  "-cpu",
+          "host",*/
         "-smp",
-        deployment.cpu_cores.to_string().as_str(),
+        cpu_string.as_str(),
         "-append",
-        "console=ttyS0 panic=1",
+        "\"console=ttyS0 panic=1\"",
         "-device",
         "virtio-serial",
-        "-device",
-        "virtio-rng-pci",
+        /* "-device",
+         "virtio-rng-pci",*/
         "-chardev",
-        chardev("manager_cdev", &manager_sock).as_str(),
+        chardev1.as_str(),
         "-chardev",
-        chardev("net_cdev", &net_sock).as_str(),
+        chardev2.as_str(),
+        "-chardev",
+        chardev3.as_str(),
         "-device",
         "virtserialport,chardev=manager_cdev,name=manager_port",
         "-device",
         "virtserialport,chardev=net_cdev,name=net_port",
+        "-device",
+        "virtserialport,chardev=p9_cdev,name=p9_port",
         "-drive",
-        format!(
-            "file={},cache=unsafe,readonly=on,format=raw,if=virtio",
-            deployment.task_package.display()
-        )
-        .as_str(),
+        tmp1.as_str(),
         "-no-reboot",
-    ]);
+        "-accel",
+        "whpx",
+        "-nodefaults"
+    ];
 
+
+    cmd.args(args);
+/*
     for (idx, volume) in deployment.volumes.iter().enumerate() {
         cmd.arg("-virtfs");
         cmd.arg(format!(
@@ -303,6 +381,9 @@ async fn start(
             path = work_dir.join(&volume.name).to_string_lossy(),
         ));
     }
+*/
+
+    log::debug!("Running VM in runtime directory: {}\nCommand: {} {}\n", runtime_dir.to_str().unwrap_or("???"), FILE_RUNTIME, args.join(" "));
 
     let mut runtime = cmd
         .stdin(Stdio::null())
@@ -313,15 +394,43 @@ async fn start(
     let stdout = runtime.stdout.take().unwrap();
     spawn(reader_to_log(stdout));
 
+
+
+    log::debug!("Spawn p9 servers...");
+
+    let mut runtime_p9s: Vec<process::Child> = vec![];
+    {
+        for (idx, volume) in deployment.volumes.iter().enumerate() {
+            let mount_point_host = work_dir.join(&volume.name).to_str().ok_or(anyhow!("cannot resolve 9p mount point"))?.to_string();
+            let runtime_p9 = spawn_9p_server(mount_point_host, 9101 + idx as i32)?;
+            runtime_p9s.push(runtime_p9);
+        }
+    }
+    delay_for(Duration::from_millis(1000)).await;
+
+    log::debug!("Connect to p9 servers...");
+
+    let mut vmp9stream: std::net::TcpStream = std::net::TcpStream::connect(std::format!("127.0.0.1:{}", 9005))?;
+
+    let mut p9streams: Vec<std::net::TcpStream> = vec![];
+    {
+        for (idx, volume) in deployment.volumes.iter().enumerate() {
+            let mut stream = std::net::TcpStream::connect(std::format!("127.0.0.1:{}", 9101 + idx as i32))?;
+            p9streams.push(stream);
+        }
+    }
+
+    let mut r = RawSocketCommunication::new();
+    r.start_raw_comm(vmp9stream, p9streams);
+
     let ga = GuestAgent::connected(manager_sock, 10, move |notification, ga| {
         let mut emitter = emitter.clone();
         async move {
             let status = notification_into_status(notification, ga).await;
             emitter.emit(status).await;
         }
-        .boxed()
-    })
-    .await?;
+            .boxed()
+    }).await?;
 
     {
         let mut ga = ga.lock().await;
@@ -332,6 +441,7 @@ async fn start(
         }
     }
 
+    data.runtime_p9 = runtime_p9s;
     data.runtime.replace(runtime);
     data.network
         .replace(NetworkEndpoint::Socket(net_sock.to_owned()));
@@ -435,7 +545,7 @@ fn offer() -> anyhow::Result<Option<serde_json::Value>> {
 }
 
 async fn test() -> anyhow::Result<()> {
-    server::run_async(|e| async {
+    /*server::run_async(|e| async {
         let ctx = Context::try_new().expect("Failed to initialize context");
         let task_package = runtime_dir()
             .expect("Runtime directory not found")
@@ -443,7 +553,7 @@ async fn test() -> anyhow::Result<()> {
             .canonicalize()
             .expect("Test image not found");
 
-        println!("Task package: {}", task_package.display());
+        log::debug!("Task package: {}", task_package.display());
         let runtime_data = RuntimeData {
             deployment: Some(Deployment {
                 cpu_cores: 1,
@@ -478,7 +588,7 @@ async fn test() -> anyhow::Result<()> {
 
         Server::new(runtime, ctx)
     })
-    .await;
+    .await;*/
     Ok(())
 }
 
@@ -486,6 +596,7 @@ async fn join_network(
     runtime_data: Arc<Mutex<RuntimeData>>,
     join: server::CreateNetwork,
 ) -> Result<String, server::ErrorResponse> {
+    log::error!("join_network");
     let hosts = join.hosts;
     let networks = join.networks;
     let data = runtime_data.lock().await;
@@ -625,6 +736,20 @@ fn runtime_dir() -> io::Result<PathBuf> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::init();
+
+
+    let logfile = FileAppender::builder()
+        .encoder(Box::new(PatternEncoder::new("{l} - {m}\n")))
+        .build(r#"C:\scx1332\yagna_provider_testground\provider_run_config\provider_dir\exe-unit\work\ya-runtime-vm.log"#)?;
+
+    let config = Config::builder()
+        .appender(Appender::builder().build("logfile", Box::new(logfile)))
+        .build(Root::builder()
+            .appender("logfile")
+            .build(LevelFilter::Debug))?;
+
+    log4rs::init_config(config)?;
+    log::debug!("Runtime VM starting - log level debug message ...");
+    log::info!("Runtime VM starting - log level info message ...");
     ya_runtime_sdk::run::<Runtime>().await
 }

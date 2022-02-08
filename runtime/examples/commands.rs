@@ -39,6 +39,8 @@ impl Events {
     }
 
     fn process_died(&self, pid: u64) -> Arc<Notify> {
+        log::debug!("Locking mutex ...");
+
         let mut processes = self.0.lock().unwrap();
         match processes.get(&pid) {
             None => {

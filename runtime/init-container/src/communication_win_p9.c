@@ -215,7 +215,7 @@ uint32_t do_mount_win_p9(const char* tag, uint8_t channel, char* path) {
     }
 
     int mount_socked_fd = g_p9_socket_fds[channel][0];
-    int buf_size = asfprintf(stderr, &mount_cmd, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L", mount_socked_fd, mount_socked_fd);
+    int buf_size = asprintf(&mount_cmd, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L", mount_socked_fd, mount_socked_fd);
     if (buf_size < 0) {
         free(mount_cmd);
         return errno;

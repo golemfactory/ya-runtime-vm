@@ -6,17 +6,13 @@ use std::{
     process::Stdio,
     sync::Arc,
 };
-use std::str;
+use std::time::Duration;
 use tokio::{
     process::{Child, Command},
     sync,
 };
+use tokio::time::delay_for;
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
-use ya_runtime_vm::guest_agent_9p::{GuestAgent9p, Notification9p};
-use futures::lock::Mutex;
-use log::debug;
-use tokio::net::TcpStream;
-use tokio::time::{delay_for, Duration};
 use ya_runtime_vm::raw_socket_comm::RawSocketCommunication;
 
 
@@ -24,12 +20,6 @@ struct Notifications {
     process_died: sync::Notify,
     output_available: sync::Notify,
 }
-
-struct Servers9p {
-
-
-}
-
 
 impl Notifications {
     fn new() -> Self {
@@ -50,14 +40,6 @@ impl Notifications {
                 self.process_died.notify();
             }
         }
-    }
-}
-
-impl Servers9p {
-
-
-    fn handle(&self, notification: Notification9p) {
-        log::debug!("Received 9p message, forward it to proper server with tag: {0}", notification.tag);
     }
 }
 
@@ -121,7 +103,8 @@ fn spawn_9p_server(mount_point : String, port: i32) -> Child {
     let runtime_dir = project_dir.join("poc").join("runtime");
     let init_dir = project_dir.join("init-container");
 
-    let mut cmd = Command::new("C:/scx1332/FileServer9p/rust-9p/example/unpfs/target/debug/unpfs.exe");
+    let mut cmd = Command::new("C:/scx1332/FileServer9p/rust-9p/example/unpfs/target/release/unpfs.exe");
+    cmd.env("RUST_LOG", "error");
 
     cmd.current_dir(runtime_dir).args(&[
         "--mount-point",
@@ -193,7 +176,7 @@ fn spawn_vm<'a, P: AsRef<Path>>(temp_path: P, mount_args: &'a [(&'a str, impl To
     cmd.stdin(Stdio::null());
     cmd.spawn().expect("failed to spawn VM")
 }
-
+/*
 async fn simple_run_command(ga_mutex: &Arc<Mutex<GuestAgent>>, bin: &str, argv: &[&str], dir: &str, notifications: Option<&Arc<Notifications>>) -> io::Result<()> {
     let mut ga = ga_mutex.lock().await;
 
@@ -234,7 +217,7 @@ async fn simple_run_command(ga_mutex: &Arc<Mutex<GuestAgent>>, bin: &str, argv: 
     log::debug!("Command finished: {0}", argv.join(" "));
 
     Ok(())
-}
+}*/
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -304,21 +287,125 @@ async fn main() -> io::Result<()> {
     }).await?;
 */
     {
+        /*
         let mut ga = ga_mutex.lock().await;
         log::debug!("start_mount");
         for (i, (tag, _)) in mount_args.iter().enumerate() {
             ga.mount(tag, &format!("/mnt/mnt{}/{}", i, tag))
                 .await?
                 .expect("Mount failed");
-        }
+        }*/
     }
     log::debug!("end mnt loop");
     delay_for(Duration::from_millis(1000)).await;
     log::debug!("end delay");
 
+
+
     let no_redir = [None, None, None];
 
-    simple_run_command(&ga_mutex, "/bin/ls", &["ls", "-la"], "/mnt/mnt0/tag0", Some(&notifications)).await?;
+    {
+        let mut ga = ga_mutex.lock().await;
+
+        let id = ga
+            .run_process(
+                "/bin/ls",
+                &["ls", "-al", "."],
+                None,
+                0,
+                0,
+                &no_redir,
+                Some("/mnt"),
+            )
+            .await?
+            .expect("Run process failed");
+        println!("Spawned process with id: {}", id);
+        notifications.process_died.notified().await;
+        println!("Notification send: {}", id);
+        let out = ga
+            .query_output(id, 1, 0, u64::MAX)
+            .await?
+            .expect("Output query failed");
+        println!("Output:");
+        io::stdout().write_all(&out)?;
+
+        run_process_with_output(
+            &mut ga,
+            &notifications,
+            "/bin/ls",
+            &["ls", "-al", "/mnt/mnt1/tag1"],
+        )
+            .await?;
+
+        let fds = [
+            None,
+            Some(RedirectFdType::RedirectFdFile(
+                "/mnt/mnt1/tag1/write_test".as_bytes(),
+            )),
+            None,
+        ];
+
+        let id = ga
+            .run_process("/bin/echo", &["echo", "WRITE TEST"], None, 0, 0, &fds, None)
+            .await?
+            .expect("Run process failed");
+        println!("Spawned process with id: {}", id);
+        notifications.process_died.notified().await;
+
+        run_process_with_output(
+            &mut ga,
+            &notifications,
+            "/bin/cat",
+            &["cat", "/mnt/mnt1/tag1/write_test"],
+        )
+            .await?;
+
+        let id = ga
+            .run_process("/bin/sleep", &["sleep", "10"], None, 0, 0, &no_redir, None)
+            .await?
+            .expect("Run process failed");
+        println!("Spawned process with id: {}", id);
+
+        ga.kill(id).await?.expect("Kill failed");
+        notifications.process_died.notified().await;
+
+        let id = ga
+            .run_process(
+                "/bin/bash",
+                &[
+                    "bash",
+                    "-c",
+                    "for i in {1..8000}; do echo -ne a >> /big; done; cat /big",
+                ],
+                None,
+                0,
+                0,
+                &[
+                    None,
+                    Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
+                    None,
+                ],
+                None,
+            )
+            .await?
+            .expect("Run process failed");
+        println!("Spawned process with id: {}", id);
+        notifications.output_available.notified().await;
+        let out = ga
+            .query_output(id, 1, 0, u64::MAX)
+            .await?
+            .expect("Output query failed");
+        println!(
+            "Big output 1: {} {}",
+            out.len(),
+            out.iter().filter(|x| **x != 0x61).count()
+        );
+        notifications.output_available.notified().await;
+    }
+
+    
+/*
+    simple_run_command(&ga_mutex, "/bin/ls", &["ls", "-la"], "/", Some(&notifications)).await?;
     delay_for(Duration::from_millis(1000)).await;
     simple_run_command(&ga_mutex, "/bin/ls", &["ls", "-la"], "/dev", Some(&notifications)).await?;
     delay_for(Duration::from_millis(1000)).await;
@@ -328,7 +415,7 @@ async fn main() -> io::Result<()> {
 
     //simple_run_command(&ga_mutex, "/bin/bash", &["bash", "-c",  "mount -t 9p -o trans=fd,rfdno=/dev/vport0p3,wfdno=/dev/vport0p3,version=9p2000.L hostshare /mnt/host_files > /result.log 2> /error.log; echo output:; cat /result.log; echo errors:;cat /error.log"], "/dev", Some(&notifications)).await?;
     delay_for(Duration::from_millis(1000)).await;
-
+*/
     if false {
         let mut ga = ga_mutex.lock().await;
 

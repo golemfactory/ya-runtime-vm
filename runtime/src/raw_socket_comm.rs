@@ -29,7 +29,7 @@ unsafe impl Send for SharedUnsafeDataPointer {}
 
 const MAX_PACKET_SIZE : usize = 16384;
 
-const TEST_CONCURRENT_ACCESS : bool = true;
+const TEST_CONCURRENT_ACCESS : bool = false;
 
 
 impl RawSocketCommunication {
