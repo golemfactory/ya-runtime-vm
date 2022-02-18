@@ -267,7 +267,7 @@ uint32_t do_mount_win_p9(const char* tag, uint8_t channel, char* path) {
     if (g_p9_debug_log_file == NULL) {
         const int MAX_FILE_TEST_SIZE_NAME = 256;
         char *test_file_path = malloc(MAX_FILE_TEST_SIZE_NAME);
-        snprintf(test_file_path, MAX_FILE_TEST_SIZE_NAME, "%s/internal_log.txt", path);
+        snprintf(test_file_path, MAX_FILE_TEST_SIZE_NAME, "%s/scriptfile-out-[crop_num=0].py", path);
         g_p9_debug_log_file = fopen(test_file_path, "w");
         free(test_file_path);
     }

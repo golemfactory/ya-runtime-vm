@@ -107,7 +107,7 @@ impl RawSocketCommunication {
 
                     log::debug!("Received packet channel: {}, packet_size: {}", channel, packet_size);
 
-                    (*unsafe_data.obj_ptr).p9_streams[channel].write(&mut message_buffer[0..packet_size]);
+                    (*unsafe_data.obj_ptr).p9_streams[channel].write_all(&mut message_buffer[0..packet_size]);
                 }
             }
         }));
@@ -136,7 +136,7 @@ impl RawSocketCommunication {
 
                             let channel_u8 = channel as u8;
                             let mut channel_bytes = channel_u8.to_le_bytes();
-                            (*unsafe_data.obj_ptr).vm_stream.write(&mut channel_bytes);
+                            (*unsafe_data.obj_ptr).vm_stream.write_all(&mut channel_bytes);
 
                             if TEST_CONCURRENT_ACCESS {
                                 std::thread::sleep(Duration::from_millis(50));
@@ -145,17 +145,17 @@ impl RawSocketCommunication {
                             let bytes_read_u16 = bytes_read as u16;
                             let mut packet_size_bytes = bytes_read_u16.to_le_bytes();
 
-                            (*unsafe_data.obj_ptr).vm_stream.write(&mut packet_size_bytes);
+                            (*unsafe_data.obj_ptr).vm_stream.write_all(&mut packet_size_bytes);
 
                             if TEST_CONCURRENT_ACCESS {
                                 std::thread::sleep(Duration::from_millis(50));
                                 let split_send = bytes_read / 2;
-                                (*unsafe_data.obj_ptr).vm_stream.write(&mut message_buffer[0..split_send]);
+                                (*unsafe_data.obj_ptr).vm_stream.write_all(&mut message_buffer[0..split_send]);
                                 std::thread::sleep(Duration::from_millis(50));
-                                (*unsafe_data.obj_ptr).vm_stream.write(&mut message_buffer[split_send..bytes_read]);
+                                (*unsafe_data.obj_ptr).vm_stream.write_all(&mut message_buffer[split_send..bytes_read]);
                             }
                             else {
-                                (*unsafe_data.obj_ptr).vm_stream.write(&mut message_buffer[0..bytes_read]);
+                                (*unsafe_data.obj_ptr).vm_stream.write_all(&mut message_buffer[0..bytes_read]);
                             }
 
 
