@@ -19,7 +19,6 @@ use log4rs::append::file::FileAppender;
 use log4rs::encode::pattern::PatternEncoder;
 use log4rs::config::{Appender, Config, Root};
 use tokio::time::delay_for;
-
 use ya_runtime_sdk::{
     runtime_api::{
         deploy::{DeployResult, StartMode},
@@ -48,6 +47,8 @@ const FILE_INITRAMFS: &'static str = "initramfs.cpio.gz";
 const FILE_TEST_IMAGE: &'static str = "self-test.gvmi";
 const FILE_DEPLOYMENT: &'static str = "deployment.json";
 const DEFAULT_CWD: &'static str = "/";
+
+
 
 #[derive(StructOpt, Clone, Default)]
 #[structopt(rename_all = "kebab-case")]
@@ -92,6 +93,7 @@ enum NetworkEndpoint {
 struct RuntimeData {
     runtime: Option<process::Child>,
     runtime_p9: Vec<process::Child>,
+    raw_socket_comm: RawSocketCommunication,
     network: Option<NetworkEndpoint>,
     deployment: Option<Deployment>,
     ga: Option<Arc<Mutex<GuestAgent>>>,
@@ -233,6 +235,7 @@ async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<Option<serialize::
         start_mode: StartMode::Blocking,
     })?))
 }
+
 
 fn spawn_9p_server(mount_point : String, port: i32) -> anyhow::Result<Child> {
     let runtime_dir = runtime_dir().expect("Unable to resolve current directory").to_str().expect("Unable to resolve current directory").to_string();
@@ -385,14 +388,19 @@ async fn start(
 
     log::debug!("Running VM in runtime directory: {}\nCommand: {} {}\n", runtime_dir.to_str().unwrap_or("???"), FILE_RUNTIME, args.join(" "));
 
+
+
     let mut runtime = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()?;
 
     let stdout = runtime.stdout.take().unwrap();
+    let stderr = runtime.stderr.take().unwrap();
     spawn(reader_to_log(stdout));
+    spawn(reader_to_log_error(stderr));
 
 
 
@@ -441,7 +449,8 @@ async fn start(
         }
     }
 
-    data.runtime_p9 = runtime_p9s;
+    data.runtime_p9 = runtime_p9s; //prevent dropping
+    data.raw_socket_comm = r; //prevent dropping
     data.runtime.replace(runtime);
     data.network
         .replace(NetworkEndpoint::Socket(net_sock.to_owned()));
@@ -493,6 +502,7 @@ async fn run_command(
             Some(cwd),
         )
         .await;
+    log::debug!("Finished command");
 
     Ok(convert_result(result, "Running process")?)
 }
@@ -726,6 +736,22 @@ async fn reader_to_log<T: io::AsyncRead + Unpin>(reader: T) {
     }
 }
 
+async fn reader_to_log_error<T: io::AsyncRead + Unpin>(reader: T) {
+    let mut reader = io::BufReader::new(reader);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_until(b'\n', &mut buf).await {
+            Ok(0) => break,
+            Ok(_) => {
+                let bytes = strip_ansi_escapes::strip(&buf).unwrap();
+                log::debug!("VM ERROR STREAM: {}", String::from_utf8_lossy(&bytes).trim_end());
+                buf.clear();
+            }
+            Err(e) => log::error!("VM stderr error: {}", e),
+        }
+    }
+}
+
 fn runtime_dir() -> io::Result<PathBuf> {
     Ok(std::env::current_exe()?
         .parent()
@@ -739,7 +765,7 @@ async fn main() -> anyhow::Result<()> {
 
 
     let logfile = FileAppender::builder()
-        .encoder(Box::new(PatternEncoder::new("{l} - {m}\n")))
+        .encoder(Box::new(PatternEncoder::new("{d} {l} {t} - {m}{n}\n")))
         .build(r#"C:\scx1332\yagna_provider_testground\provider_run_config\provider_dir\exe-unit\work\ya-runtime-vm.log"#)?;
 
     let config = Config::builder()

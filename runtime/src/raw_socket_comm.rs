@@ -6,12 +6,13 @@ use std::io::prelude::*;
 use std::net::{Shutdown, TcpStream};
 use std::convert::TryInto;
 
-
+#[derive(Default, Debug)]
 pub struct RawSocketCommunication {
     vm_stream_thread : Option<std::thread::JoinHandle<()>>,
     p9_stream_threads : Vec<std::thread::JoinHandle<()>>,
+    shared_unsafe_data: Option<Box<std::cell::UnsafeCell<SharedUnsafeData>>>,
 
-    shared_unsafe_data: Option<std::cell::UnsafeCell<SharedUnsafeData>>,
+
 }
 
 pub struct SharedUnsafeData {
@@ -19,6 +20,12 @@ pub struct SharedUnsafeData {
     vm_stream: std::net::TcpStream,
     p9_streams: Vec<std::net::TcpStream>,
     vm_stream_write_mutex: Mutex::<i32>,
+}
+
+impl Drop for SharedUnsafeData {
+    fn drop(&mut self) {
+        log::error!("Dropping SharedUnsafeData");
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -41,7 +48,7 @@ impl RawSocketCommunication {
 
         let number_of_p9_threads = p9_streams.len();
 
-        self.shared_unsafe_data = Some(UnsafeCell::new(SharedUnsafeData{tri: 1, vm_stream, p9_streams, vm_stream_write_mutex: Mutex::new(0) }));
+        self.shared_unsafe_data = Some(Box::new(UnsafeCell::new(SharedUnsafeData{tri: 1, vm_stream, p9_streams, vm_stream_write_mutex: Mutex::new(0) })));
 
 
         let unsafe_data = SharedUnsafeDataPointer{obj_ptr: self.shared_unsafe_data.as_ref().unwrap().get()};
@@ -57,7 +64,7 @@ impl RawSocketCommunication {
                     match (*unsafe_data.obj_ptr).vm_stream.read_exact(&mut header_buffer) {
                         Ok(()) => {},
                         Err(err) => {
-                            log::error!("{}", err);
+                            log::error!("read exact 1: {}", err);
                             break;
                         }
                     }
@@ -85,7 +92,7 @@ impl RawSocketCommunication {
                     match (*unsafe_data.obj_ptr).vm_stream.read_exact(&mut message_buffer[0..packet_size]){
                         Ok(()) => {},
                         Err(err) => {
-                            log::error!("{}", err);
+                            log::error!("read exact 2 {}", err);
                             break;
                         }
                     }
@@ -117,7 +124,7 @@ impl RawSocketCommunication {
                         let bytes_read = match (*unsafe_data.obj_ptr).p9_streams[channel].read(&mut message_buffer) {
                             Ok(bytes_read) => bytes_read,
                             Err(err) => {
-                                log::error!("{}", err);
+                                log::error!("read p9 streams {}", err);
                                 break;
                             }
                         };

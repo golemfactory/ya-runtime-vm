@@ -36,6 +36,11 @@ pthread_t g_p9_tunnel_thread_sender[MAX_P9_VOLUMES];
 pthread_mutex_t g_p9_tunnel_mutex_sender;
 pthread_t g_p9_tunnel_thread_receiver;
 
+#if WIN_ENABLE_DEBUG_FILE_LOG
+FILE* g_p9_debug_log_file = NULL;
+#endif
+
+
 //HACK - move it somewhere else
 int create_dir_path(char* path);
 
@@ -227,12 +232,56 @@ uint32_t do_mount_win_p9(const char* tag, uint8_t channel, char* path) {
         usleep(100 * 1000);
     }*/
 
-    fprintf(stderr, "Starting mount...\n");
+    fprintf(stderr, "Starting mount: tag: %s, path: %s\n", tag, path);
     if (mount(tag, path, "9p", 0, mount_cmd) < 0) {
         fprintf(stderr, "Mount finished with error: %d\n", errno);
         return errno;
     }
-    fprintf(stderr, "Mount finished\n");
+
+#if WIN_ENABLE_DEBUG_FILE_LOG
+    {
+        FILE * fd;
+        fprintf(stderr, "Checking mount volume: path: %s\n", path);
+        const int MAX_FILE_TEST_SIZE_NAME = 256;
+        char *test_file_path = malloc(MAX_FILE_TEST_SIZE_NAME);
+        snprintf(test_file_path, MAX_FILE_TEST_SIZE_NAME, "%s/internal_mount_test.txt", path);
+        fd = fopen(test_file_path, "w");
+
+        if (fd == NULL) {
+            fprintf(stderr, "Failed to create test file: %s\n", test_file_path);
+            free(test_file_path);
+            return errno;
+        }
+        fprintf(stderr, "Successfully created test file: %s\n", test_file_path);
+
+        fprintf(fd, "Internal mount testing...\n");
+        fprintf(fd, "Tag: %s\n", tag);
+        fprintf(fd, "Mount path: %s\n", path);
+        fprintf(fd, "Test file path: %s\n", test_file_path);
+
+
+        free(test_file_path);
+
+        fclose(fd);
+    }
+    if (g_p9_debug_log_file == NULL) {
+        const int MAX_FILE_TEST_SIZE_NAME = 256;
+        char *test_file_path = malloc(MAX_FILE_TEST_SIZE_NAME);
+        snprintf(test_file_path, MAX_FILE_TEST_SIZE_NAME, "%s/internal_log.txt", path);
+        g_p9_debug_log_file = fopen(test_file_path, "w");
+        free(test_file_path);
+    }
+#if WIN_ENABLE_DEBUG_FILE_LOG
+            if (g_p9_debug_log_file) {
+                fprintf(g_p9_debug_log_file, "mount handled\n");
+                fflush(g_p9_debug_log_file);
+            }
+#endif
+
+
+#endif
+
+    fprintf(stderr, "Mount finished.\n");
     free(mount_cmd);
     return 0;
 }

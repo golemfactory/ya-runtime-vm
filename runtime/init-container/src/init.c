@@ -1408,9 +1408,21 @@ static void handle_message(void) {
     switch (msg_hdr.type) {
         case MSG_QUIT:
             fprintf(stderr, "Exiting\n");
+#if WIN_ENABLE_DEBUG_FILE_LOG
+            if (g_p9_debug_log_file) {
+                fprintf(g_p9_debug_log_file, "Exiting\n");
+                fflush(g_p9_debug_log_file);
+            }
+#endif
             handle_quit(msg_hdr.msg_id);
         case MSG_RUN_PROCESS:
             fprintf(stderr, "MSG_RUN_PROCESS\n");
+#if WIN_ENABLE_DEBUG_FILE_LOG
+            if (g_p9_debug_log_file) {
+                fprintf(g_p9_debug_log_file, "MSG_RUN_PROCESS\n");
+                fflush(g_p9_debug_log_file);
+            }
+#endif
             handle_run_process(msg_hdr.msg_id);
             fprintf(stderr, "MSG_PROCESS_FINISHED\n");
             break;
@@ -1421,6 +1433,12 @@ static void handle_message(void) {
         case MSG_MOUNT_VOLUME:
             fprintf(stderr, "MSG_MOUNT_VOLUME\n");
             handle_mount(msg_hdr.msg_id);
+#if WIN_ENABLE_DEBUG_FILE_LOG
+            if (g_p9_debug_log_file) {
+                fprintf(g_p9_debug_log_file, "MSG_MOUNT_VOLUME handled\n");
+                fflush(g_p9_debug_log_file);
+            }
+#endif
             break;
         case MSG_QUERY_OUTPUT:
             fprintf(stderr, "MSG_QUERY_OUTPUT\n");
