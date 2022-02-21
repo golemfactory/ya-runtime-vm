@@ -59,7 +59,7 @@ impl RawSocketCommunication {
             let mut message_buffer = [0; MAX_PACKET_SIZE];
             loop {
                 unsafe {
-                    std::thread::sleep(Duration::from_millis(10));
+                    //std::thread::sleep(Duration::from_millis(10));
 
                     match (*unsafe_data.obj_ptr).vm_stream.read_exact(&mut header_buffer) {
                         Ok(()) => {},
@@ -96,16 +96,12 @@ impl RawSocketCommunication {
                             break;
                         }
                     }
-
-
-
-
                     /*if read_size_packet != packet_size {
                         log::error!("read_size_packet != packet_size");
                         break;
                     }*/
 
-                    log::debug!("Received packet channel: {}, packet_size: {}", channel, packet_size);
+                    //log::debug!("Received packet channel: {}, packet_size: {}", channel, packet_size);
 
                     (*unsafe_data.obj_ptr).p9_streams[channel].write_all(&mut message_buffer[0..packet_size]);
                 }
@@ -119,7 +115,7 @@ impl RawSocketCommunication {
 
 
                 loop {
-                    log::debug!("Thread channel {}", channel);
+                    //log::debug!("Thread channel {}", channel);
                     unsafe {
                         let bytes_read = match (*unsafe_data.obj_ptr).p9_streams[channel].read(&mut message_buffer) {
                             Ok(bytes_read) => bytes_read,
@@ -132,7 +128,7 @@ impl RawSocketCommunication {
                             //critical section for writing to common socket
                             let _write_guard = (*unsafe_data.obj_ptr).vm_stream_write_mutex.lock().unwrap();
 
-                            log::debug!("Sending message back: channel:{}, packet_size:{}", channel, bytes_read);
+                            //log::debug!("Sending message back: channel:{}, packet_size:{}", channel, bytes_read);
 
                             let channel_u8 = channel as u8;
                             let mut channel_bytes = channel_u8.to_le_bytes();

@@ -36,17 +36,20 @@ use ya_runtime_vm::{
 };
 use ya_runtime_vm::raw_socket_comm::RawSocketCommunication;
 
-const DIR_RUNTIME: &'static str = "runtime";
+const DIR_RUNTIME: &str = "runtime";
 #[cfg(unix)]
 const FILE_RUNTIME: &'static str = "vmrt";
 #[cfg(windows)]
-const FILE_RUNTIME: &'static str = "qemu-system-x86_64.exe";
+const FILE_RUNTIME: &str = "qemu-system-x86_64.exe";
 
-const FILE_VMLINUZ: &'static str = "vmlinuz-virt";
-const FILE_INITRAMFS: &'static str = "initramfs.cpio.gz";
-const FILE_TEST_IMAGE: &'static str = "self-test.gvmi";
-const FILE_DEPLOYMENT: &'static str = "deployment.json";
-const DEFAULT_CWD: &'static str = "/";
+#[cfg(windows)]
+const FILE_SERVER_RUNTIME: &str = "ya-vm-file-server.exe";
+
+const FILE_VMLINUZ: &str = "vmlinuz-virt";
+const FILE_INITRAMFS: &str = "initramfs.cpio.gz";
+const FILE_TEST_IMAGE: &str = "self-test.gvmi";
+const FILE_DEPLOYMENT: &str = "deployment.json";
+const DEFAULT_CWD: &str = "/";
 
 
 
@@ -237,19 +240,21 @@ async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<Option<serialize::
 }
 
 
-fn spawn_9p_server(mount_point : String, port: i32) -> anyhow::Result<Child> {
-    let runtime_dir = runtime_dir().expect("Unable to resolve current directory").to_str().expect("Unable to resolve current directory").to_string();
+fn spawn_9p_server(mount_point : String, log_path : String, port: i32) -> anyhow::Result<Child> {
+    let runtime_dir = runtime_dir().expect("Unable to resolve current directory");
 
-    let exe_path = "C:/scx1332/FileServer9p/rust-9p/example/unpfs/target/release/unpfs.exe";
+    let exe_path = runtime_dir.join(FILE_SERVER_RUNTIME);
     let mut cmd = process::Command::new(&exe_path);
     cmd.env("RUST_LOG", "error");
 
-    log::debug!("Running unfps.exe. Mount point: {}, port: {}", mount_point, port);
+    log::debug!("Running {}. Mount point: {}, port: {}", exe_path.to_str().unwrap_or(""), mount_point, port);
 
     let local_address = std::format!("127.0.0.1:{}", port);
     let args = &[
         "--mount-point",
         mount_point.as_str(),
+        "--log-path",
+        log_path.as_str(),
         "--network-address",
         local_address.as_str(),
         "--network-protocol",
@@ -258,13 +263,12 @@ fn spawn_9p_server(mount_point : String, port: i32) -> anyhow::Result<Child> {
 
     cmd.current_dir(&runtime_dir).args(args);
 
-    log::debug!("Running VM in runtime directory: {}\nCommand: {} {}\n", &runtime_dir, &exe_path, args.join(" "));
-
     cmd.stdin(Stdio::null());
     cmd.kill_on_drop(true);
-    //TODO - fix unwrap
-    let child = cmd.spawn().unwrap();
-    Ok(child)
+    cmd.spawn().map_err(|err| {
+        log::error!("Error when spawning p9 server {}", err);
+        anyhow::Error::from(err)
+    })
 }
 
 async fn start(
@@ -272,7 +276,6 @@ async fn start(
     runtime_data: Arc<Mutex<RuntimeData>>,
     emitter: EventEmitter,
 ) -> anyhow::Result<Option<serialize::json::Value>> {
-    log::error!("DUPADUPA");
     let runtime_dir = runtime_dir().expect("Unable to resolve current directory");
 
     let uid = uuid::Uuid::new_v4().to_simple().to_string();
@@ -406,11 +409,16 @@ async fn start(
 
     log::debug!("Spawn p9 servers...");
 
+
     let mut runtime_p9s: Vec<process::Child> = vec![];
+
     {
         for (idx, volume) in deployment.volumes.iter().enumerate() {
             let mount_point_host = work_dir.join(&volume.name).to_str().ok_or(anyhow!("cannot resolve 9p mount point"))?.to_string();
-            let runtime_p9 = spawn_9p_server(mount_point_host, 9101 + idx as i32)?;
+            let runtime_p9 = spawn_9p_server(
+                mount_point_host,
+                work_dir.join("logs").join(std::format!("ya-vm-file-server_{}.log", idx)).to_str()
+                .unwrap_or("").to_string(),9101 + idx as i32)?;
             runtime_p9s.push(runtime_p9);
         }
     }
@@ -418,12 +426,12 @@ async fn start(
 
     log::debug!("Connect to p9 servers...");
 
-    let mut vmp9stream: std::net::TcpStream = std::net::TcpStream::connect(std::format!("127.0.0.1:{}", 9005))?;
+    let vmp9stream: std::net::TcpStream = std::net::TcpStream::connect(std::format!("127.0.0.1:{}", 9005))?;
 
     let mut p9streams: Vec<std::net::TcpStream> = vec![];
     {
         for (idx, volume) in deployment.volumes.iter().enumerate() {
-            let mut stream = std::net::TcpStream::connect(std::format!("127.0.0.1:{}", 9101 + idx as i32))?;
+            let stream = std::net::TcpStream::connect(std::format!("127.0.0.1:{}", 9101 + idx as i32))?;
             p9streams.push(stream);
         }
     }
@@ -725,7 +733,9 @@ async fn reader_to_log<T: io::AsyncRead + Unpin>(reader: T) {
     let mut buf = Vec::new();
     loop {
         match reader.read_until(b'\n', &mut buf).await {
-            Ok(0) => break,
+            Ok(0) => {
+                log::warn!("VM: reader.read_until returned 0")
+            },
             Ok(_) => {
                 let bytes = strip_ansi_escapes::strip(&buf).unwrap();
                 log::debug!("VM: {}", String::from_utf8_lossy(&bytes).trim_end());
@@ -741,7 +751,9 @@ async fn reader_to_log_error<T: io::AsyncRead + Unpin>(reader: T) {
     let mut buf = Vec::new();
     loop {
         match reader.read_until(b'\n', &mut buf).await {
-            Ok(0) => break,
+            Ok(0) => {
+                log::warn!("VM ERROR: reader.read_until returned 0")
+            },
             Ok(_) => {
                 let bytes = strip_ansi_escapes::strip(&buf).unwrap();
                 log::debug!("VM ERROR STREAM: {}", String::from_utf8_lossy(&bytes).trim_end());
@@ -765,8 +777,8 @@ async fn main() -> anyhow::Result<()> {
 
 
     let logfile = FileAppender::builder()
-        .encoder(Box::new(PatternEncoder::new("{d} {l} {t} - {m}{n}\n")))
-        .build(r#"C:\scx1332\yagna_provider_testground\provider_run_config\provider_dir\exe-unit\work\ya-runtime-vm.log"#)?;
+        .encoder(Box::new(PatternEncoder::new("{d} {l} {t} - {m}{n}")))
+        .build(r#"logs/ya-runtime-vm.log"#)?;
 
     let config = Config::builder()
         .appender(Appender::builder().build("logfile", Box::new(logfile)))
