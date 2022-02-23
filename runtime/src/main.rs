@@ -373,7 +373,9 @@ async fn start(
         "-no-reboot",
         "-accel",
         "whpx",
-        "-nodefaults"
+        "-nodefaults",
+        "--serial",
+        "stdio",
     ];
 
 

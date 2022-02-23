@@ -9,6 +9,8 @@
 
 int readn(int fd, void* buf, size_t size) {
     while (size) {
+        fprintf(stderr, "*** Readen: %d **** \n", (int)size);
+
         ssize_t ret = read(fd, buf, size);
         if (ret == 0) {
             puts("readn: WAITING FOR HOST (1) ...");
@@ -120,6 +122,8 @@ out:
 }
 
 int writen(int fd, const void* buf, size_t size) {
+    fprintf(stderr, "*** Writen: %d **** \n", (int)size);
+
     while (size) {
         ssize_t ret = write(fd, buf, size);
         if (ret == 0) {
