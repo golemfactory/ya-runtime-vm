@@ -318,12 +318,7 @@ static void setup_sigfd(void) {
     g_sig_fd = CHECK(signalfd(g_sig_fd, &set, SFD_CLOEXEC));
 }
 
-#if BUILD_FOR_WIN_P9
-//TODO move this function somewhere else
-int create_dir_path(char* path) {
-#else
 static int create_dir_path(char* path) {
-#endif
     assert(path[0] == '/');
 
     char* next = path;
@@ -1041,6 +1036,10 @@ static void handle_mount(msg_id_t msg_id) {
         goto out;
     }
 #if BUILD_FOR_WIN_P9
+    if (create_dir_path(path) < 0) {
+        ret = errno;
+        goto out;
+    }
     ret = do_mount_win_p9(tag, g_p9_current_channel, path);
     g_p9_current_channel += 1;	
 #else
@@ -1413,21 +1412,9 @@ static void handle_message(void) {
     switch (msg_hdr.type) {
         case MSG_QUIT:
             fprintf(stderr, "Exiting\n");
-#if WIN_ENABLE_DEBUG_FILE_LOG
-            if (g_p9_debug_log_file) {
-                fprintf(g_p9_debug_log_file, "Exiting\n");
-                fflush(g_p9_debug_log_file);
-            }
-#endif
             handle_quit(msg_hdr.msg_id);
         case MSG_RUN_PROCESS:
             fprintf(stderr, "MSG_RUN_PROCESS\n");
-#if WIN_ENABLE_DEBUG_FILE_LOG
-            if (g_p9_debug_log_file) {
-                fprintf(g_p9_debug_log_file, "MSG_RUN_PROCESS\n");
-                fflush(g_p9_debug_log_file);
-            }
-#endif
             handle_run_process(msg_hdr.msg_id);
             fprintf(stderr, "MSG_PROCESS_FINISHED\n");
             break;
@@ -1438,12 +1425,6 @@ static void handle_message(void) {
         case MSG_MOUNT_VOLUME:
             fprintf(stderr, "MSG_MOUNT_VOLUME\n");
             handle_mount(msg_hdr.msg_id);
-#if WIN_ENABLE_DEBUG_FILE_LOG
-            if (g_p9_debug_log_file) {
-                fprintf(g_p9_debug_log_file, "MSG_MOUNT_VOLUME handled\n");
-                fflush(g_p9_debug_log_file);
-            }
-#endif
             break;
         case MSG_QUERY_OUTPUT:
             fprintf(stderr, "MSG_QUERY_OUTPUT\n");
@@ -1664,9 +1645,11 @@ int main(void) {
     setup_network();
     setup_agent_directories();
 
-    CHECK(initialize_p9_socket_descriptors());
     block_signals();
     setup_sigfd();
+
+    //make sure to create threads after blocking signals, not before. Otherwise signals are blocked.
+    CHECK(initialize_p9_socket_descriptors());
 
     main_loop();
     stop_network();
