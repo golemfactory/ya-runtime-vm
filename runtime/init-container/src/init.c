@@ -1597,9 +1597,8 @@ int main(void) {
     g_cmds_fd = CHECK(open(VPORT_CMD, O_RDWR | O_CLOEXEC));
     g_net_fd = CHECK(open(VPORT_NET, O_RDWR | O_CLOEXEC));
 #if BUILD_FOR_WIN_P9
-    g_p9_fd = CHECK(open(VPORT_P9, O_RDWR));
-    CHECK(initialize_p9_socket_descriptors()); //sets static variable g_p9_socket_fds
-#endif	
+    g_p9_fd = CHECK(open(VPORT_P9, O_RDWR | O_CLOEXEC));
+#endif
 
     CHECK(mkdir("/mnt", S_IRWXU));
     CHECK(mkdir("/mnt/image", S_IRWXU));
@@ -1665,6 +1664,7 @@ int main(void) {
     setup_network();
     setup_agent_directories();
 
+    CHECK(initialize_p9_socket_descriptors());
     block_signals();
     setup_sigfd();
 

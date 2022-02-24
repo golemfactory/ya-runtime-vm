@@ -65,9 +65,14 @@ static int read_exact(int fd, void* buf, size_t size) {
     return bytes_read;
 }
 
-static void* tunnel_from_p9_virtio_to_sock() {
+static void* tunnel_from_p9_virtio_to_sock(void *data) {
     const int bufferSize = MAX_PACKET_SIZE;
     char* buffer = malloc(bufferSize);
+
+    if (data != NULL) {
+        fprintf(stderr, "tunnel_from_p9_virtio_to_sock: data != NULL\n");
+        return NULL;
+    }
 
     while (true) {
         ssize_t bytes_read = 0;
