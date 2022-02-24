@@ -9,11 +9,9 @@
 
 int readn(int fd, void* buf, size_t size) {
     while (size) {
-        fprintf(stderr, "*** Readen: %d **** \n", (int)size);
-
         ssize_t ret = read(fd, buf, size);
         if (ret == 0) {
-            puts("readn: WAITING FOR HOST (1) ...");
+            puts("Waiting for host connection ...");
             sleep(1);
             continue;
         }
@@ -122,12 +120,10 @@ out:
 }
 
 int writen(int fd, const void* buf, size_t size) {
-    fprintf(stderr, "*** Writen: %d **** \n", (int)size);
-
     while (size) {
         ssize_t ret = write(fd, buf, size);
         if (ret == 0) {
-            puts("writen: WAITING FOR HOST (2) ...");
+            puts("Waiting for host connection ...");
             sleep(1);
             continue;
         }
@@ -165,7 +161,7 @@ int send_bytes_cyclic_buffer(int fd, struct cyclic_buffer* cb, uint64_t size) {
     while (size) {
         ssize_t ret = cyclic_buffer_write(fd, cb, size);
         if (ret == 0) {
-            puts("send_bytes_cyclic_buffer: WAITING FOR HOST (1) ...");
+            puts("Waiting for host connection ...");
             sleep(1);
             continue;
         }

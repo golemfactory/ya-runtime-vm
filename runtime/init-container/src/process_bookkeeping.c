@@ -1,13 +1,10 @@
 #include <stddef.h>
-#include <stdio.h>
 
 #include "process_bookkeeping.h"
 
 static struct process_desc* g_all_processes = NULL;
 
 void add_process(struct process_desc* proc_desc) {
-    fprintf(stderr, "Add process to bookkeeping: id: %ld pid: %d\n", proc_desc->id, proc_desc->pid);
-
     proc_desc->next = g_all_processes;
     proc_desc->prev = NULL;
     if (g_all_processes) {
@@ -17,7 +14,6 @@ void add_process(struct process_desc* proc_desc) {
 }
 
 void remove_process(struct process_desc* proc_desc) {
-    fprintf(stderr, "Remove process from bookkeeping: id: %ld pid: %d\n", proc_desc->id, proc_desc->pid);
     if (g_all_processes == proc_desc) {
         g_all_processes = proc_desc->next;
         if (g_all_processes) {

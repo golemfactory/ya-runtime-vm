@@ -213,8 +213,6 @@ struct exit_reason {
 };
 
 static void send_process_died(uint64_t id, struct exit_reason reason) {
-    fprintf(stderr, "send_process_died");
-
     struct msg_hdr resp = {
         .msg_id = 0,
         .type = NOTIFY_PROCESS_DIED,
@@ -272,10 +270,7 @@ static void handle_sigchld(void) {
         return;
     }
 
-    //fprintf(stderr, "START waitpid(child_pid, NULL, WNOHANG) child_pid: %d\n", child_pid, w_pid);
-
     pid_t w_pid = waitpid(child_pid, NULL, WNOHANG);
-    //fprintf(stderr, "FINISH waitpid(child_pid, NULL, WNOHANG) child_pid: %d\n", child_pid, w_pid);
     if (w_pid != child_pid) {
         fprintf(stderr, "Error at waitpid: %d: %m\n", w_pid);
         return;
@@ -1046,7 +1041,6 @@ static void handle_mount(msg_id_t msg_id) {
     ret = do_mount(tag, path);
 #endif
 
-
 out:
     free(path);
     free(tag);
@@ -1416,7 +1410,6 @@ static void handle_message(void) {
         case MSG_RUN_PROCESS:
             fprintf(stderr, "MSG_RUN_PROCESS\n");
             handle_run_process(msg_hdr.msg_id);
-            fprintf(stderr, "MSG_PROCESS_FINISHED\n");
             break;
         case MSG_KILL_PROCESS:
             fprintf(stderr, "MSG_KILL_PROCESS\n");
@@ -1482,7 +1475,6 @@ static noreturn void main_loop(void) {
     CHECK(epoll_ctl(g_epoll_fd, EPOLL_CTL_ADD, g_sig_fd, &event));
 
     while (1) {
-        fprintf(stderr, "$$$$$$$ epoll_wait started...\n");
         if (epoll_wait(g_epoll_fd, &event, 1, -1) < 0) {
             if (errno == EINTR || errno == EAGAIN) {
                 continue;
@@ -1490,7 +1482,6 @@ static noreturn void main_loop(void) {
             fprintf(stderr, "epoll failed: %m\n");
             die();
         }
-        fprintf(stderr, "$$$$$$$ epoll_wait ended...\n");
 
         if (event.events & EPOLLNVAL) {
             fprintf(stderr, "epoll error event: 0x%04hx\n", event.events);
@@ -1504,21 +1495,16 @@ static noreturn void main_loop(void) {
         }
 
         epoll_fd_desc = event.data.ptr;
-        fprintf(stderr, "$$$$$$$ epoll_fd_desc type: %d\n", epoll_fd_desc->type);
         switch (epoll_fd_desc->type) {
             case EPOLL_FD_CMDS:
                 if (event.events & EPOLLIN) {
-                    fprintf(stderr, "***** START -234 - handle_message()\n");
                     handle_message();
-                    fprintf(stderr, "***** FINISH-234 - handle_message()\n");
                 }
                 break;
             case EPOLL_FD_SIG:
-                fprintf(stderr, "^^^^^ START  ^^^ EPOLL_FD_SIG handle\n");
                 if (event.events & EPOLLIN) {
                     handle_sigchld();
                 }
-                fprintf(stderr, "^^^^^ FINISH ^^^ EPOLL_FD_SIG handle\n");
                 break;
             case EPOLL_FD_OUT:
                 /* Need to handle EPOLLOUT and EPOLLERR here. */
@@ -1527,9 +1513,7 @@ static noreturn void main_loop(void) {
             case EPOLL_FD_IN:
                 if (event.events & EPOLLIN) {
                     assert(epoll_fd_desc->data);
-                    fprintf(stderr, "***** START -444 - handle_output_available(&epoll_fd_desc)\n");
                     handle_output_available(&epoll_fd_desc);
-                    fprintf(stderr, "***** FINISH-444 - handle_output_available(&epoll_fd_desc)\n");
                 } else if (event.events & EPOLLHUP) {
                     CHECK(del_epoll_fd_desc(epoll_fd_desc));
                 }
