@@ -1,13 +1,19 @@
 CC := musl-gcc
 CXX := /bin/false
+ifdef IGNORE_WARNINGS
+CFLAGS := -std=c11 -O2 -fPIE -pie -Iinclude/
+else
 CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror -fPIE -pie -Iinclude/
+endif
 
 ifneq ($(DEBUG), "")
 CFLAGS += -DNDEBUG
 endif
 
+ifdef WINDOWS_P9
 CFLAGS += -DBUILD_FOR_WIN_P9=1
 CFLAGS += -DWIN_P9_EXTRA_DEBUG_INFO=0
+endif
 
 ifneq ($(findstring $(MAKEFLAGS),s),s)
 ifndef V
@@ -63,6 +69,7 @@ $(SRC_DIR)/forward.o: $(SRC_DIR)/forward.c
 	$(QUIET_CC)$(CC) $(CFLAGS) -o $@ -c $^
 
 init: $(UNPACKED_HEADERS) liburing $(OBJECTS) $(OBJECTS_EXT)
+	@echo "Compile params for init:" $(CC) $(CFLAGS)
 	$(QUIET_CC)$(CC) $(CFLAGS) -static -o $@ $(wordlist 3, $(words $^), $^) "$(CURDIR)/$(LIBURING_DIR)/src/liburing.a"
 	@# default musl libs on some distros have debug symbols, lets strip them (and everything else)
 	strip $@

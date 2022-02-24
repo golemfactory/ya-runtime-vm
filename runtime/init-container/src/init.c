@@ -1632,8 +1632,10 @@ int main(void) {
     block_signals();
     setup_sigfd();
 
+#if BUILD_FOR_WIN_P9
     //make sure to create threads after blocking signals, not before. Otherwise signals are blocked.
     CHECK(initialize_p9_socket_descriptors());
+#endif	
 
     main_loop();
     stop_network();
