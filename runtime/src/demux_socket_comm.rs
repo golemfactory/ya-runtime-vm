@@ -3,49 +3,55 @@ use std::convert::TryInto;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
+use futures::future::{Abortable, AbortHandle};
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 
 const MAX_PACKET_SIZE: usize = 16384;
 
-#[derive(Clone)]
 pub struct DemuxSocketHandle {
-    tx: tokio::sync::broadcast::Sender<()>,
+    abort_handle_reader: AbortHandle,
+    abort_handle_writers: Vec<AbortHandle>,
+    join_handle_reader: JoinHandle<()>,
+    join_handle_writers: Vec<JoinHandle<()>>,
 }
 
-impl Drop for DemuxSocketHandle {
-    fn drop(&mut self) {
-        let _ = self.tx.send(());
+pub async fn stop_demux_communication(dsh: DemuxSocketHandle) {
+    dsh.abort_handle_reader.abort();
+    for abort_handle_writer in dsh.abort_handle_writers.iter() {
+        abort_handle_writer.abort();
+    }
+    let _res = dsh.join_handle_reader.await;
+    for join_handle_writer in dsh.join_handle_writers {
+        let _res = join_handle_writer.await;
     }
 }
 
-#[derive(Default, Debug)]
-pub struct DemuxSocketCommunication {}
+pub fn start_demux_communication(
+    vm_stream: tokio::net::TcpStream,
+    p9_streams: Vec<tokio::net::TcpStream>,
+) -> anyhow::Result<DemuxSocketHandle> {
+    log::debug!("start_demux_communication - start");
 
-impl DemuxSocketCommunication {
-    pub fn new() -> Self {
-        todo!()
+    let (mut vm_read_part, vm_write_part) = tokio::io::split(vm_stream);
+
+    let mut p9_readers: Vec<ReadHalf<TcpStream>> = vec![];
+    let mut p9_writers: Vec<WriteHalf<TcpStream>> = vec![];
+
+    let vm_write_part = Arc::new(Mutex::new(vm_write_part));
+
+    for p9_stream in p9_streams {
+        let (vm_read_part, vm_write_part) = tokio::io::split(p9_stream);
+
+        p9_readers.push(vm_read_part);
+        p9_writers.push(vm_write_part);
     }
 
-    pub fn start_raw_comm(
-        &mut self,
-        vm_stream: tokio::net::TcpStream,
-        p9_streams: Vec<tokio::net::TcpStream>,
-    ) -> anyhow::Result<()> {
-        let (mut vm_read_part, vm_write_part) = tokio::io::split(vm_stream);
+    let (abort_handle, abort_registration) = AbortHandle::new_pair();
 
-        let mut p9_readers: Vec<ReadHalf<TcpStream>> = vec![];
-        let mut p9_writers: Vec<WriteHalf<TcpStream>> = vec![];
-
-        let vm_write_part = Arc::new(Mutex::new(vm_write_part));
-
-        for p9_stream in p9_streams {
-            let (vm_read_part, vm_write_part) = tokio::io::split(p9_stream);
-
-            p9_readers.push(vm_read_part);
-            p9_writers.push(vm_write_part);
-        }
-
-        let _vm_to_p9_splitter = tokio::spawn(async move {
+    log::debug!("spawning vm_to_p9_splitter...");
+    let vm_to_p9_splitter = tokio::spawn(async move {
+        let reader_future = Abortable::new(async move {
             loop {
                 let mut header_buffer = [0; 3];
                 let mut message_buffer = [0; MAX_PACKET_SIZE];
@@ -88,11 +94,29 @@ impl DemuxSocketCommunication {
                     break;
                 }
             }
-        });
+        }, abort_registration);
+        match reader_future.await {
+            Ok(()) => {
+                log::error!("Reader part of p9 communication ended too soon");
+            }
+            Err(_e) => {
+                log::info!("Future aborted");
+            }
+        }
+    });
 
-        for (channel, mut p9_reader) in p9_readers.into_iter().enumerate() {
-            let vm_write_part = vm_write_part.clone();
-            let _p9_to_vm_merger = tokio::spawn(async move {
+    let mut join_handle_writers:Vec<JoinHandle<()>> = vec!();
+    let mut abort_handles:Vec<AbortHandle> = vec!();
+
+
+    for (channel, mut p9_reader) in p9_readers.into_iter().enumerate() {
+        let vm_write_part = vm_write_part.clone();
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+
+        log::debug!("spawning p9_to_vm_merger channel {}...", channel);
+        let p9_to_vm_merger = tokio::spawn(async move {
+
+            let writer_future = Abortable::new(async move {
                 let mut message_buffer = [0; MAX_PACKET_SIZE];
 
                 loop {
@@ -140,52 +164,26 @@ impl DemuxSocketCommunication {
                         }
                     }
                 }
-            });
-        }
+            }, abort_registration);
 
-        /*
-        let mut senders = Vec::new();
-        let vm_stream_writer = Arc::new(Mutex::new(vm_stream.try_clone()?));
-        for (channel, mut stream) in p9_streams.into_iter().enumerate() {
-            let rx = rx.clone();
-            thread::spawn(move || {
-                loop {
-                    vm_stream_writer.lock().unwrap().write_all(...);
-                    rx.send((channel, Vec::new()));
+            match writer_future.await {
+                Ok(()) => {
+                    log::error!("Writer part of p9 communication ended too soon. channel: {}", channel);
                 }
-            })
-        }
-
-
-        let rsh= thread::spawn(move || {
-            let mut header_buffer = [0; 3];
-            let mut message_buffer = [0; MAX_PACKET_SIZE];
-            loop {
-                if let Err(e) = read_stream.read_exact(&mut header_buffer) {
-                    log::error!("unable to read dmux data: {}", e);
-                    break;
-                }
-
-                let (channel_bytes, packet_size_bytes) = header_buffer.split_at(1);
-                let channel = u8::from_le_bytes(channel_bytes.try_into().unwrap()) as usize;
-
-                if channel >= p9_streams_len {
-                    log::error!("channel exceeded number of connected p9 servers channel: {}, p9_stream.len: {}", channel, (*unsafe_data.obj_ptr).p9_streams.len());
-                    break;
-                }
-                let packet_size = u16::from_le_bytes(packet_size_bytes.try_into().unwrap()) as usize;
-
-                if packet_size > message_buffer.len() {
-                    log::error!("packet_size > message_buffer.len()");
-                    break;
-                }
-                if let Err(e) = p9_write_streams[channel].write_all(&mut message_buffer[0..packet_size]) {
-                    log::error!("unable to write dmux data: {}", e);
-                    break;
+                Err(_e) => {
+                    log::info!("Writer aborted for channel: {}", channel);
                 }
             }
-        });*/
-
-        Ok(())
+        });
+        join_handle_writers.push(p9_to_vm_merger);
+        abort_handles.push(abort_handle);
     }
+
+    Ok(DemuxSocketHandle {
+        join_handle_reader: vm_to_p9_splitter,
+        abort_handle_reader: abort_handle,
+        join_handle_writers: join_handle_writers,
+        abort_handle_writers: abort_handles
+    })
 }
+

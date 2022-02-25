@@ -20,6 +20,7 @@ use tokio::{
     process::Child,
     spawn,
 };
+use tokio::net::TcpStream;
 use ya_runtime_sdk::{
     runtime_api::{
         deploy::{DeployResult, StartMode},
@@ -28,12 +29,12 @@ use ya_runtime_sdk::{
     serialize, Context, EmptyResponse, EndpointResponse, EventEmitter, OutputResponse, ProcessId,
     ProcessIdResponse, RuntimeMode,
 };
-use ya_runtime_vm::raw_socket_comm::RawSocketCommunication;
 use ya_runtime_vm::{
     cpu::CpuInfo,
     deploy::Deployment,
     guest_agent_comm::{GuestAgent, Notification, RedirectFdType, RemoteCommandResult},
 };
+use ya_runtime_vm::demux_socket_comm::{DemuxSocketHandle, start_demux_communication, stop_demux_communication};
 
 const DIR_RUNTIME: &str = "runtime";
 #[cfg(unix)]
@@ -93,7 +94,7 @@ enum NetworkEndpoint {
 struct RuntimeData {
     runtime: Option<process::Child>,
     runtime_p9: Vec<process::Child>,
-    raw_socket_comm: RawSocketCommunication,
+    p9_communication_handle: Option<DemuxSocketHandle>,
     network: Option<NetworkEndpoint>,
     deployment: Option<Deployment>,
     ga: Option<Arc<Mutex<GuestAgent>>>,
@@ -437,20 +438,19 @@ async fn start(
 
     log::debug!("Connect to p9 servers...");
 
-    let vmp9stream: std::net::TcpStream =
-        std::net::TcpStream::connect(std::format!("127.0.0.1:{}", 9005))?;
+    let vmp9stream =
+        TcpStream::connect(std::format!("127.0.0.1:{}", 9005)).await?;
 
-    let mut p9streams: Vec<std::net::TcpStream> = vec![];
+    let mut p9streams: Vec<tokio::net::TcpStream> = vec![];
     {
         for (idx, _volume) in deployment.volumes.iter().enumerate() {
             let stream =
-                std::net::TcpStream::connect(std::format!("127.0.0.1:{}", 9101 + idx as i32))?;
+                TcpStream::connect(std::format!("127.0.0.1:{}", 9101 + idx as i32)).await?;
             p9streams.push(stream);
         }
     }
 
-    let mut r = RawSocketCommunication::new();
-    r.start_raw_comm(vmp9stream, p9streams);
+    let demux_socket_handle  = start_demux_communication(vmp9stream, p9streams)?;
 
     let ga = GuestAgent::connected(manager_sock, 10, move |notification, ga| {
         let mut emitter = emitter.clone();
@@ -472,7 +472,7 @@ async fn start(
     }
 
     data.runtime_p9 = runtime_p9s; //prevent dropping
-    data.raw_socket_comm = r; //prevent dropping
+    data.p9_communication_handle.replace(demux_socket_handle); //prevent dropping
     data.runtime.replace(runtime);
     data.network
         .replace(NetworkEndpoint::Socket(net_sock.to_owned()));
@@ -545,7 +545,13 @@ async fn kill_command(
 async fn stop(runtime_data: Arc<Mutex<RuntimeData>>) -> Result<(), server::ErrorResponse> {
     log::debug!("got shutdown");
     let mut data = runtime_data.lock().await;
+
+    if let Some(dsh) = data.p9_communication_handle.take() {
+        stop_demux_communication(dsh).await;
+    }
+
     let runtime = data.runtime().unwrap();
+
 
     {
         let mutex = data.ga().unwrap();
