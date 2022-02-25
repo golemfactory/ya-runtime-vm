@@ -1,20 +1,15 @@
-use std::convert::TryInto;
-use std::io::{Read, Write};
-use std::{thread, net, sync};
 use std::borrow::BorrowMut;
-use std::net::Shutdown;
-use std::ops::{Deref, DerefMut};
+use std::convert::TryInto;
 use std::sync::Arc;
-use tokio::sync::Mutex;
-use futures::channel;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
+use tokio::sync::Mutex;
 
-const MAX_PACKET_SIZE : usize = 16384;
+const MAX_PACKET_SIZE: usize = 16384;
 
 #[derive(Clone)]
 pub struct DemuxSocketHandle {
-    tx : tokio::sync::broadcast::Sender<()>
+    tx: tokio::sync::broadcast::Sender<()>,
 }
 
 impl Drop for DemuxSocketHandle {
@@ -24,22 +19,22 @@ impl Drop for DemuxSocketHandle {
 }
 
 #[derive(Default, Debug)]
-pub struct DemuxSocketCommunication {
-
-}
+pub struct DemuxSocketCommunication {}
 
 impl DemuxSocketCommunication {
-
     pub fn new() -> Self {
         todo!()
     }
 
-    pub fn start_raw_comm(&mut self, vm_stream: tokio::net::TcpStream, p9_streams: Vec<tokio::net::TcpStream>) -> anyhow::Result<()> {
-
+    pub fn start_raw_comm(
+        &mut self,
+        vm_stream: tokio::net::TcpStream,
+        p9_streams: Vec<tokio::net::TcpStream>,
+    ) -> anyhow::Result<()> {
         let (mut vm_read_part, vm_write_part) = tokio::io::split(vm_stream);
 
-        let mut p9_readers : Vec<ReadHalf<TcpStream>> = vec!();
-        let mut p9_writers : Vec<WriteHalf<TcpStream>> = vec!();
+        let mut p9_readers: Vec<ReadHalf<TcpStream>> = vec![];
+        let mut p9_writers: Vec<WriteHalf<TcpStream>> = vec![];
 
         let vm_write_part = Arc::new(Mutex::new(vm_write_part));
 
@@ -68,21 +63,28 @@ impl DemuxSocketCommunication {
                     break;
                 }
 
-                let packet_size = u16::from_le_bytes(packet_size_bytes.try_into().unwrap()) as usize;
+                let packet_size =
+                    u16::from_le_bytes(packet_size_bytes.try_into().unwrap()) as usize;
 
                 if packet_size > message_buffer.len() {
                     log::error!("packet_size > message_buffer.len(), packet_size: {}, message_buffer.len: {}", packet_size, message_buffer.len());
                     break;
                 }
 
-                if let Err(err) = vm_read_part.read_exact(&mut message_buffer[0..packet_size]).await{
+                if let Err(err) = vm_read_part
+                    .read_exact(&mut message_buffer[0..packet_size])
+                    .await
+                {
                     log::error!("read exact 2 {}", err);
                     break;
                 }
 
                 //check above guarantees that index will succeeded
-                if let Err(err) = p9_writers[channel].write_all(&mut message_buffer[0..packet_size]).await {
-                    log::error!("Write to p9_writer failed on channel {}", channel);
+                if let Err(err) = p9_writers[channel]
+                    .write_all(&mut message_buffer[0..packet_size])
+                    .await
+                {
+                    log::error!("Write to p9_writer failed on channel {}: {}", channel, err);
                     break;
                 }
             }
@@ -101,37 +103,43 @@ impl DemuxSocketCommunication {
                     }
                 };
 
-
                 {
                     let mut vm_write_guard = vm_write_part.lock().await;
 
                     let channel_u8 = channel as u8;
                     let mut channel_bytes = channel_u8.to_le_bytes();
-                    if let Err(err) = vm_write_guard.borrow_mut().write_all(&mut channel_bytes).await {
-                        log::error!("Write to vm_write_part failed");
+                    if let Err(err) = vm_write_guard
+                        .borrow_mut()
+                        .write_all(&mut channel_bytes)
+                        .await
+                    {
+                        log::error!("Write to vm_write_part failed: {}", err);
                         break;
                     }
 
                     let bytes_read_u16 = bytes_read as u16;
                     let mut packet_size_bytes = bytes_read_u16.to_le_bytes();
 
-                    if let Err(err) = vm_write_guard.borrow_mut().write_all(&mut packet_size_bytes).await {
-                        log::error!("Write to vm_write_part failed");
+                    if let Err(err) = vm_write_guard
+                        .borrow_mut()
+                        .write_all(&mut packet_size_bytes)
+                        .await
+                    {
+                        log::error!("Write to vm_write_part failed: {}", err);
                         break;
                     }
 
-                    if let Err(err) = vm_write_guard.borrow_mut().write_all(&mut message_buffer[0..bytes_read]).await {
-                        log::error!("Write to vm_write_part failed");
+                    if let Err(err) = vm_write_guard
+                        .borrow_mut()
+                        .write_all(&mut message_buffer[0..bytes_read])
+                        .await
+                    {
+                        log::error!("Write to vm_write_part failed: {}", err);
                         break;
                     }
                 }
-
             }
         });
-
-
-
-
 
         /*
         let mut senders = Vec::new();
@@ -177,7 +185,5 @@ impl DemuxSocketCommunication {
         });*/
 
         Ok(())
-
     }
-
 }

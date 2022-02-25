@@ -1,20 +1,19 @@
 use futures::FutureExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use std::{
     env,
     io::{self, prelude::*},
     process::Stdio,
     sync::Arc,
 };
-use std::time::Duration;
+use tokio::time::delay_for;
 use tokio::{
     process::{Child, Command},
     sync,
 };
-use tokio::time::delay_for;
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
 use ya_runtime_vm::raw_socket_comm::RawSocketCommunication;
-
 
 struct Notifications {
     process_died: sync::Notify,
@@ -42,7 +41,6 @@ impl Notifications {
         }
     }
 }
-
 
 async fn run_process_with_output(
     ga: &mut GuestAgent,
@@ -97,13 +95,14 @@ fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
         .display()
         .to_string()
 }
-fn spawn_9p_server(mount_point : String, port: i32) -> Child {
+fn spawn_9p_server(mount_point: String, port: i32) -> Child {
     let root_dir = get_root_dir();
     let project_dir = get_project_dir();
     let runtime_dir = project_dir.join("poc").join("runtime");
     let init_dir = project_dir.join("init-container");
 
-    let mut cmd = Command::new("C:/scx1332/FileServer9p/rust-9p/example/unpfs/target/release/unpfs.exe");
+    let mut cmd =
+        Command::new("C:/scx1332/FileServer9p/rust-9p/example/unpfs/target/release/unpfs.exe");
     cmd.env("RUST_LOG", "error");
 
     cmd.current_dir(runtime_dir).args(&[
@@ -112,7 +111,8 @@ fn spawn_9p_server(mount_point : String, port: i32) -> Child {
         "--network-address",
         std::format!("127.0.0.1:{}", port).as_str(),
         "--network-protocol",
-        "tcp"]);
+        "tcp",
+    ]);
     cmd.stdin(Stdio::null());
     cmd.spawn().expect("failed to spawn p9 server")
 }
@@ -236,14 +236,8 @@ async fn main() -> io::Result<()> {
     ];
     let should_spawn_vm = false;
     if should_spawn_vm {
-
-
         let _child = spawn_vm(&temp_path, &mount_args);
     }
-
-
-
-
 
     let ns = notifications.clone();
     let ga_mutex = GuestAgent::connected("127.0.0.1:9003", 10, move |n, _g| {
@@ -252,24 +246,27 @@ async fn main() -> io::Result<()> {
     })
     .await?;
 
-
-
     log::debug!("Spawn p9 servers...");
     {
         for (i, (tag, _)) in mount_args.iter().enumerate() {
-            let _ = spawn_9p_server(std::format!("C:/golem/ya-runtime-vm/runtime/temp{}", i), 9101 + i as i32);
+            let _ = spawn_9p_server(
+                std::format!("C:/golem/ya-runtime-vm/runtime/temp{}", i),
+                9101 + i as i32,
+            );
         }
     }
     delay_for(Duration::from_millis(1000)).await;
 
     log::debug!("Connect to p9 servers...");
 
-    let mut vmp9stream: std::net::TcpStream = std::net::TcpStream::connect(std::format!("127.0.0.1:{}", 9005))?;
+    let mut vmp9stream: std::net::TcpStream =
+        std::net::TcpStream::connect(std::format!("127.0.0.1:{}", 9005))?;
 
     let mut p9streams: Vec<std::net::TcpStream> = vec![];
     {
         for (i, (tag, _)) in mount_args.iter().enumerate() {
-            let mut stream = std::net::TcpStream::connect(std::format!("127.0.0.1:{}", 9101 + i as i32))?;
+            let mut stream =
+                std::net::TcpStream::connect(std::format!("127.0.0.1:{}", 9101 + i as i32))?;
             p9streams.push(stream);
         }
     }
@@ -278,14 +275,14 @@ async fn main() -> io::Result<()> {
     r.start_raw_comm(vmp9stream, p9streams);
 
     /*
-    let servers9p = Arc::new(Servers9p{writeHalfs: p9streams});
+        let servers9p = Arc::new(Servers9p{writeHalfs: p9streams});
 
-    let ns9p = servers9p.clone();
-    let ga_pp = GuestAgent9p::connected("127.0.0.1:9005", 10, move |n, _g| {
-        let notifications = ns9p.clone();
-        async move { notifications.clone().handle(n) }.boxed()
-    }).await?;
-*/
+        let ns9p = servers9p.clone();
+        let ga_pp = GuestAgent9p::connected("127.0.0.1:9005", 10, move |n, _g| {
+            let notifications = ns9p.clone();
+            async move { notifications.clone().handle(n) }.boxed()
+        }).await?;
+    */
     {
         /*
         let mut ga = ga_mutex.lock().await;
@@ -299,8 +296,6 @@ async fn main() -> io::Result<()> {
     log::debug!("end mnt loop");
     delay_for(Duration::from_millis(1000)).await;
     log::debug!("end delay");
-
-
 
     let no_redir = [None, None, None];
 
@@ -335,7 +330,7 @@ async fn main() -> io::Result<()> {
             "/bin/ls",
             &["ls", "-al", "/mnt/mnt1/tag1"],
         )
-            .await?;
+        .await?;
 
         let fds = [
             None,
@@ -358,7 +353,7 @@ async fn main() -> io::Result<()> {
             "/bin/cat",
             &["cat", "/mnt/mnt1/tag1/write_test"],
         )
-            .await?;
+        .await?;
 
         let id = ga
             .run_process("/bin/sleep", &["sleep", "10"], None, 0, 0, &no_redir, None)
@@ -403,31 +398,26 @@ async fn main() -> io::Result<()> {
         notifications.output_available.notified().await;
     }
 
-    
-/*
-    simple_run_command(&ga_mutex, "/bin/ls", &["ls", "-la"], "/", Some(&notifications)).await?;
-    delay_for(Duration::from_millis(1000)).await;
-    simple_run_command(&ga_mutex, "/bin/ls", &["ls", "-la"], "/dev", Some(&notifications)).await?;
-    delay_for(Duration::from_millis(1000)).await;
-    simple_run_command(&ga_mutex, "/bin/bash", &["bash", "-c",  "mkdir /mnt/mnt0/tag0/host_files  > /result.log 2> /error.log; echo output:; cat /result.log; echo errors:;cat /error.log"], "/mnt", Some(&notifications)).await?;
-    delay_for(Duration::from_millis(1000)).await;
-    //simple_run_command(&ga_mutex, "/bin/bash", &["bash", "-c",  "echo DUPA >> /dev/vport0p3"], "/dev", Some(&notifications)).await?;
+    /*
+        simple_run_command(&ga_mutex, "/bin/ls", &["ls", "-la"], "/", Some(&notifications)).await?;
+        delay_for(Duration::from_millis(1000)).await;
+        simple_run_command(&ga_mutex, "/bin/ls", &["ls", "-la"], "/dev", Some(&notifications)).await?;
+        delay_for(Duration::from_millis(1000)).await;
+        simple_run_command(&ga_mutex, "/bin/bash", &["bash", "-c",  "mkdir /mnt/mnt0/tag0/host_files  > /result.log 2> /error.log; echo output:; cat /result.log; echo errors:;cat /error.log"], "/mnt", Some(&notifications)).await?;
+        delay_for(Duration::from_millis(1000)).await;
+        //simple_run_command(&ga_mutex, "/bin/bash", &["bash", "-c",  "echo DUPA >> /dev/vport0p3"], "/dev", Some(&notifications)).await?;
 
-    //simple_run_command(&ga_mutex, "/bin/bash", &["bash", "-c",  "mount -t 9p -o trans=fd,rfdno=/dev/vport0p3,wfdno=/dev/vport0p3,version=9p2000.L hostshare /mnt/host_files > /result.log 2> /error.log; echo output:; cat /result.log; echo errors:;cat /error.log"], "/dev", Some(&notifications)).await?;
-    delay_for(Duration::from_millis(1000)).await;
-*/
+        //simple_run_command(&ga_mutex, "/bin/bash", &["bash", "-c",  "mount -t 9p -o trans=fd,rfdno=/dev/vport0p3,wfdno=/dev/vport0p3,version=9p2000.L hostshare /mnt/host_files > /result.log 2> /error.log; echo output:; cat /result.log; echo errors:;cat /error.log"], "/dev", Some(&notifications)).await?;
+        delay_for(Duration::from_millis(1000)).await;
+    */
     if false {
         let mut ga = ga_mutex.lock().await;
-
 
         //run_ls(&ga_mutex, &notifications, "/").await?;
         //run_ls(&ga_mutex, &notifications, "/bin").await?;
         //run_ls(&ga_mutex, &notifications, "/dev").await?;
         //run_ls(&ga_mutex, &notifications, "/mnt").await?;
         //run_cat(&ga_mutex, &notifications, "/dev", ".env").await?;
-
-
-
 
         run_process_with_output(
             &mut ga,

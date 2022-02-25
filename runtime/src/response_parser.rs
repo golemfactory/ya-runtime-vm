@@ -85,7 +85,6 @@ async fn recv_bytes<T: AsyncRead + Unpin>(stream: &mut T) -> io::Result<Vec<u8>>
 pub async fn parse_one_response<T: AsyncRead + Unpin>(
     stream: &mut T,
 ) -> io::Result<GuestAgentMessage> {
-
     let id = recv_u64(stream).await?;
 
     let typ = recv_u8(stream).await?;
