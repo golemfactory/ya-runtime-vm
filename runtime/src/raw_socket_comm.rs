@@ -1,9 +1,8 @@
-use std::cell::RefCell;
-use std::sync::{Arc, Mutex};
+use std::sync::{Mutex};
 use std::time::Duration;
 use std::cell::UnsafeCell;
 use std::io::prelude::*;
-use std::net::{Shutdown, TcpStream};
+use std::net::{Shutdown};
 use std::convert::TryInto;
 
 #[derive(Default, Debug)]
@@ -16,7 +15,7 @@ pub struct RawSocketCommunication {
 }
 
 pub struct SharedUnsafeData {
-    tri: i32,
+    //tri: i32,
     vm_stream: std::net::TcpStream,
     p9_streams: Vec<std::net::TcpStream>,
     vm_stream_write_mutex: Mutex::<i32>,
@@ -44,11 +43,11 @@ impl RawSocketCommunication {
         RawSocketCommunication{vm_stream_thread: None, p9_stream_threads: vec![], shared_unsafe_data: None}
     }
 
-    pub fn start_raw_comm(&mut self, mut vm_stream: std::net::TcpStream, mut p9_streams : Vec<std::net::TcpStream>) {
+    pub fn start_raw_comm(&mut self, vm_stream: std::net::TcpStream, p9_streams : Vec<std::net::TcpStream>) {
 
         let number_of_p9_threads = p9_streams.len();
 
-        self.shared_unsafe_data = Some(Box::new(UnsafeCell::new(SharedUnsafeData{tri: 1, vm_stream, p9_streams, vm_stream_write_mutex: Mutex::new(0) })));
+        self.shared_unsafe_data = Some(Box::new(UnsafeCell::new(SharedUnsafeData{vm_stream, p9_streams, vm_stream_write_mutex: Mutex::new(0) })));
 
 
         let unsafe_data = SharedUnsafeDataPointer{obj_ptr: self.shared_unsafe_data.as_ref().unwrap().get()};
@@ -103,7 +102,7 @@ impl RawSocketCommunication {
 
                     //log::debug!("Received packet channel: {}, packet_size: {}", channel, packet_size);
 
-                    (*unsafe_data.obj_ptr).p9_streams[channel].write_all(&mut message_buffer[0..packet_size]);
+                    let _r6 = (*unsafe_data.obj_ptr).p9_streams[channel].write_all(&mut message_buffer[0..packet_size]);
                 }
             }
         }));
@@ -132,7 +131,7 @@ impl RawSocketCommunication {
 
                             let channel_u8 = channel as u8;
                             let mut channel_bytes = channel_u8.to_le_bytes();
-                            (*unsafe_data.obj_ptr).vm_stream.write_all(&mut channel_bytes);
+                            let _r5 = (*unsafe_data.obj_ptr).vm_stream.write_all(&mut channel_bytes);
 
                             if TEST_CONCURRENT_ACCESS {
                                 std::thread::sleep(Duration::from_millis(50));
@@ -141,17 +140,17 @@ impl RawSocketCommunication {
                             let bytes_read_u16 = bytes_read as u16;
                             let mut packet_size_bytes = bytes_read_u16.to_le_bytes();
 
-                            (*unsafe_data.obj_ptr).vm_stream.write_all(&mut packet_size_bytes);
+                            let _r = (*unsafe_data.obj_ptr).vm_stream.write_all(&mut packet_size_bytes);
 
                             if TEST_CONCURRENT_ACCESS {
                                 std::thread::sleep(Duration::from_millis(50));
                                 let split_send = bytes_read / 2;
-                                (*unsafe_data.obj_ptr).vm_stream.write_all(&mut message_buffer[0..split_send]);
+                                let _r1 = (*unsafe_data.obj_ptr).vm_stream.write_all(&mut message_buffer[0..split_send]);
                                 std::thread::sleep(Duration::from_millis(50));
-                                (*unsafe_data.obj_ptr).vm_stream.write_all(&mut message_buffer[split_send..bytes_read]);
+                                let _r2 = (*unsafe_data.obj_ptr).vm_stream.write_all(&mut message_buffer[split_send..bytes_read]);
                             }
                             else {
-                                (*unsafe_data.obj_ptr).vm_stream.write_all(&mut message_buffer[0..bytes_read]);
+                                let _r3 = (*unsafe_data.obj_ptr).vm_stream.write_all(&mut message_buffer[0..bytes_read]);
                             }
 
 
@@ -163,23 +162,23 @@ impl RawSocketCommunication {
         }
     }
 
-    pub fn finish_raw_comm(mut self) {
+    pub fn finish_raw_comm(self) {
 
         if let Some(shared_data) = self.shared_unsafe_data {
             unsafe {
-                (*shared_data.get()).vm_stream.shutdown(Shutdown::Both);
-                (*shared_data.get()).p9_streams.iter().map(|p9stream| p9stream.shutdown(Shutdown::Both));
+                let _res1 = (*shared_data.get()).vm_stream.shutdown(Shutdown::Both);
+                let _res = (*shared_data.get()).p9_streams.iter().map(|p9stream| p9stream.shutdown(Shutdown::Both));
             }
         }
 
 
         if let Some(thread) = self.vm_stream_thread {
             log::debug!("Joining thread: thread_join_handle");
-            thread.join();
+            let _join_res = thread.join();
             log::debug!("Thread thread_join_handle joined");
         }
         for thread in self.p9_stream_threads {
-            thread.join();
+            let _join_res = thread.join();
         }
     }
 }

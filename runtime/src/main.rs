@@ -3,7 +3,7 @@ use futures::lock::Mutex;
 use futures::TryFutureExt;
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 use anyhow::anyhow;
@@ -25,7 +25,6 @@ use ya_runtime_sdk::{
         server,
     },
     serialize,
-    server::Server,
     Context, EmptyResponse, EndpointResponse, EventEmitter, OutputResponse, ProcessId,
     ProcessIdResponse, RuntimeMode,
 };
@@ -47,7 +46,7 @@ const FILE_SERVER_RUNTIME: &str = "ya-vm-file-server.exe";
 
 const FILE_VMLINUZ: &str = "vmlinuz-virt";
 const FILE_INITRAMFS: &str = "initramfs.cpio.gz";
-const FILE_TEST_IMAGE: &str = "self-test.gvmi";
+//const FILE_TEST_IMAGE: &str = "self-test.gvmi";
 const FILE_DEPLOYMENT: &str = "deployment.json";
 const DEFAULT_CWD: &str = "/";
 
@@ -278,7 +277,7 @@ async fn start(
 ) -> anyhow::Result<Option<serialize::json::Value>> {
     let runtime_dir = runtime_dir().expect("Unable to resolve current directory");
 
-    let uid = uuid::Uuid::new_v4().to_simple().to_string();
+    let _uid = uuid::Uuid::new_v4().to_simple().to_string();
     #[cfg(unix)]
     let manager_sock = std::env::temp_dir().join(format!("{}.sock", uid));
     #[cfg(windows)]
@@ -432,7 +431,7 @@ async fn start(
 
     let mut p9streams: Vec<std::net::TcpStream> = vec![];
     {
-        for (idx, volume) in deployment.volumes.iter().enumerate() {
+        for (idx, _volume) in deployment.volumes.iter().enumerate() {
             let stream = std::net::TcpStream::connect(std::format!("127.0.0.1:{}", 9101 + idx as i32))?;
             p9streams.push(stream);
         }
