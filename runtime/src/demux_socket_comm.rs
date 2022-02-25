@@ -90,56 +90,58 @@ impl DemuxSocketCommunication {
             }
         });
 
-        let _p9_to_vm_merger = tokio::spawn(async move {
-            let mut message_buffer = [0; MAX_PACKET_SIZE];
+        for (channel, mut p9_reader) in p9_readers.into_iter().enumerate() {
+            let vm_write_part = vm_write_part.clone();
+            let _p9_to_vm_merger = tokio::spawn(async move {
+                let mut message_buffer = [0; MAX_PACKET_SIZE];
 
-            loop {
-                let channel = 0;
-                let bytes_read = match p9_readers[channel].read(&mut message_buffer).await {
-                    Ok(bytes_read) => bytes_read,
-                    Err(err) => {
-                        log::error!("read p9 streams {}", err);
-                        break;
-                    }
-                };
+                loop {
+                    let bytes_read = match p9_reader.read(&mut message_buffer).await {
+                        Ok(bytes_read) => bytes_read,
+                        Err(err) => {
+                            log::error!("read p9 streams {}", err);
+                            break;
+                        }
+                    };
 
-                {
-                    let mut vm_write_guard = vm_write_part.lock().await;
-
-                    let channel_u8 = channel as u8;
-                    let mut channel_bytes = channel_u8.to_le_bytes();
-                    if let Err(err) = vm_write_guard
-                        .borrow_mut()
-                        .write_all(&mut channel_bytes)
-                        .await
                     {
-                        log::error!("Write to vm_write_part failed: {}", err);
-                        break;
-                    }
+                        let mut vm_write_guard = vm_write_part.lock().await;
 
-                    let bytes_read_u16 = bytes_read as u16;
-                    let mut packet_size_bytes = bytes_read_u16.to_le_bytes();
+                        let channel_u8 = channel as u8;
+                        let mut channel_bytes = channel_u8.to_le_bytes();
+                        if let Err(err) = vm_write_guard
+                            .borrow_mut()
+                            .write_all(&mut channel_bytes)
+                            .await
+                        {
+                            log::error!("Write to vm_write_part failed: {}", err);
+                            break;
+                        }
 
-                    if let Err(err) = vm_write_guard
-                        .borrow_mut()
-                        .write_all(&mut packet_size_bytes)
-                        .await
-                    {
-                        log::error!("Write to vm_write_part failed: {}", err);
-                        break;
-                    }
+                        let bytes_read_u16 = bytes_read as u16;
+                        let mut packet_size_bytes = bytes_read_u16.to_le_bytes();
 
-                    if let Err(err) = vm_write_guard
-                        .borrow_mut()
-                        .write_all(&mut message_buffer[0..bytes_read])
-                        .await
-                    {
-                        log::error!("Write to vm_write_part failed: {}", err);
-                        break;
+                        if let Err(err) = vm_write_guard
+                            .borrow_mut()
+                            .write_all(&mut packet_size_bytes)
+                            .await
+                        {
+                            log::error!("Write to vm_write_part failed: {}", err);
+                            break;
+                        }
+
+                        if let Err(err) = vm_write_guard
+                            .borrow_mut()
+                            .write_all(&mut message_buffer[0..bytes_read])
+                            .await
+                        {
+                            log::error!("Write to vm_write_part failed: {}", err);
+                            break;
+                        }
                     }
                 }
-            }
-        });
+            });
+        }
 
         /*
         let mut senders = Vec::new();
