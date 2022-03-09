@@ -452,7 +452,7 @@ impl GuestAgent {
                     io::ErrorKind::NotFound => {
                         log::info!("Waiting for Guest Agent socket ...");
                         if timeout_remaining > 0 {
-                            time::delay_for(time::Duration::from_secs(1)).await;
+                            time::sleep(time::Duration::from_secs(1)).await;
                             timeout_remaining -= 1;
                         } else {
                             break Err(io::Error::new(

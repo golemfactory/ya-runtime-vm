@@ -1,11 +1,11 @@
 use bollard_stubs::models::ContainerConfig;
-use crc::crc32;
+use crc::{Crc, CRC_32_ISO_HDLC};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::path::PathBuf;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
-use tokio_byteorder::LittleEndian;
+use tokio_byteorder::{AsyncReadBytesExt, LittleEndian};
 use uuid::Uuid;
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 
@@ -30,7 +30,7 @@ impl Deployment {
         task_package: PathBuf,
     ) -> Result<Self, anyhow::Error>
     where
-        Input: AsyncRead + AsyncSeek + Unpin,
+        Input: AsyncRead + AsyncReadBytesExt + AsyncSeek + Unpin,
     {
         let json_len: u32 = {
             let mut buf = [0; 8];
@@ -51,7 +51,9 @@ impl Deployment {
             buf
         };
 
-        if crc32::checksum_ieee(json.as_bytes()) != crc {
+        let crc32 = Crc::<u32>::new(&CRC_32_ISO_HDLC);
+
+        if crc32.checksum(json.as_bytes()) != crc {
             return Err(anyhow::anyhow!("Invalid ContainerConfig crc32 sum"));
         }
 

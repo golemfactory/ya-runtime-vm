@@ -70,7 +70,7 @@ impl Notifications {
             }
             Notification::ProcessDied { id, reason } => {
                 eprintln!("Process {} died with {:?}", id, reason);
-                self.process_died.notify();
+                self.process_died.notify_one();
             }
         }
     }
@@ -375,7 +375,7 @@ async fn main() -> anyhow::Result<()> {
     let temp_path = temp_dir.path();
 
     let notifications = Arc::new(Mutex::new(Notifications::new()));
-    let child = spawn_vm(&temp_path);
+    let mut child = spawn_vm(&temp_path);
 
     let ns = notifications.clone();
     let ga_mutex = GuestAgent::connected(temp_path.join("manager.sock"), 10, move |n, _g| {
@@ -424,7 +424,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     /* VM should quit now. */
-    let e = child.await.expect("failed to wait on child");
+    let e = child.wait().await.expect("failed to wait on child");
     eprintln!("{:?}", e);
 
     Ok(())

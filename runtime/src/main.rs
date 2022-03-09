@@ -379,7 +379,7 @@ async fn kill_command(
 async fn stop(runtime_data: Arc<Mutex<RuntimeData>>) -> Result<(), server::ErrorResponse> {
     log::debug!("got shutdown");
     let mut data = runtime_data.lock().await;
-    let runtime = data.runtime().unwrap();
+    let mut runtime = data.runtime().unwrap();
 
     {
         let mutex = data.ga().unwrap();
@@ -387,7 +387,11 @@ async fn stop(runtime_data: Arc<Mutex<RuntimeData>>) -> Result<(), server::Error
         convert_result(ga.quit().await, "Sending quit")?;
     }
 
-    runtime.await.expect("Waiting for runtime stop failed");
+    runtime
+        .wait()
+        .await
+        .expect("Waiting for runtime stop failed");
+
     Ok(())
 }
 

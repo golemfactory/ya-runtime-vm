@@ -5,7 +5,7 @@ use bollard::{
     Docker,
 };
 use bytes::{BufMut, Bytes, BytesMut};
-use futures::TryStreamExt;
+use futures::{future, TryStreamExt};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -134,17 +134,29 @@ impl DockerInstance {
             ..Default::default()
         };
 
-        let result = self.docker.create_exec(container_name, config).await?;
-        self.docker
-            .start_exec(&result.id, Some(exec::StartExecOptions { detach: false }))
-            .try_for_each(|results| async {
-                match results {
-                    exec::StartExecResults::Attached { log } => on_output(log.to_string()),
-                    exec::StartExecResults::Detached => (),
-                }
-                Ok(())
-            })
+        let create_results = self.docker.create_exec(container_name, config).await?;
+
+        let start_results = self
+            .docker
+            .start_exec(
+                &create_results.id,
+                Some(exec::StartExecOptions { detach: false }),
+            )
             .await?;
+
+        match start_results {
+            exec::StartExecResults::Attached { output, input: _ } => {
+                output
+                    .try_for_each(|output| {
+                        on_output(output.to_string());
+
+                        future::ready(Ok(()))
+                    })
+                    .await?;
+            }
+            exec::StartExecResults::Detached => (),
+        };
+
         Ok(())
     }
 

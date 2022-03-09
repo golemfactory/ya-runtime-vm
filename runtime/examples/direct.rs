@@ -29,11 +29,11 @@ impl Notifications {
         match notification {
             Notification::OutputAvailable { id, fd } => {
                 println!("Process {} has output available on fd {}", id, fd);
-                self.output_available.notify();
+                self.output_available.notify_one();
             }
             Notification::ProcessDied { id, reason } => {
                 println!("Process {} died with {:?}", id, reason);
-                self.process_died.notify();
+                self.process_died.notify_one();
             }
         }
     }
@@ -166,7 +166,7 @@ async fn main() -> io::Result<()> {
         ("tag0", temp_path.display()),
         ("tag1", inner_path.display()),
     ];
-    let child = spawn_vm(&temp_path, &mount_args);
+    let mut child = spawn_vm(&temp_path, &mount_args);
 
     let ns = notifications.clone();
     let ga_mutex = GuestAgent::connected(temp_path.join("manager.sock"), 10, move |n, _g| {
@@ -334,7 +334,7 @@ async fn main() -> io::Result<()> {
     notifications.process_died.notified().await;
 
     /* VM should quit now. */
-    let e = child.await.expect("failed to wait on child");
+    let e = child.wait().await.expect("failed to wait on child");
     println!("{:?}", e);
 
     Ok(())
