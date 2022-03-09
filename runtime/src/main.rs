@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use structopt::StructOpt;
 use tokio::net::TcpStream;
-use tokio::time::delay_for;
+use tokio::time::sleep;
 use tokio::{
     fs,
     io::{self, AsyncBufReadExt, AsyncWriteExt},
@@ -26,7 +26,9 @@ use ya_runtime_sdk::{
         deploy::{DeployResult, StartMode},
         server,
     },
-    serialize, Context, EmptyResponse, EndpointResponse, EventEmitter, OutputResponse, ProcessId,
+    serialize,
+    server::Server,
+    Context, EmptyResponse, EndpointResponse, EventEmitter, OutputResponse, ProcessId,
     ProcessIdResponse, RuntimeMode,
 };
 use ya_runtime_vm::demux_socket_comm::{
@@ -446,7 +448,7 @@ async fn start(
             runtime_p9s.push(runtime_p9);
         }
     }
-    delay_for(Duration::from_millis(1000)).await;
+    sleep(Duration::from_millis(1000)).await;
 
     log::debug!("Connect to p9 servers...");
 
@@ -570,7 +572,7 @@ async fn stop(runtime_data: Arc<Mutex<RuntimeData>>) -> Result<(), server::Error
         stop_demux_communication(dsh).await;
     }
 
-    let runtime = data.runtime().unwrap();
+    let mut runtime = data.runtime().unwrap();
 
     {
         let mutex = data.ga().unwrap();
@@ -578,7 +580,7 @@ async fn stop(runtime_data: Arc<Mutex<RuntimeData>>) -> Result<(), server::Error
         convert_result(ga.quit().await, "Sending quit")?;
     }
 
-    runtime.await.expect("Waiting for runtime stop failed");
+    runtime.wait().await.expect("Waiting for runtime stop failed");
     Ok(())
 }
 

@@ -71,7 +71,7 @@ impl server::RuntimeHandler for Events {
                 let died = was_running && !status.running;
                 data.status.replace(status);
                 if died {
-                    data.died.notify();
+                    data.died.notify_one();
                 }
             }
         }
@@ -91,7 +91,8 @@ impl Clone for Events {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    
     let root_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
         .join("..")
         .canonicalize()
@@ -112,20 +113,20 @@ async fn main() -> anyhow::Result<()> {
 
     let mut cmd = Command::new(&runtime_path);
     cmd.env("RUST_LOG", "debug").args(&args).arg("deploy");
-    let child = cmd.spawn()?;
-    child.await?;
+    let mut child = cmd.spawn()?;
+    child.wait().await?;
 
     let mut cmd = Command::new(&runtime_path);
     cmd.env("RUST_LOG", "debug").args(&args).arg("start");
 
     let events = Events::new();
 
-    let c = server::spawn(cmd, events.clone()).await?;
+    // let c = server::spawn(cmd, events.clone()).await?;
 
-    {
-        let result = c.hello("0.0.0x").await;
-        log::info!("hello_result: {:?}", result);
-    }
+    // {
+    //     let result = c.hello("0.0.0x").await;
+    //     log::info!("hello_result: {:?}", result);
+    // }
 
     {
         let run = server::RunProcess {
@@ -139,14 +140,14 @@ async fn main() -> anyhow::Result<()> {
             stderr: None,
         };
         log::info!("running {:?}", run);
-        let pid = c
-            .run_process(run)
-            .await
-            .map_err(|e| anyhow::anyhow!("{:?}", e))?
-            .pid;
-        log::info!("pid: {}", pid);
+        // let pid = c
+        //     .run_process(run)
+        //     .await
+        //     .map_err(|e| anyhow::anyhow!("{:?}", e))?
+        //     .pid;
+        // log::info!("pid: {}", pid);
 
-        events.process_died(pid).notified().await;
+        // events.process_died(pid).notified().await;
 
         // TODO: get output
     }
@@ -160,21 +161,21 @@ async fn main() -> anyhow::Result<()> {
             stderr: None,
         };
         log::info!("running {:?}", run);
-        let pid = c
-            .run_process(run)
-            .await
-            .map_err(|e| anyhow::anyhow!("{:?}", e))?
-            .pid;
-        log::info!("pid: {}", pid);
+        // let pid = c
+        //     .run_process(run)
+        //     .await
+        //     .map_err(|e| anyhow::anyhow!("{:?}", e))?
+        //     .pid;
+        // log::info!("pid: {}", pid);
 
-        c.kill_process(server::KillProcess {
-            pid: pid,
-            signal: 0, // TODO
-        });
-        events.process_died(pid).notified().await;
+        // c.kill_process(server::KillProcess {
+        //     pid: pid,
+        //     signal: 0, // TODO
+        // });
+        // events.process_died(pid).notified().await;
     }
 
-    c.shutdown().await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
+    // c.shutdown().await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
 
     Ok(())
 }

@@ -32,11 +32,11 @@ impl Notifications {
         match notification {
             Notification::OutputAvailable { id, fd } => {
                 log::debug!("Process {} has output available on fd {}", id, fd);
-                self.output_available.notify();
+                self.output_available.notify_one();
             }
             Notification::ProcessDied { id, reason } => {
                 log::debug!("Process {} died with {:?}", id, reason);
-                self.process_died.notify();
+                self.process_died.notify_one();
             }
         }
     }
