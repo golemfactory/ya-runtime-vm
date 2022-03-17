@@ -12,6 +12,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 use structopt::StructOpt;
+use tokio::net::TcpStream;
 use tokio::time::delay_for;
 use tokio::{
     fs,
@@ -20,7 +21,6 @@ use tokio::{
     process::Child,
     spawn,
 };
-use tokio::net::TcpStream;
 use ya_runtime_sdk::{
     runtime_api::{
         deploy::{DeployResult, StartMode},
@@ -29,12 +29,14 @@ use ya_runtime_sdk::{
     serialize, Context, EmptyResponse, EndpointResponse, EventEmitter, OutputResponse, ProcessId,
     ProcessIdResponse, RuntimeMode,
 };
+use ya_runtime_vm::demux_socket_comm::{
+    start_demux_communication, stop_demux_communication, DemuxSocketHandle,
+};
 use ya_runtime_vm::{
     cpu::CpuInfo,
     deploy::Deployment,
     guest_agent_comm::{GuestAgent, Notification, RedirectFdType, RemoteCommandResult},
 };
-use ya_runtime_vm::demux_socket_comm::{DemuxSocketHandle, start_demux_communication, stop_demux_communication};
 
 const DIR_RUNTIME: &str = "runtime";
 #[cfg(unix)]
@@ -44,6 +46,9 @@ const FILE_RUNTIME: &str = "qemu-system-x86_64.exe";
 
 #[cfg(windows)]
 const FILE_SERVER_RUNTIME: &str = "ya-vm-file-server.exe";
+
+#[cfg(unix)]
+const FILE_SERVER_RUNTIME: &str = "ya-vm-file-server";
 
 const FILE_VMLINUZ: &str = "vmlinuz-virt";
 const FILE_INITRAMFS: &str = "initramfs.cpio.gz";
@@ -267,6 +272,7 @@ fn spawn_9p_server(mount_point: String, log_path: String, port: i32) -> anyhow::
 
     cmd.stdin(Stdio::null());
     cmd.kill_on_drop(true);
+
     cmd.spawn().map_err(|err| {
         log::error!("Error when spawning p9 server {}", err);
         anyhow::Error::from(err)
@@ -280,37 +286,40 @@ async fn start(
 ) -> anyhow::Result<Option<serialize::json::Value>> {
     let runtime_dir = runtime_dir().expect("Unable to resolve current directory");
 
-    let _uid = uuid::Uuid::new_v4().to_simple().to_string();
-    #[cfg(unix)]
-    let manager_sock = std::env::temp_dir().join(format!("{}.sock", uid));
-    #[cfg(windows)]
-    let manager_sock = "127.0.0.1:9003";
+    let manager_sock;
+    let net_sock;
+    let chardev;
 
     #[cfg(unix)]
-    let net_sock = std::env::temp_dir().join(format!("{}_net.sock", uid));
+    {
+        let uid = uuid::Uuid::new_v4().to_simple().to_string();
+        manager_sock = std::env::temp_dir().join(format!("{}.sock", uid));
+        net_sock = std::env::temp_dir().join(format!("{}_net.sock", uid));
+
+        chardev = |n, p: &PathBuf| format!("socket,path={},server,nowait,id={}", p.display(), n);
+    }
 
     #[cfg(windows)]
-    let net_sock = "127.0.0.1:9004";
+    {
+        manager_sock = "127.0.0.1:9003";
+        net_sock = "127.0.0.1:9004";
 
-    #[cfg(windows)]
+        chardev = |n, p: &str| {
+            let addr: SocketAddr = p.parse().unwrap();
+            format!(
+                "socket,host={},port={},server,nowait,id={}",
+                addr.ip(),
+                addr.port(),
+                n
+            );
+        };
+    }
+
     let p9_sock = "127.0.0.1:9005";
 
     let mut data = runtime_data.lock().await;
     let deployment = data.deployment().expect("Missing deployment data");
 
-    #[cfg(unix)]
-    let chardev = |n, p: &PathBuf| format!("socket,path={},server,nowait,id={}", p.display(), n);
-    #[cfg(windows)]
-    let chardev = |n, p: &str| {
-        let addr: SocketAddr = p.parse().unwrap();
-        format!(
-            "socket,host={},port={},server,nowait,id={}",
-            addr.ip(),
-            addr.port(),
-            n
-        )
-    };
-    #[cfg(windows)]
     let chardev_wait = |n, p: &str| {
         let addr: SocketAddr = p.parse().unwrap();
         format!(
@@ -334,6 +343,9 @@ async fn start(
     let chardev3 = chardev_wait("p9_cdev", &p9_sock);
 
     let cpu_string = deployment.cpu_cores.to_string();
+
+    let acceleration = if cfg!(windows) { "whpx" } else { "kvm" };
+
     let args = &[
         "-m",
         tmp0.as_str(),
@@ -373,7 +385,7 @@ async fn start(
         tmp1.as_str(),
         "-no-reboot",
         "-accel",
-        "whpx",
+        acceleration,
         "-nodefaults",
         "--serial",
         "stdio",
@@ -438,8 +450,7 @@ async fn start(
 
     log::debug!("Connect to p9 servers...");
 
-    let vmp9stream =
-        TcpStream::connect(std::format!("127.0.0.1:{}", 9005)).await?;
+    let vmp9stream = TcpStream::connect(std::format!("127.0.0.1:{}", 9005)).await?;
 
     let mut p9streams: Vec<tokio::net::TcpStream> = vec![];
     {
@@ -450,16 +461,20 @@ async fn start(
         }
     }
 
-    let demux_socket_handle  = start_demux_communication(vmp9stream, p9streams)?;
+    let demux_socket_handle = start_demux_communication(vmp9stream, p9streams)?;
 
-    let ga = GuestAgent::connected(manager_sock, 10, move |notification, ga| {
-        let mut emitter = emitter.clone();
-        async move {
-            let status = notification_into_status(notification, ga).await;
-            emitter.emit(status).await;
-        }
-        .boxed()
-    })
+    let ga = GuestAgent::connected(
+        manager_sock.to_str().unwrap(),
+        10,
+        move |notification, ga| {
+            let mut emitter = emitter.clone();
+            async move {
+                let status = notification_into_status(notification, ga).await;
+                emitter.emit(status).await;
+            }
+            .boxed()
+        },
+    )
     .await?;
 
     {
@@ -552,7 +567,6 @@ async fn stop(runtime_data: Arc<Mutex<RuntimeData>>) -> Result<(), server::Error
 
     let runtime = data.runtime().unwrap();
 
-
     {
         let mutex = data.ga().unwrap();
         let mut ga = mutex.lock().await;
@@ -643,8 +657,14 @@ async fn join_network(
         .network
         .as_ref()
         .map(|network| match network {
-            // TODO: unix
+            #[cfg(windows)]
             NetworkEndpoint::Socket(path) => path.clone(),
+            #[cfg(unix)]
+            NetworkEndpoint::Socket(path) => path
+                .clone()
+                .into_os_string()
+                .into_string()
+                .expect("Invalid endpoint path"),
         })
         .expect("No network endpoint");
 
