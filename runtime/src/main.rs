@@ -311,7 +311,7 @@ async fn start(
                 addr.ip(),
                 addr.port(),
                 n
-            );
+            )
         };
     }
 
@@ -463,8 +463,13 @@ async fn start(
 
     let demux_socket_handle = start_demux_communication(vmp9stream, p9streams)?;
 
+    #[cfg(unix)]
+    let path = manager_sock.to_str().unwrap();
+    #[cfg(windows)]
+    let path = manager_sock;
+
     let ga = GuestAgent::connected(
-        manager_sock.to_str().unwrap(),
+        path,
         10,
         move |notification, ga| {
             let mut emitter = emitter.clone();
