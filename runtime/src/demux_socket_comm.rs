@@ -1,8 +1,7 @@
 use std::borrow::BorrowMut;
 use std::convert::TryInto;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use futures::future::{Abortable, AbortHandle};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -29,14 +28,14 @@ pub async fn stop_demux_communication(dsh: DemuxSocketHandle) {
 
 pub fn start_demux_communication(
     vm_stream: tokio::net::TcpStream,
-    p9_streams: Vec<tokio::net::TcpStream>,
+    p9_streams: Vec<DuplexStream>,
 ) -> anyhow::Result<DemuxSocketHandle> {
     log::debug!("start_demux_communication - start");
 
     let (mut vm_read_part, vm_write_part) = tokio::io::split(vm_stream);
 
-    let mut p9_readers: Vec<ReadHalf<TcpStream>> = vec![];
-    let mut p9_writers: Vec<WriteHalf<TcpStream>> = vec![];
+    let mut p9_readers = vec![];
+    let mut p9_writers = vec![];
 
     let vm_write_part = Arc::new(Mutex::new(vm_write_part));
 

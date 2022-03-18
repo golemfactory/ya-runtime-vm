@@ -56,14 +56,15 @@ assets = [
     ],
 ]
 
-# TODO: ya-runtime-sdk uses tokio 0.2, and panics
 [dependencies.ya-runtime-sdk]
-# version = "0.2.1"
 features = ["macros"]
+# TODO: don't use side-branch
 git = "https://github.com/golemfactory/ya-runtime-sdk"
 branch = "sz/update_tokio"
 
 [dependencies]
+# TODO: don't use side-branch
+ya-vm-file-server = {git = "https://github.com/golemfactory/ya-vm-file-server", branch = "sz/add_inproc_communication"}
 anyhow = "1.0"
 bollard-stubs = "1.40.2"
 crc = "2.1.0"
