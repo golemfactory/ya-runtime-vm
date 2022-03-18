@@ -2,6 +2,7 @@ use futures::channel::mpsc;
 use futures::future::{BoxFuture, FutureExt};
 use futures::lock::Mutex;
 use futures::{SinkExt, StreamExt};
+// use std::path::Path;
 //use std::net::SocketAddr;
 use std::sync::Arc;
 use std::{io, marker::PhantomData};
@@ -105,10 +106,10 @@ type PlatformStream = UnixStream;
 #[cfg(windows)]
 type PlatformStream = TcpStream;
 
-#[cfg(unix)]
-type PlatformAddr = Path;
 
 /*
+#[cfg(unix)]
+type PlatformAddr = Path;
 #[cfg(windows)]
 type PlatformAddr = SocketAddr;
 */
