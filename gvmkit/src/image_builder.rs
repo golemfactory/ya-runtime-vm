@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use crc::crc32;
+use crc::{self, Crc, CRC_32_ISO_HDLC};
 use std::{
     fs,
     io::Write,
@@ -44,7 +44,7 @@ pub async fn build_image(
         .await
         .spinner_result(&spinner)?;
 
-    let spinner = Spinner::new("Copying image contents").ticking();
+    let spinner = Spinner::new("Copying image contents".to_string()).ticking();
     let (hash, cfg) = docker.get_config(cont_name).await.spinner_err(&spinner)?;
     let tar_bytes = docker
         .download(cont_name, "/")
@@ -131,7 +131,9 @@ fn add_metadata_outside(image_path: &Path, config: &ContainerConfig) -> anyhow::
     serde_json::to_writer(&mut json_buf, config)?;
     let mut file = fs::OpenOptions::new().append(true).open(image_path)?;
     let meta_size = json_buf.bytes.len();
-    let crc = crc32::checksum_ieee(&json_buf.bytes);
+
+    let crc32 = Crc::<u32>::new(&CRC_32_ISO_HDLC);
+    let crc = crc32.checksum(&json_buf.bytes);
     log::debug!("Image metadata checksum: 0x{:x}", crc);
     file.write(&crc.to_le_bytes())?;
     file.write(&json_buf.bytes)?;

@@ -13,12 +13,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use structopt::StructOpt;
 use tokio::net::TcpStream;
-use tokio::time::delay_for;
+use tokio::time::sleep;
+
 use tokio::{
     fs,
     io::{self, AsyncBufReadExt, AsyncWriteExt},
     process,
-    process::Child,
     spawn,
 };
 use ya_runtime_sdk::{
@@ -26,7 +26,8 @@ use ya_runtime_sdk::{
         deploy::{DeployResult, StartMode},
         server,
     },
-    serialize, Context, EmptyResponse, EndpointResponse, EventEmitter, OutputResponse, ProcessId,
+    serialize,
+    Context, EmptyResponse, EndpointResponse, EventEmitter, OutputResponse, ProcessId,
     ProcessIdResponse, RuntimeMode,
 };
 use ya_runtime_vm::demux_socket_comm::{
@@ -38,17 +39,13 @@ use ya_runtime_vm::{
     guest_agent_comm::{GuestAgent, Notification, RedirectFdType, RemoteCommandResult},
 };
 
+use ya_vm_file_server::InprocServer;
+
 const DIR_RUNTIME: &str = "runtime";
 #[cfg(unix)]
 const FILE_RUNTIME: &'static str = "vmrt";
 #[cfg(windows)]
 const FILE_RUNTIME: &str = "qemu-system-x86_64.exe";
-
-#[cfg(windows)]
-const FILE_SERVER_RUNTIME: &str = "ya-vm-file-server.exe";
-
-#[cfg(unix)]
-const FILE_SERVER_RUNTIME: &str = "ya-vm-file-server";
 
 const FILE_VMLINUZ: &str = "vmlinuz-virt";
 const FILE_INITRAMFS: &str = "initramfs.cpio.gz";
@@ -98,7 +95,7 @@ enum NetworkEndpoint {
 #[derive(Default)]
 struct RuntimeData {
     runtime: Option<process::Child>,
-    runtime_p9: Vec<process::Child>,
+    runtime_p9: Vec<InprocServer>,
     p9_communication_handle: Option<DemuxSocketHandle>,
     network: Option<NetworkEndpoint>,
     deployment: Option<Deployment>,
@@ -153,7 +150,12 @@ impl ya_runtime_sdk::Runtime for Runtime {
                 data.deployment.replace(deployment);
             }
 
-            start(workdir, data, emitter).await
+            let res = start(workdir, data, emitter).await;
+            if let Err(e) = &res {
+                log::error!("Starting the runtime failed with error {e}");
+            }
+
+            res
         }
         .map_err(Into::into)
         .boxed_local()
@@ -240,43 +242,6 @@ async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<Option<serialize::
         vols: deployment.volumes,
         start_mode: StartMode::Blocking,
     })?))
-}
-
-fn spawn_9p_server(mount_point: String, log_path: String, port: i32) -> anyhow::Result<Child> {
-    let runtime_dir = runtime_dir().expect("Unable to resolve current directory");
-
-    let exe_path = runtime_dir.join(FILE_SERVER_RUNTIME);
-    let mut cmd = process::Command::new(&exe_path);
-    cmd.env("RUST_LOG", "error");
-
-    log::debug!(
-        "Running {}. Mount point: {}, port: {}",
-        exe_path.to_str().unwrap_or(""),
-        mount_point,
-        port
-    );
-
-    let local_address = std::format!("127.0.0.1:{}", port);
-    let args = &[
-        "--mount-point",
-        mount_point.as_str(),
-        "--log-path",
-        log_path.as_str(),
-        "--network-address",
-        local_address.as_str(),
-        "--network-protocol",
-        "tcp",
-    ];
-
-    cmd.current_dir(&runtime_dir).args(args);
-
-    cmd.stdin(Stdio::null());
-    cmd.kill_on_drop(true);
-
-    cmd.spawn().map_err(|err| {
-        log::error!("Error when spawning p9 server {}", err);
-        anyhow::Error::from(err)
-    })
 }
 
 async fn start(
@@ -422,43 +387,34 @@ async fn start(
     spawn(reader_to_log(stdout));
     spawn(reader_to_log_error(stderr));
 
-    log::debug!("Spawn p9 servers...");
 
-    let mut runtime_p9s: Vec<process::Child> = vec![];
+    let vmp9stream = connect_to_vm_9p_endpoint(&std::format!("127.0.0.1:{}", 9005), 10).await?;
 
-    {
-        for (idx, volume) in deployment.volumes.iter().enumerate() {
-            let mount_point_host = work_dir
-                .join(&volume.name)
-                .to_str()
-                .ok_or(anyhow!("cannot resolve 9p mount point"))?
-                .to_string();
-            let runtime_p9 = spawn_9p_server(
-                mount_point_host,
-                work_dir
-                    .join("logs")
-                    .join(std::format!("ya-vm-file-server_{}.log", idx))
-                    .to_str()
-                    .unwrap_or("")
-                    .to_string(),
-                9101 + idx as i32,
-            )?;
-            runtime_p9s.push(runtime_p9);
-        }
+    log::debug!("Spawn 9P inproc servers...");
+
+    let mut runtime_9ps = vec![];
+
+    for volume in deployment.volumes.iter() {
+        let mount_point_host = work_dir
+            .join(&volume.name)
+            .to_str()
+            .ok_or(anyhow!("cannot resolve 9P mount point"))?
+            .to_string();
+
+        let runtime_9p = InprocServer::new(&mount_point_host);
+
+        runtime_9ps.push(runtime_9p);
     }
-    delay_for(Duration::from_millis(1000)).await;
 
-    log::debug!("Connect to p9 servers...");
+    log::debug!("Connect to 9P inproc servers...");
 
-    let vmp9stream = TcpStream::connect(std::format!("127.0.0.1:{}", 9005)).await?;
 
-    let mut p9streams: Vec<tokio::net::TcpStream> = vec![];
-    {
-        for (idx, _volume) in deployment.volumes.iter().enumerate() {
-            let stream =
-                TcpStream::connect(std::format!("127.0.0.1:{}", 9101 + idx as i32)).await?;
-            p9streams.push(stream);
-        }
+    let mut p9streams = vec![];
+
+
+    for server in &runtime_9ps {
+        let client_stream = server.attach_client();
+        p9streams.push(client_stream);
     }
 
     let demux_socket_handle = start_demux_communication(vmp9stream, p9streams)?;
@@ -468,19 +424,16 @@ async fn start(
     #[cfg(windows)]
     let path = manager_sock;
 
-    let ga = GuestAgent::connected(
-        path,
-        10,
-        move |notification, ga| {
-            let mut emitter = emitter.clone();
-            async move {
-                let status = notification_into_status(notification, ga).await;
-                emitter.emit(status).await;
-            }
-            .boxed()
-        },
-    )
+    let ga = GuestAgent::connected(path, 10, move |notification, ga| {
+        let mut emitter = emitter.clone();
+        async move {
+            let status = notification_into_status(notification, ga).await;
+            emitter.emit(status).await;
+        }
+        .boxed()
+    })
     .await?;
+
 
     {
         let mut ga = ga.lock().await;
@@ -491,7 +444,7 @@ async fn start(
         }
     }
 
-    data.runtime_p9 = runtime_p9s; //prevent dropping
+    data.runtime_p9 = runtime_9ps; //prevent dropping
     data.p9_communication_handle.replace(demux_socket_handle); //prevent dropping
     data.runtime.replace(runtime);
     data.network
@@ -499,6 +452,26 @@ async fn start(
     data.ga.replace(ga);
 
     Ok(None)
+}
+
+async fn connect_to_vm_9p_endpoint(address: &str, tries: i32) -> anyhow::Result<TcpStream> {
+    log::debug!("Connect to the VM 9P endpoint...");
+
+    for _ in 0..tries {
+        match TcpStream::connect(address).await {
+            Ok(stream) => {
+                log::debug!("Connected to the VM 9P endpoint");
+                return Ok(stream);
+            }
+            Err(e) => {
+                log::debug!("Failed to connect to the VM 9P endpoint: {e}");
+                // The VM is not ready yet, try again
+                sleep(Duration::from_secs(1)).await;
+            },
+        };
+    }
+
+    Err(anyhow!("Failed to connect to the VM 9P endpoint after #{tries} tries"))
 }
 
 async fn run_command(
@@ -570,7 +543,7 @@ async fn stop(runtime_data: Arc<Mutex<RuntimeData>>) -> Result<(), server::Error
         stop_demux_communication(dsh).await;
     }
 
-    let runtime = data.runtime().unwrap();
+    let mut runtime = data.runtime().unwrap();
 
     {
         let mutex = data.ga().unwrap();
@@ -578,7 +551,10 @@ async fn stop(runtime_data: Arc<Mutex<RuntimeData>>) -> Result<(), server::Error
         convert_result(ga.quit().await, "Sending quit")?;
     }
 
-    runtime.await.expect("Waiting for runtime stop failed");
+    runtime
+        .wait()
+        .await
+        .expect("Waiting for runtime stop failed");
     Ok(())
 }
 

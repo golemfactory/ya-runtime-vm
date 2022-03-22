@@ -1,5 +1,2 @@
 [workspace]
-members = [
-    "runtime",
-    "gvmkit",
-]
+members = ["runtime", "gvmkit"]
