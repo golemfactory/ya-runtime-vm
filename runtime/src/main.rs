@@ -14,6 +14,7 @@ use std::time::Duration;
 use structopt::StructOpt;
 use tokio::net::TcpStream;
 use tokio::time::sleep;
+
 use tokio::{
     fs,
     io::{self, AsyncBufReadExt, AsyncWriteExt},
@@ -37,6 +38,7 @@ use ya_runtime_vm::{
     deploy::Deployment,
     guest_agent_comm::{GuestAgent, Notification, RedirectFdType, RemoteCommandResult},
 };
+
 use ya_vm_file_server::InprocServer;
 
 const DIR_RUNTIME: &str = "runtime";
@@ -413,7 +415,9 @@ async fn start(
 
     log::debug!("Connect to 9P inproc servers...");
 
+
     let mut p9streams = vec![];
+
 
     for server in &runtime_9ps {
         let client_stream = server.attach_client();
