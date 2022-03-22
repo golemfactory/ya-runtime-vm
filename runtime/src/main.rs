@@ -394,18 +394,11 @@ async fn start(
 
     let mut runtime_9ps = vec![];
 
-    for (idx, volume) in deployment.volumes.iter().enumerate() {
+    for volume in deployment.volumes.iter() {
         let mount_point_host = work_dir
             .join(&volume.name)
             .to_str()
             .ok_or(anyhow!("cannot resolve 9P mount point"))?
-            .to_string();
-
-        let log_dir = work_dir
-            .join("logs")
-            .join(std::format!("ya-vm-file-server_{}.log", idx))
-            .to_str()
-            .unwrap_or("")
             .to_string();
 
         let runtime_9p = InprocServer::new(&mount_point_host);
