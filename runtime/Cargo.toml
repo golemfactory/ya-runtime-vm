@@ -63,8 +63,7 @@ git = "https://github.com/golemfactory/ya-runtime-sdk"
 branch = "sz/update_tokio"
 
 [dependencies]
-# TODO: don't use side-branch
-ya-vm-file-server = {git = "https://github.com/golemfactory/ya-vm-file-server", branch = "sz/add_inproc_communication"}
+ya-vm-file-server = {git = "https://github.com/golemfactory/ya-vm-file-server", version = "0.1.0"}
 anyhow = "1.0"
 bollard-stubs = "1.40.2"
 crc = "2.1.0"
@@ -104,7 +103,3 @@ path = "src/lib.rs"
 [[bin]]
 name = "ya-runtime-vm"
 path = "src/main.rs"
-
-
-[target.'cfg(windows)'.dependencies]
-tokio = { version = "0.2", features = ["fs", "io-std", "io-util", "macros", "process", "rt-core", "rt-threaded", "sync", "time", "net"] }
