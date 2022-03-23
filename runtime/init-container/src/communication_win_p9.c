@@ -1,7 +1,5 @@
 #define _GNU_SOURCE
 
-#if BUILD_FOR_WIN_P9
-
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -298,5 +296,3 @@ uint32_t do_mount_win_p9(const char* tag, uint8_t channel, char* path) {
     free(mount_cmd);
     return 0;
 }
-
-#endif //BUILD_FOR_WIN_P9

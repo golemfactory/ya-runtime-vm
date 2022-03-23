@@ -10,7 +10,6 @@ ifneq ($(DEBUG), "")
 CFLAGS += -DNDEBUG
 endif
 
-CFLAGS += -DBUILD_FOR_WIN_P9=1
 CFLAGS += -DWIN_P9_EXTRA_DEBUG_INFO=0
 
 ifneq ($(findstring $(MAKEFLAGS),s),s)

@@ -47,9 +47,7 @@
 
 #define VPORT_CMD "/dev/vport0p1"
 #define VPORT_NET "/dev/vport0p2"
-#if BUILD_FOR_WIN_P9
 #define VPORT_P9 "/dev/vport0p3"
-#endif
 
 #define MODE_RW_UGO (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)
 #define OUTPUT_PATH_PREFIX "/var/tmp/guest_agent_private/fds"
@@ -97,9 +95,7 @@ static noreturn void die(void) {
     (void)close(g_epoll_fd);
     (void)close(g_sig_fd);
     (void)close(g_net_fd);
-#if BUILD_FOR_WIN_P9
     (void)close(g_p9_fd);
-#endif
     (void)close(g_cmds_fd);
 
     while (1) {
@@ -986,18 +982,6 @@ out:
     }
 }
 
-#if !BUILD_FOR_WIN_P9
-static uint32_t do_mount(const char* tag, char* path) {
-    if (create_dir_path(path) < 0) {
-        return errno;
-    }
-    if (mount(tag, path, "9p", 0, "trans=virtio,version=9p2000.L") < 0) {
-        return errno;
-    }
-    return 0;
-}
-#endif
-
 static void handle_mount(msg_id_t msg_id) {
     bool done = false;
     uint32_t ret = 0;
@@ -1030,16 +1014,13 @@ static void handle_mount(msg_id_t msg_id) {
         ret = EINVAL;
         goto out;
     }
-#if BUILD_FOR_WIN_P9
+
     if (create_dir_path(path) < 0) {
         ret = errno;
         goto out;
     }
     ret = do_mount_win_p9(tag, g_p9_current_channel, path);
-    g_p9_current_channel += 1;	
-#else
-    ret = do_mount(tag, path);
-#endif
+    g_p9_current_channel += 1;
 
 out:
     free(path);
@@ -1561,9 +1542,7 @@ int main(void) {
 
     g_cmds_fd = CHECK(open(VPORT_CMD, O_RDWR | O_CLOEXEC));
     g_net_fd = CHECK(open(VPORT_NET, O_RDWR | O_CLOEXEC));
-#if BUILD_FOR_WIN_P9
     g_p9_fd = CHECK(open(VPORT_P9, O_RDWR | O_CLOEXEC));
-#endif
 
     CHECK(mkdir("/mnt", S_IRWXU));
     CHECK(mkdir("/mnt/image", S_IRWXU));
@@ -1632,10 +1611,8 @@ int main(void) {
     block_signals();
     setup_sigfd();
 
-#if BUILD_FOR_WIN_P9
     //make sure to create threads after blocking signals, not before. Otherwise signals are blocked.
     CHECK(initialize_p9_socket_descriptors());
-#endif	
 
     main_loop();
     stop_network();
