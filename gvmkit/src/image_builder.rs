@@ -44,7 +44,7 @@ pub async fn build_image(
         .await
         .spinner_result(&spinner)?;
 
-    let spinner = Spinner::new("Copying image contents".to_string()).ticking();
+    let spinner = Spinner::new("Copying image contents").ticking();
     let (hash, cfg) = docker.get_config(cont_name).await.spinner_err(&spinner)?;
     let tar_bytes = docker
         .download(cont_name, "/")
