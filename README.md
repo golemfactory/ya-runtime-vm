@@ -1,6 +1,6 @@
 # ya-runtime-vm
 
-`ya-runtime-vm` is an implementation of a Docker-like runtime environment for Linux systems. 
+`ya-runtime-vm` is an implementation of a Docker-like runtime environment for Linux systems.
 
 This repository consists of 2 crates:
 
@@ -18,7 +18,7 @@ This repository consists of 2 crates:
 Prerequisites:
 
 - `rustc`
-  
+
     Recommendation: use the Rust toolchain installer from [https://rustup.rs/](https://rustup.rs/)
 
 - `musl-gcc`
@@ -75,8 +75,8 @@ FLAGS:
     -V, --version    Prints version information
 
 OPTIONS:
-    -w, --workdir <workdir>              
-    -t, --task-package <task-package>    
+    -w, --workdir <workdir>
+    -t, --task-package <task-package>
         --cpu-cores <cpu-cores>           [default: 1]
         --mem-gib <mem-gib>               [default: 0.25]
         --storage-gib <storage-gib>       [default: 0.25]
@@ -95,6 +95,13 @@ SUBCOMMANDS:
 
     Directories specified in the `VOLUME` command are a mountpoint for directories on the host filesystem. Contents
     of those directories will appear as empty during execution.
-    
+
     If you need to place static assets inside the image, try not to use the `VOLUME` command for that directory.
 
+## Running examples
+Some of the examples require ya-runtime-vm installed, so follow [Installing](#installing) paragraph first.
+
+Then run:
+```
+cargo run --example EXAMPLE_NAME
+```

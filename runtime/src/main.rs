@@ -1,4 +1,4 @@
-use anyhow::anyhow;
+use anyhow::{anyhow, Context as _};
 use futures::future::FutureExt;
 use futures::lock::Mutex;
 use futures::TryFutureExt;
@@ -381,7 +381,7 @@ async fn start(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
-        .spawn()?;
+        .spawn().context(format!("Failed command: {cmd:?}"))?;
 
     let stdout = runtime.stdout.take().unwrap();
     let stderr = runtime.stderr.take().unwrap();

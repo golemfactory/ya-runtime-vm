@@ -127,7 +127,7 @@ fn spawn_vm<'a, P: AsRef<Path>>(temp_path: P) -> Child {
 
     let p9_sock = "127.0.0.1:9005";
 
-    let chardev_wait = |n, p: &str| {
+    let chardev_tcp = |n, p: &str| {
         let addr: SocketAddr = p.parse().unwrap();
         format!(
             "socket,host={},port={},server,nowait,id={}",
@@ -140,8 +140,7 @@ fn spawn_vm<'a, P: AsRef<Path>>(temp_path: P) -> Child {
     let chardev =
         |name, path: &PathBuf| format!("socket,path={},server,nowait,id={}", path.display(), name);
 
-
-    let vmrt_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("poc/runtime/vmrt");
+    let vmrt_path = runtime_dir.join("vmrt");
 
     let mut cmd = Command::new(vmrt_path);
     cmd.current_dir(runtime_dir).args(&[
@@ -173,7 +172,7 @@ fn spawn_vm<'a, P: AsRef<Path>>(temp_path: P) -> Child {
         "-chardev",
         chardev("net_cdev", &socket_net_path).as_str(),
         "-chardev",
-        chardev_wait("p9_cdev", &p9_sock).as_str(),
+        chardev_tcp("p9_cdev", &p9_sock).as_str(),
         "-device",
         "virtserialport,chardev=manager_cdev,name=manager_port",
         "-device",
