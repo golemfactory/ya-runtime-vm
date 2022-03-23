@@ -280,6 +280,7 @@ async fn start(
         };
     }
 
+    // TODO: that doesn't need to be a tcp connection under unix
     let p9_sock = "127.0.0.1:9005";
 
     let mut data = runtime_data.lock().await;

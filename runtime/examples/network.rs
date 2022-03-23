@@ -7,7 +7,7 @@ use pnet::packet::ip::{IpNextHeaderProtocol, IpNextHeaderProtocols};
 use pnet::packet::ipv4::{Ipv4Packet, MutableIpv4Packet};
 use pnet::packet::Packet;
 use pnet::util::MacAddr;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering::Relaxed;
 use std::{
@@ -125,10 +125,25 @@ fn spawn_vm<'a, P: AsRef<Path>>(temp_path: P) -> Child {
     let socket_path = temp_path.as_ref().join(format!("manager.sock"));
     let socket_net_path = temp_path.as_ref().join(format!("net.sock"));
 
+    let p9_sock = "127.0.0.1:9005";
+
+    let chardev_wait = |n, p: &str| {
+        let addr: SocketAddr = p.parse().unwrap();
+        format!(
+            "socket,host={},port={},server,nowait,id={}",
+            addr.ip(),
+            addr.port(),
+            n
+        )
+    };
+
     let chardev =
         |name, path: &PathBuf| format!("socket,path={},server,nowait,id={}", path.display(), name);
 
-    let mut cmd = Command::new("vmrt");
+
+    let vmrt_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("poc/runtime/vmrt");
+
+    let mut cmd = Command::new(vmrt_path);
     cmd.current_dir(runtime_dir).args(&[
         "-m",
         "256m",
@@ -157,10 +172,14 @@ fn spawn_vm<'a, P: AsRef<Path>>(temp_path: P) -> Child {
         chardev("manager_cdev", &socket_path).as_str(),
         "-chardev",
         chardev("net_cdev", &socket_net_path).as_str(),
+        "-chardev",
+        chardev_wait("p9_cdev", &p9_sock).as_str(),
         "-device",
         "virtserialport,chardev=manager_cdev,name=manager_port",
         "-device",
         "virtserialport,chardev=net_cdev,name=net_port",
+        "-device",
+        "virtserialport,chardev=p9_cdev,name=p9_port",
         "-drive",
         format!(
             "file={},cache=none,readonly=on,format=raw,if=virtio",
@@ -378,7 +397,8 @@ async fn main() -> anyhow::Result<()> {
     let mut child = spawn_vm(&temp_path);
 
     let ns = notifications.clone();
-    let ga_mutex = GuestAgent::connected(temp_path.join("manager.sock"), 10, move |n, _g| {
+
+    let ga_mutex = GuestAgent::connected(temp_path.join("manager.sock").as_os_str().to_str().unwrap(), 10, move |n, _g| {
         let notifications = ns.clone();
         async move { notifications.clone().lock().await.handle(n) }.boxed()
     })
@@ -418,7 +438,7 @@ async fn main() -> anyhow::Result<()> {
         run_process(
             &mut ga,
             "/bin/ping",
-            &["ping", "-v", "-n", "-D", "-c", "3", "10.0.0.2"],
+            &["ping", "-v", "-n", "-c", "3", "10.0.0.2"],
         )
         .await?;
     }

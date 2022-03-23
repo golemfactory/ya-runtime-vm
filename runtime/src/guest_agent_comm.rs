@@ -2,8 +2,6 @@ use futures::channel::mpsc;
 use futures::future::{BoxFuture, FutureExt};
 use futures::lock::Mutex;
 use futures::{SinkExt, StreamExt};
-// use std::path::Path;
-//use std::net::SocketAddr;
 use std::sync::Arc;
 use std::{io, marker::PhantomData};
 #[cfg(windows)]
