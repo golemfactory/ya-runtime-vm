@@ -100,7 +100,16 @@ SUBCOMMANDS:
 
 ## Running examples
 * Some of the examples require ya-runtime-vm installed, so follow [Installing](#installing) paragraph first.
-* Put .gvmi image of your interest into root of the project directory named as `squashfs_drive`
+* Create a .gvmi image used by examples with following steps:
+  * Build docker image
+    ```
+    cd runtime/examples
+    docker build -t ya-runtime-vm-examples .
+    ```
+  * Convert to gvmi
+    ```
+    gvmkit ya-runtime-vm-examples --output /path/to/ya-runtime-vm/squashfs_drive
+    ```
 * Then run:
     ```
     cargo run --example EXAMPLE_NAME
