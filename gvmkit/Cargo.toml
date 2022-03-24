@@ -27,5 +27,4 @@ sha3 = "0.10.1"
 structopt = "0.3"
 tar = "0.4"
 tokio = { version = "1.17.0", features = ["macros"] }
-# the package `gvmkit` depends on `trust-dns-resolver`, with features: `mdns` but `trust-dns-resolver` does not have these features.
 trust-dns-resolver = { version = "0.21.1" }

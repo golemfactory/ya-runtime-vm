@@ -99,9 +99,9 @@ SUBCOMMANDS:
     If you need to place static assets inside the image, try not to use the `VOLUME` command for that directory.
 
 ## Running examples
-Some of the examples require ya-runtime-vm installed, so follow [Installing](#installing) paragraph first.
-
-Then run:
-```
-cargo run --example EXAMPLE_NAME
-```
+* Some of the examples require ya-runtime-vm installed, so follow [Installing](#installing) paragraph first.
+* Put .gvmi image of your interest into root of the project directory named as `squashfs_drive`
+* Then run:
+    ```
+    cargo run --example EXAMPLE_NAME
+    ```

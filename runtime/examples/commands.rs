@@ -119,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
 
     let events = Events::new();
 
-        let c = server::spawn(cmd, events.clone()).await?;
+    let c = server::spawn(cmd, events.clone()).await?;
 
     {
         let result = c.hello("0.0.0x").await;
