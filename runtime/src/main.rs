@@ -26,6 +26,7 @@ use ya_runtime_sdk::{
         deploy::{DeployResult, StartMode},
         server,
     },
+    server::Server,
     serialize,
     Context, EmptyResponse, EndpointResponse, EventEmitter, OutputResponse, ProcessId,
     ProcessIdResponse, RuntimeMode,
@@ -49,7 +50,7 @@ const FILE_RUNTIME: &str = "qemu-system-x86_64.exe";
 
 const FILE_VMLINUZ: &str = "vmlinuz-virt";
 const FILE_INITRAMFS: &str = "initramfs.cpio.gz";
-//const FILE_TEST_IMAGE: &str = "self-test.gvmi";
+const FILE_TEST_IMAGE: &str = "self-test.gvmi";
 const FILE_DEPLOYMENT: &str = "deployment.json";
 const DEFAULT_CWD: &str = "/";
 
@@ -358,16 +359,6 @@ async fn start(
     ];
 
     cmd.args(args);
-    /*
-        for (idx, volume) in deployment.volumes.iter().enumerate() {
-            cmd.arg("-virtfs");
-            cmd.arg(format!(
-                "local,id={tag},path={path},security_model=none,mount_tag={tag}",
-                tag = format!("mnt{}", idx),
-                path = work_dir.join(&volume.name).to_string_lossy(),
-            ));
-        }
-    */
 
     log::debug!(
         "Running VM in runtime directory: {}\nCommand: {} {}\n",
@@ -518,7 +509,6 @@ async fn run_command(
             Some(cwd),
         )
         .await;
-    log::debug!("Finished command");
 
     Ok(convert_result(result, "Running process")?)
 }
@@ -579,7 +569,7 @@ fn offer() -> anyhow::Result<Option<serde_json::Value>> {
 }
 
 async fn test() -> anyhow::Result<()> {
-    /*server::run_async(|e| async {
+    server::run_async(|e| async {
         let ctx = Context::try_new().expect("Failed to initialize context");
         let task_package = runtime_dir()
             .expect("Runtime directory not found")
@@ -622,7 +612,7 @@ async fn test() -> anyhow::Result<()> {
 
         Server::new(runtime, ctx)
     })
-    .await;*/
+    .await;
     Ok(())
 }
 

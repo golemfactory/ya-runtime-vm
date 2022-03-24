@@ -10,7 +10,7 @@ use std::{
     sync::Arc,
 };
 use tokio::net::TcpStream;
-use tokio::time::{sleep, timeout};
+use tokio::time::sleep;
 use tokio::{
     process::{Child, Command},
     sync,

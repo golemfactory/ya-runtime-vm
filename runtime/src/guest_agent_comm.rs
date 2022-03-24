@@ -490,7 +490,6 @@ impl GuestAgent {
     }
 
     async fn get_response(&mut self, msg_id: u64) -> io::Result<Response> {
-        log::debug!("&&&&& Got responce: {}", msg_id);
         let ResponseWithId { id, resp } = match self.responses.next().await {
             Some(x) => x,
             None => {
@@ -678,10 +677,8 @@ impl GuestAgent {
         ));
 
         msg.append_submsg(&SubMsgMountVolumeType::SubMsgEnd);
-        log::debug!("Send message");
 
         self.stream.write_all(msg.as_ref()).await?;
-        log::debug!("self.get_ok_response");
 
         self.get_ok_response(msg_id).await
     }
@@ -755,7 +752,6 @@ impl GuestAgent {
         off: u64,
         len: u64,
     ) -> io::Result<RemoteCommandResult<Vec<u8>>> {
-        log::debug!("2222 Query output...");
         let mut msg = Message::default();
         let msg_id = self.get_new_msg_id();
 
@@ -771,7 +767,6 @@ impl GuestAgent {
         self.stream.write_all(msg.as_ref()).await?;
 
         let res = self.get_bytes_response(msg_id).await;
-        log::debug!("2222 Query output finished...");
         res
     }
 }
