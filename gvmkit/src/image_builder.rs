@@ -5,7 +5,6 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
 };
-use tar;
 
 use crate::docker::{ContainerOptions, DockerInstance};
 use crate::progress::{from_progress_output, Progress, ProgressResult, Spinner, SpinnerResult};

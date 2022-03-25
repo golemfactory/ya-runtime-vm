@@ -9,7 +9,7 @@ static RERUN_IF_CHANGED: &str = "cargo:rerun-if-changed";
 fn main() -> anyhow::Result<()> {
     // skip build under Windows
     if cfg!(windows) {
-        return  Ok(());
+        return Ok(());
     }
 
     // skip build for CI
@@ -35,9 +35,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     println!(
-        "{}",
-        format!(
-            r#"
+        r#"
             {rerun}={root}/Makefile
             {rerun}={include}/communication.h
             {rerun}={include}/cyclic_buffer.h
@@ -52,11 +50,10 @@ fn main() -> anyhow::Result<()> {
             {rerun}={src}/process_bookkeeping.c
             {rerun}={src}/init.c
             "#,
-            rerun = RERUN_IF_CHANGED,
-            root = init_dir.display(),
-            include = include_dir.display(),
-            src = src_dir.display(),
-        )
+        rerun = RERUN_IF_CHANGED,
+        root = init_dir.display(),
+        include = include_dir.display(),
+        src = src_dir.display(),
     );
     Ok(())
 }
