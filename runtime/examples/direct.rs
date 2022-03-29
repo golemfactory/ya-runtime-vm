@@ -1,6 +1,5 @@
 use anyhow::anyhow;
 use futures::FutureExt;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::{
@@ -11,12 +10,10 @@ use std::{
 };
 use tokio::net::TcpStream;
 use tokio::time::sleep;
-use tokio::{
-    process::{Child, Command},
-    sync,
-};
+use tokio::{process::Child, sync};
 use ya_runtime_vm::demux_socket_comm::{start_demux_communication, DemuxSocketHandle};
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
+use ya_runtime_vm::vm::{VMBuilder, VM};
 use ya_vm_file_server::InprocServer;
 
 struct Notifications {
@@ -94,97 +91,43 @@ fn get_root_dir() -> PathBuf {
 }
 
 fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
-    path.as_ref()
-        .join(file.to_string())
-        .canonicalize()
-        .unwrap()
-        .display()
-        .to_string()
+    // Under windows Paths has UNC prefix that is not parsed correctly by qemu
+    // Wrap Path with simplified method to remove that prefix
+    // It has no effect on Unix
+    dunce::simplified(
+        path.as_ref()
+            .join(file.to_string())
+            .canonicalize()
+            .unwrap()
+            .as_path(),
+    )
+    .display()
+    .to_string()
 }
 
-fn spawn_vm<'a, P: AsRef<Path>>(temp_path: P, mount_args: &'a [(&'a str, impl ToString)]) -> Child {
+fn spawn_vm() -> (Child, VM) {
+    #[cfg(windows)]
+    let vm_executable = "vmrt.exe";
+    #[cfg(unix)]
+    let vm_executable = "vmrt";
+
     let root_dir = get_root_dir();
     let project_dir = get_project_dir();
     let runtime_dir = project_dir.join("poc").join("runtime");
     let init_dir = project_dir.join("init-container");
 
-    let socket_net_path = temp_path.as_ref().join(format!("net.sock"));
+    let vm = VMBuilder::new(1, 256, &root_dir.join("squashfs_drive"))
+        .with_kernel_path(join_as_string(&init_dir, "vmlinuz-virt"))
+        .with_ramfs_path(join_as_string(&init_dir, "initramfs.cpio.gz"))
+        .build();
 
-    let p9_sock = "127.0.0.1:9005";
+    let mut cmd = vm.create_cmd(&runtime_dir.join(vm_executable));
 
-    let chardev_tcp = |n, p: &str| {
-        let addr: SocketAddr = p.parse().unwrap();
-        format!(
-            "socket,host={},port={},server,id={}",
-            addr.ip(),
-            addr.port(),
-            n
-        )
-    };
+    println!("CMD: {cmd:?}");
 
-    let chardev =
-        |name, path: &PathBuf| format!("socket,path={},server,nowait,id={}", path.display(), name);
-
-    let mut cmd = Command::new("/home/szym/golem/ya-runtime-vm-master/runtime/poc/runtime/vmrt");
-    cmd.current_dir(runtime_dir).args(&[
-        "-m",
-        "256m",
-        "-nographic",
-        "-vga",
-        "none",
-        "-kernel",
-        join_as_string(&init_dir, "vmlinuz-virt").as_str(),
-        "-initrd",
-        join_as_string(&init_dir, "initramfs.cpio.gz").as_str(),
-        "-no-reboot",
-        "-net",
-        "none",
-        "-enable-kvm",
-        "-cpu",
-        "host",
-        "-smp",
-        "1",
-        "-append",
-        "console=ttyS0 panic=1",
-        "-device",
-        "virtio-serial",
-        "-device",
-        "virtio-rng-pci",
-        "-chardev",
-        format!(
-            "socket,path={},server,nowait,id=manager_cdev",
-            temp_path.as_ref().join("manager.sock").display()
-        )
-        .as_str(),
-        "-chardev",
-        chardev("net_cdev", &socket_net_path).as_str(),
-        "-chardev",
-        chardev_tcp("p9_cdev", &p9_sock).as_str(),
-        "-device",
-        "virtserialport,chardev=manager_cdev,name=manager_port",
-        "-device",
-        "virtserialport,chardev=net_cdev,name=net_port",
-        "-device",
-        "virtserialport,chardev=p9_cdev,name=p9_port",
-        "-drive",
-        format!(
-            "file={},cache=none,readonly=on,format=raw,if=virtio",
-            root_dir.join("squashfs_drive").display()
-        )
-        .as_str(),
-    ]);
-    for (tag, path) in mount_args.iter() {
-        cmd.args(&[
-            "-virtfs",
-            &format!(
-                "local,id={tag},path={path},security_model=none,mount_tag={tag}",
-                tag = tag,
-                path = path.to_string()
-            ),
-        ]);
-    }
     cmd.stdin(Stdio::null());
-    cmd.spawn().expect("failed to spawn VM")
+    cmd.current_dir(runtime_dir);
+    (cmd.spawn().expect("failed to spawn VM"), vm)
 }
 
 #[tokio::main]
@@ -202,13 +145,15 @@ async fn main() -> io::Result<()> {
         ("tag0", temp_path.display()),
         ("tag1", inner_path.display()),
     ];
-    let mut child = spawn_vm(&temp_path, &mount_args);
+    let (mut child, vm) = spawn_vm();
 
-    let (p9streams, muxer_handle) = start_9p_service(&mount_args).await.unwrap();
+    let (_p9streams, _muxer_handle) = start_9p_service(&mount_args).await.unwrap();
 
     let ns = notifications.clone();
     let ga_mutex = GuestAgent::connected(
-        temp_path.join("manager.sock").as_os_str().to_str().unwrap(),
+        // TODO: test on linux
+        // temp_path.join("manager.sock").as_os_str().to_str().unwrap(),
+        vm.get_manager_sock(),
         10,
         move |n, _g| {
             let notifications = ns.clone();
@@ -278,7 +223,6 @@ async fn connect_to_vm_9p_endpoint(address: &str, tries: i32) -> anyhow::Result<
     ))
 }
 
-// mount_args: &'a [(&'a str, impl ToString)]
 async fn start_9p_service(
     mount_args: &[(&str, impl ToString)],
 ) -> anyhow::Result<(Vec<InprocServer>, DemuxSocketHandle)> {

@@ -92,6 +92,7 @@ log4rs = "1.0.0"
 [dev-dependencies]
 tempdir = "0.3.7"
 pnet = "0.29.0"
+dunce = "1.0.2"
 
 [build-dependencies]
 anyhow = "1.0"

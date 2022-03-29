@@ -6,7 +6,7 @@ use log::LevelFilter;
 use log4rs::append::file::FileAppender;
 use log4rs::config::{Appender, Config, Root};
 use log4rs::encode::pattern::PatternEncoder;
-use std::net::SocketAddr;
+use ya_runtime_vm::vm::VMBuilder;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -46,10 +46,8 @@ const DIR_RUNTIME: &str = "runtime";
 #[cfg(unix)]
 const FILE_RUNTIME: &'static str = "vmrt";
 #[cfg(windows)]
-const FILE_RUNTIME: &str = "qemu-system-x86_64.exe";
+const FILE_RUNTIME: &str = "vmrt.exe";
 
-const FILE_VMLINUZ: &str = "vmlinuz-virt";
-const FILE_INITRAMFS: &str = "initramfs.cpio.gz";
 const FILE_TEST_IMAGE: &str = "self-test.gvmi";
 const FILE_DEPLOYMENT: &str = "deployment.json";
 const DEFAULT_CWD: &str = "/";
@@ -252,119 +250,19 @@ async fn start(
 ) -> anyhow::Result<Option<serialize::json::Value>> {
     let runtime_dir = runtime_dir().expect("Unable to resolve current directory");
 
-    let manager_sock;
-    let net_sock;
-    let chardev;
-
-    #[cfg(unix)]
-    {
-        let uid = uuid::Uuid::new_v4().to_simple().to_string();
-        manager_sock = std::env::temp_dir().join(format!("{}.sock", uid));
-        net_sock = std::env::temp_dir().join(format!("{}_net.sock", uid));
-
-        chardev = |n, p: &PathBuf| format!("socket,path={},server,nowait,id={}", p.display(), n);
-    }
-
-    #[cfg(windows)]
-    {
-        manager_sock = "127.0.0.1:9003";
-        net_sock = "127.0.0.1:9004";
-
-        chardev = |n, p: &str| {
-            let addr: SocketAddr = p.parse().unwrap();
-            format!(
-                "socket,host={},port={},server,nowait,id={}",
-                addr.ip(),
-                addr.port(),
-                n
-            )
-        };
-    }
-
-    // TODO: that doesn't need to be a tcp connection under unix
-    let p9_sock = "127.0.0.1:9005";
-
     let mut data = runtime_data.lock().await;
     let deployment = data.deployment().expect("Missing deployment data");
 
-    let chardev_wait = |n, p: &str| {
-        let addr: SocketAddr = p.parse().unwrap();
-        format!(
-            "socket,host={},port={},server,id={}",
-            addr.ip(),
-            addr.port(),
-            n
-        )
-    };
+    let vm = VMBuilder::new(deployment.cpu_cores, deployment.mem_mib, &deployment.task_package).build();
+    let mut cmd = vm.create_cmd(runtime_dir.join(FILE_RUNTIME));
 
-    let mut cmd = process::Command::new(runtime_dir.join(FILE_RUNTIME));
     cmd.current_dir(&runtime_dir);
-
-    let tmp0 = format!("{}M", deployment.mem_mib);
-    let tmp1 = format!(
-        "file={},cache=unsafe,readonly=on,format=raw,if=virtio",
-        deployment.task_package.display()
-    );
-    let chardev1 = chardev("manager_cdev", &manager_sock);
-    let chardev2 = chardev("net_cdev", &net_sock);
-    let chardev3 = chardev_wait("p9_cdev", &p9_sock);
-
-    let cpu_string = deployment.cpu_cores.to_string();
-
-    let acceleration = if cfg!(windows) { "whpx" } else { "kvm" };
-
-    let args = &[
-        "-m",
-        tmp0.as_str(),
-        "-nographic",
-        "-vga",
-        "none",
-        "-kernel",
-        FILE_VMLINUZ,
-        "-initrd",
-        FILE_INITRAMFS,
-        "-net",
-        "none",
-        /*   "-enable-kvm",*/
-        /*  "-cpu",
-          "host",*/
-        "-smp",
-        cpu_string.as_str(),
-        "-append",
-        "\"console=ttyS0 panic=1\"",
-        "-device",
-        "virtio-serial",
-        /* "-device",
-        "virtio-rng-pci",*/
-        "-chardev",
-        chardev1.as_str(),
-        "-chardev",
-        chardev2.as_str(),
-        "-chardev",
-        chardev3.as_str(),
-        "-device",
-        "virtserialport,chardev=manager_cdev,name=manager_port",
-        "-device",
-        "virtserialport,chardev=net_cdev,name=net_port",
-        "-device",
-        "virtserialport,chardev=p9_cdev,name=p9_port",
-        "-drive",
-        tmp1.as_str(),
-        "-no-reboot",
-        "-accel",
-        acceleration,
-        "-nodefaults",
-        "--serial",
-        "stdio",
-    ];
-
-    cmd.args(args);
 
     log::debug!(
         "Running VM in runtime directory: {}\nCommand: {} {}\n",
         runtime_dir.to_str().unwrap_or("???"),
         FILE_RUNTIME,
-        args.join(" ")
+        vm.get_args().join(" ")
     );
 
     let mut runtime = cmd
@@ -380,7 +278,7 @@ async fn start(
     spawn(reader_to_log_error(stderr));
 
 
-    let vmp9stream = connect_to_vm_9p_endpoint(&std::format!("127.0.0.1:{}", 9005), 10).await?;
+    let vmp9stream = connect_to_vm_endpoint(&vm.get_9p_sock(), 10).await?;
 
     log::debug!("Spawn 9P inproc servers...");
 
@@ -414,7 +312,7 @@ async fn start(
     #[cfg(unix)]
     let path = manager_sock.to_str().unwrap();
     #[cfg(windows)]
-    let path = manager_sock;
+    let path = vm.get_manager_sock();
 
     let ga = GuestAgent::connected(path, 10, move |notification, ga| {
         let mut emitter = emitter.clone();
@@ -440,30 +338,30 @@ async fn start(
     data.p9_communication_handle.replace(demux_socket_handle); //prevent dropping
     data.runtime.replace(runtime);
     data.network
-        .replace(NetworkEndpoint::Socket(net_sock.to_owned()));
+        .replace(NetworkEndpoint::Socket(vm.get_net_sock().to_owned()));
     data.ga.replace(ga);
 
     Ok(None)
 }
 
-async fn connect_to_vm_9p_endpoint(address: &str, tries: i32) -> anyhow::Result<TcpStream> {
-    log::debug!("Connect to the VM 9P endpoint...");
+async fn connect_to_vm_endpoint(address: &str, tries: i32) -> anyhow::Result<TcpStream> {
+    log::debug!("Connect to the VM endpoint...");
 
     for _ in 0..tries {
         match TcpStream::connect(address).await {
             Ok(stream) => {
-                log::debug!("Connected to the VM 9P endpoint");
+                log::debug!("Connected to the VM endpoint");
                 return Ok(stream);
             }
             Err(e) => {
-                log::debug!("Failed to connect to the VM 9P endpoint: {e}");
+                log::debug!("Failed to connect to the VM endpoint: {e}");
                 // The VM is not ready yet, try again
                 sleep(Duration::from_secs(1)).await;
             },
         };
     }
 
-    Err(anyhow!("Failed to connect to the VM 9P endpoint after #{tries} tries"))
+    Err(anyhow!("Failed to connect to the VM endpoint after #{tries} tries"))
 }
 
 async fn run_command(

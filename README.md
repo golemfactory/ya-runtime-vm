@@ -36,6 +36,20 @@ cd runtime
 cargo build
 ```
 
+### Building under Windows
+Using visual studio build tools install:
+* MVSC C++ x64/x86 build tools
+* Win 10 SDK
+
+Examples has `pnet` dependency which annoying to use under Windows.
+To do so, follow steps in [Here](https://github.com/libpnet/libpnet#windows)
+* Install WinPcap
+* Download [WiniCap developers pack](https://www.winpcap.org/devel.htm)
+* Extract Lib.rs from it (note x64/x86 version!)
+* Copy to your toolchain directory `C:\Users\USERNAME\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib`
+
+
+
 ## Installing
 
 Prerequisites:

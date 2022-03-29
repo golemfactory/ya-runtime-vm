@@ -7,7 +7,7 @@ use pnet::packet::ip::{IpNextHeaderProtocol, IpNextHeaderProtocols};
 use pnet::packet::ipv4::{Ipv4Packet, MutableIpv4Packet};
 use pnet::packet::Packet;
 use pnet::util::MacAddr;
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering::Relaxed;
 use std::{
@@ -17,12 +17,19 @@ use std::{
     sync::{atomic::AtomicU16, Arc},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
-use tokio::{
-    process::{Child, Command},
-    sync,
-};
+use tokio::{process::Child, sync};
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
+use ya_runtime_vm::vm::{VMBuilder, VM};
+
+#[cfg(windows)]
+use tokio::net::TcpStream;
+#[cfg(unix)]
+use tokio::net::UnixStream;
+
+#[cfg(unix)]
+type PlatformStream = UnixStream;
+#[cfg(windows)]
+type PlatformStream = TcpStream;
 
 const IDENTIFICATION: AtomicU16 = AtomicU16::new(42);
 const MTU: usize = 65535;
@@ -108,90 +115,44 @@ fn get_root_dir() -> PathBuf {
 }
 
 fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
-    path.as_ref()
-        .join(file.to_string())
-        .canonicalize()
-        .unwrap()
-        .display()
-        .to_string()
+    dunce::simplified(
+        path.as_ref()
+            .join(file.to_string())
+            .canonicalize()
+            .unwrap()
+            .as_path(),
+    )
+    .display()
+    .to_string()
 }
 
-fn spawn_vm<'a, P: AsRef<Path>>(temp_path: P) -> Child {
+fn spawn_vm() -> (Child, VM) {
+    #[cfg(windows)]
+    let vm_executable = "vmrt.exe";
+    #[cfg(unix)]
+    let vm_executable = "vmrt";
+
     let root_dir = get_root_dir();
     let project_dir = get_project_dir();
     let runtime_dir = project_dir.join("poc").join("runtime");
     let init_dir = project_dir.join("init-container");
 
-    let socket_path = temp_path.as_ref().join(format!("manager.sock"));
-    let socket_net_path = temp_path.as_ref().join(format!("net.sock"));
+    let vm = VMBuilder::new(1, 256, &root_dir.join("squashfs_drive"))
+        .with_kernel_path(join_as_string(&init_dir, "vmlinuz-virt"))
+        .with_ramfs_path(join_as_string(&init_dir, "initramfs.cpio.gz"))
+        .build();
 
-    let p9_sock = "127.0.0.1:9005";
+    let mut cmd = vm.create_cmd(&runtime_dir.join(vm_executable));
 
-    let chardev_tcp = |n, p: &str| {
-        let addr: SocketAddr = p.parse().unwrap();
-        format!(
-            "socket,host={},port={},server,nowait,id={}",
-            addr.ip(),
-            addr.port(),
-            n
-        )
-    };
+    println!("CMD: {cmd:?}");
 
-    let chardev =
-        |name, path: &PathBuf| format!("socket,path={},server,nowait,id={}", path.display(), name);
-
-    let vmrt_path = runtime_dir.join("vmrt");
-
-    let mut cmd = Command::new(vmrt_path);
-    cmd.current_dir(runtime_dir).args(&[
-        "-m",
-        "256m",
-        "-nographic",
-        "-vga",
-        "none",
-        "-kernel",
-        join_as_string(&init_dir, "vmlinuz-virt").as_str(),
-        "-initrd",
-        join_as_string(&init_dir, "initramfs.cpio.gz").as_str(),
-        "-no-reboot",
-        "-net",
-        "none",
-        "-enable-kvm",
-        "-cpu",
-        "host",
-        "-smp",
-        "1",
-        "-append",
-        "console=ttyS0 panic=1",
-        "-device",
-        "virtio-serial",
-        "-device",
-        "virtio-rng-pci",
-        "-chardev",
-        chardev("manager_cdev", &socket_path).as_str(),
-        "-chardev",
-        chardev("net_cdev", &socket_net_path).as_str(),
-        "-chardev",
-        chardev_tcp("p9_cdev", &p9_sock).as_str(),
-        "-device",
-        "virtserialport,chardev=manager_cdev,name=manager_port",
-        "-device",
-        "virtserialport,chardev=net_cdev,name=net_port",
-        "-device",
-        "virtserialport,chardev=p9_cdev,name=p9_port",
-        "-drive",
-        format!(
-            "file={},cache=none,readonly=on,format=raw,if=virtio",
-            root_dir.join("squashfs_drive").display()
-        )
-        .as_str(),
-    ]);
     cmd.stdin(Stdio::null());
-    cmd.spawn().expect("failed to spawn VM")
+    cmd.current_dir(runtime_dir);
+    (cmd.spawn().expect("failed to spawn VM"), vm)
 }
 
 async fn handle_net<P: AsRef<Path>>(path: P) -> anyhow::Result<()> {
-    let stream = UnixStream::connect(path.as_ref()).await?;
+    let stream = PlatformStream::connect(path.as_ref().display().to_string()).await?;
     let (mut read, mut write) = tokio::io::split(stream);
 
     let fut = async move {
@@ -389,15 +350,12 @@ fn handle_ethernet_packet(data: &[u8]) -> Option<Vec<u8>> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let temp_dir = tempdir::TempDir::new("ya-vm-direct").expect("Failed to create temp dir");
-    let temp_path = temp_dir.path();
-
     let notifications = Arc::new(Mutex::new(Notifications::new()));
-    let mut child = spawn_vm(&temp_path);
+    let (mut child, vm) = spawn_vm();
 
     let ns = notifications.clone();
 
-    let ga_mutex = GuestAgent::connected(temp_path.join("manager.sock").as_os_str().to_str().unwrap(), 10, move |n, _g| {
+    let ga_mutex = GuestAgent::connected(vm.get_manager_sock(), 10, move |n, _g| {
         let notifications = ns.clone();
         async move { notifications.clone().lock().await.handle(n) }.boxed()
     })
@@ -407,7 +365,7 @@ async fn main() -> anyhow::Result<()> {
         notifications.clone().lock().await.set_ga(ga_mutex.clone());
     };
 
-    handle_net(temp_path.join("net.sock")).await?;
+    handle_net(vm.get_net_sock()).await?;
 
     {
         let hosts = [("host0", "127.0.0.2"), ("host1", "127.0.0.3")]
