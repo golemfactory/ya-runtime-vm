@@ -290,5 +290,14 @@ async fn test_write(ga: &mut GuestAgent, notifications: &Notifications) -> io::R
     )
     .await?;
 
+    // Check timestamp
+    run_process_with_output(
+        ga,
+        &notifications,
+        "/bin/ls",
+        &["ls", "-la", "/mnt/mnt1/tag1/"],
+    )
+    .await?;
+
     Ok(())
 }
