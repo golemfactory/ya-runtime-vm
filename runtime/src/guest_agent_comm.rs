@@ -104,7 +104,6 @@ type PlatformStream = UnixStream;
 #[cfg(windows)]
 type PlatformStream = TcpStream;
 
-
 /*
 #[cfg(unix)]
 type PlatformAddr = Path;

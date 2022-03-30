@@ -6,11 +6,11 @@ use log::LevelFilter;
 use log4rs::append::file::FileAppender;
 use log4rs::config::{Appender, Config, Root};
 use log4rs::encode::pattern::PatternEncoder;
-use ya_runtime_vm::demux_socket_comm::{DemuxSocketHandle, stop_demux_communication};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use structopt::StructOpt;
+use ya_runtime_vm::demux_socket_comm::{stop_demux_communication, DemuxSocketHandle};
 use ya_runtime_vm::vm::VMBuilder;
 
 use tokio::{

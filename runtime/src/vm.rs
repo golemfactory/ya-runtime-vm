@@ -1,5 +1,10 @@
 use anyhow::anyhow;
-use std::{ffi::OsStr, net::SocketAddr, path::{PathBuf, Path}, time::Duration};
+use std::{
+    ffi::OsStr,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use tokio::{net::TcpStream, process::Command, time::sleep};
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 use ya_vm_file_server::InprocServer;

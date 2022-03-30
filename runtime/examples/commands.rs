@@ -99,7 +99,13 @@ async fn main() -> anyhow::Result<()> {
     let temp_dir = tempdir::TempDir::new("ya-runtime-vm")?;
 
     let temp_dir_string = temp_dir.path().display().to_string();
-    let drive_path_string = root_dir.join("squashfs_drive").display().to_string();
+    let drive_path_string = root_dir
+        .join("runtime")
+        .join("poc")
+        .join("runtime")
+        .join("ubuntu.gvmi")
+        .display()
+        .to_string();
 
     let args = [
         "--task-package",
