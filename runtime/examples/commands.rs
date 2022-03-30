@@ -102,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
     let drive_path_string = root_dir
         .join("runtime")
         .join("poc")
-        .join("runtime")
+        .join("squashfs")
         .join("ubuntu.gvmi")
         .display()
         .to_string();
