@@ -1,3 +1,4 @@
+"""Helper script for running VM manually under Windows"""
 import os
 command = ""
 command += "qemu-system-x86_64.exe "

@@ -1,6 +1,6 @@
 # ya-runtime-vm
 
-`ya-runtime-vm` is an implementation of a Docker-like runtime environment for Linux systems. 
+`ya-runtime-vm` is an implementation of a Docker-like runtime environment for Linux systems.
 
 This repository consists of 2 crates:
 
@@ -18,7 +18,7 @@ This repository consists of 2 crates:
 Prerequisites:
 
 - `rustc`
-  
+
     Recommendation: use the Rust toolchain installer from [https://rustup.rs/](https://rustup.rs/)
 
 - `musl-gcc`
@@ -35,6 +35,20 @@ Building:
 cd runtime
 cargo build
 ```
+
+### Building under Windows
+Using visual studio build tools install:
+* MVSC C++ x64/x86 build tools
+* Win 10 SDK
+
+Examples has `pnet` dependency which annoying to use under Windows.
+To do so, follow steps in [Here](https://github.com/libpnet/libpnet#windows)
+* Install WinPcap
+* Download [WiniCap developers pack](https://www.winpcap.org/devel.htm)
+* Extract Lib.rs from it (note x64/x86 version!)
+* Copy to your toolchain directory `C:\Users\USERNAME\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib`
+
+
 
 ## Installing
 
@@ -75,8 +89,8 @@ FLAGS:
     -V, --version    Prints version information
 
 OPTIONS:
-    -w, --workdir <workdir>              
-    -t, --task-package <task-package>    
+    -w, --workdir <workdir>
+    -t, --task-package <task-package>
         --cpu-cores <cpu-cores>           [default: 1]
         --mem-gib <mem-gib>               [default: 0.25]
         --storage-gib <storage-gib>       [default: 0.25]
@@ -95,6 +109,22 @@ SUBCOMMANDS:
 
     Directories specified in the `VOLUME` command are a mountpoint for directories on the host filesystem. Contents
     of those directories will appear as empty during execution.
-    
+
     If you need to place static assets inside the image, try not to use the `VOLUME` command for that directory.
 
+## Running examples
+* Some of the examples require ya-runtime-vm installed, so follow [Installing](#installing) paragraph first.
+* Create a .gvmi image used by examples with following steps:
+  * Build docker image
+    ```
+    cd runtime/examples
+    docker build -t ya-runtime-vm-examples .
+    ```
+  * Convert to gvmi
+    ```
+    gvmkit ya-runtime-vm-examples --output /path/to/ya-runtime-vm/squashfs_drive
+    ```
+* Then run:
+    ```
+    cargo run --example EXAMPLE_NAME
+    ```

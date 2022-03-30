@@ -1,6 +1,6 @@
-use std::borrow::Cow;
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
@@ -130,7 +130,7 @@ pub(crate) struct Spinner {
 }
 
 impl Spinner {
-    pub fn new(msg: String) -> Self {
+    pub fn new(msg: impl Into<Cow<'static, str>> + std::fmt::Display + Clone) -> Self {
         let prefix = format!(
             "[{}/{}]",
             STEP_COUNTER.fetch_add(1, Relaxed),
@@ -143,7 +143,7 @@ impl Spinner {
 
         Spinner {
             inner,
-            message: RefCell::new(msg),
+            message: RefCell::new(msg.to_string()),
         }
     }
 
@@ -156,8 +156,8 @@ impl Spinner {
         self.message.borrow().clone()
     }
 
-    pub fn set_message(&self, msg: String) {
-        self.message.replace(msg.clone());
+    pub fn set_message(&self, msg: impl Into<Cow<'static, str>> + std::fmt::Display) {
+        self.message.replace(msg.to_string());
         self.inner.set_message(msg);
     }
 

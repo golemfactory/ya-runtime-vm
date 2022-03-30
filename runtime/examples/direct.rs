@@ -1,19 +1,15 @@
 use futures::FutureExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 use std::{
     env,
     io::{self, prelude::*},
     process::Stdio,
     sync::Arc,
 };
-use tokio::time::delay_for;
-use tokio::{
-    process::{Child, Command},
-    sync,
-};
+use tokio::{process::Child, sync};
+use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
-use ya_runtime_vm::raw_socket_comm::RawSocketCommunication;
+use ya_runtime_vm::vm::{VMBuilder, VM};
 
 struct Notifications {
     process_died: sync::Notify,
@@ -64,9 +60,11 @@ async fn run_process_with_output(
         )
         .await?
         .expect("Run process failed");
+
     println!("Spawned process with id: {}", id);
     notifications.process_died.notified().await;
     notifications.output_available.notified().await;
+
     match ga.query_output(id, 1, 0, u64::MAX).await? {
         Ok(out) => {
             println!("Output:");
@@ -84,473 +82,220 @@ fn get_project_dir() -> PathBuf {
 }
 
 fn get_root_dir() -> PathBuf {
-    get_project_dir().parent().unwrap().to_owned()
+    get_project_dir().parent().unwrap().canonicalize().unwrap()
 }
 
 fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
-    path.as_ref()
-        .join(file.to_string())
-        .canonicalize()
-        .unwrap()
-        .display()
-        .to_string()
+    let joined = path.as_ref().join(file.to_string());
+
+    // Under windows Paths has UNC prefix that is not parsed correctly by qemu
+    // Wrap Path with simplified method to remove that prefix
+    // It has no effect on Unix
+    dunce::simplified(
+        joined
+            // canonicalize checks existence of the file, it may failed, if does not exist
+            .canonicalize()
+            .expect(&joined.display().to_string())
+            .as_path(),
+    )
+    .display()
+    .to_string()
 }
-fn spawn_9p_server(mount_point: String, port: i32) -> Child {
+
+fn spawn_vm() -> (Child, VM) {
+    #[cfg(windows)]
+    let vm_executable = "vmrt.exe";
+    #[cfg(unix)]
+    let vm_executable = "vmrt";
+
     let root_dir = get_root_dir();
     let project_dir = get_project_dir();
     let runtime_dir = project_dir.join("poc").join("runtime");
     let init_dir = project_dir.join("init-container");
 
-    let mut cmd =
-        Command::new("C:/scx1332/FileServer9p/rust-9p/example/unpfs/target/release/unpfs.exe");
-    cmd.env("RUST_LOG", "error");
+    let vm = VMBuilder::new(1, 256, &root_dir.join("squashfs_drive"))
+        .with_kernel_path(join_as_string(&init_dir, "vmlinuz-virt"))
+        .with_ramfs_path(join_as_string(&init_dir, "initramfs.cpio.gz"))
+        .build();
 
-    cmd.current_dir(runtime_dir).args(&[
-        "--mount-point",
-        mount_point.as_str(),
-        "--network-address",
-        std::format!("127.0.0.1:{}", port).as_str(),
-        "--network-protocol",
-        "tcp",
-    ]);
+    let mut cmd = vm.create_cmd(&runtime_dir.join(vm_executable));
+
+    println!("CMD: {cmd:?}");
+
     cmd.stdin(Stdio::null());
-    cmd.spawn().expect("failed to spawn p9 server")
+
+    cmd.current_dir(runtime_dir);
+    (cmd.spawn().expect("failed to spawn VM"), vm)
 }
-
-fn spawn_vm<'a, P: AsRef<Path>>(temp_path: P, mount_args: &'a [(&'a str, impl ToString)]) -> Child {
-    let root_dir = get_root_dir();
-    let project_dir = get_project_dir();
-    let runtime_dir = project_dir.join("poc").join("runtime");
-    let init_dir = project_dir.join("init-container");
-
-    let mut cmd = Command::new("vmrt");
-    cmd.current_dir(runtime_dir).args(&[
-        "-m",
-        "256m",
-        "-nographic",
-        "-vga",
-        "none",
-        "-kernel",
-        join_as_string(&init_dir, "vmlinuz-virt").as_str(),
-        "-initrd",
-        join_as_string(&init_dir, "initramfs.cpio.gz").as_str(),
-        "-no-reboot",
-        "-net",
-        "none",
-        "-enable-kvm",
-        "-cpu",
-        "host",
-        "-smp",
-        "1",
-        "-append",
-        "console=ttyS0 panic=1",
-        "-device",
-        "virtio-serial",
-        "-device",
-        "virtio-rng-pci",
-        "-chardev",
-        format!(
-            "socket,path={},server,nowait,id=manager_cdev",
-            temp_path.as_ref().join("manager.sock").display()
-        )
-        .as_str(),
-        "-device",
-        "virtserialport,chardev=manager_cdev,name=manager_port",
-        "-drive",
-        format!(
-            "file={},cache=none,readonly=on,format=raw,if=virtio",
-            root_dir.join("squashfs_drive").display()
-        )
-        .as_str(),
-    ]);
-    for (tag, path) in mount_args.iter() {
-        cmd.args(&[
-            "-virtfs",
-            &format!(
-                "local,id={tag},path={path},security_model=none,mount_tag={tag}",
-                tag = tag,
-                path = path.to_string()
-            ),
-        ]);
-    }
-    cmd.stdin(Stdio::null());
-    cmd.spawn().expect("failed to spawn VM")
-}
-/*
-async fn simple_run_command(ga_mutex: &Arc<Mutex<GuestAgent>>, bin: &str, argv: &[&str], dir: &str, notifications: Option<&Arc<Notifications>>) -> io::Result<()> {
-    let mut ga = ga_mutex.lock().await;
-
-    log::debug!("Command started: {0}", argv.join(" "));
-    //io::stdout().write_all(std::format!("Command started: {0}\n", argv.join(" ")).as_str().as_bytes())?;
-
-    let id = ga
-        .run_process(
-            bin,
-            argv,
-            None,
-            0,
-            0,
-            &[
-                None,
-                None,
-                None,
-            ],
-            Some(dir),
-        )
-        .await?
-        .expect("Run process failed");
-    //println!("Spawned process with id: {}", id);
-    if let Some(notifications) = notifications {
-        notifications.process_died.notified().await;
-        //notifications.output_available.notified().await;
-    }
-    delay_for(Duration::from_millis(1000)).await;
-    log::debug!("{}", "QUERY OUTPUT");
-    let out = ga
-        .query_output(id, 1, 0, u64::MAX)
-        .await?
-        .expect("Output query failed");
-
-    //println!("Output:");
-    log::debug!("{}", str::from_utf8(&out).unwrap_or("CANNOT CONVERT"));
-
-    log::debug!("Command finished: {0}", argv.join(" "));
-
-    Ok(())
-}*/
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
     env_logger::init();
+
     let temp_dir = tempdir::TempDir::new("ya-vm-direct").expect("Failed to create temp dir");
     let temp_path = temp_dir.path();
     let inner_path = temp_path.join("inner");
 
     std::fs::create_dir_all(&inner_path).expect("Failed to create a dir inside temp dir");
-    let notifications = Arc::new(Notifications::new());
 
-    log::info!("Temp path: {:?}", temp_path);
+    let notifications = Arc::new(Notifications::new());
     let mount_args = [
-        ("tag0", temp_path.display()),
-        ("tag1", inner_path.display()),
+        ContainerVolume {
+            name: "".to_string(),
+            path: "/mnt/mnt0/tag0".to_string(),
+        },
+        ContainerVolume {
+            name: "inner".to_string(),
+            path: "/mnt/mnt1/tag1".to_string(),
+        },
     ];
-    let should_spawn_vm = false;
-    if should_spawn_vm {
-        let _child = spawn_vm(&temp_path, &mount_args);
-    }
+
+    let (mut child, vm) = spawn_vm();
+
+    let (_p9streams, _muxer_handle) = vm.start_9p_service(&temp_path, &mount_args).await.unwrap();
 
     let ns = notifications.clone();
-    let ga_mutex = GuestAgent::connected("127.0.0.1:9003", 10, move |n, _g| {
+    let ga_mutex = GuestAgent::connected(vm.get_manager_sock(), 10, move |n, _g| {
         let notifications = ns.clone();
         async move { notifications.clone().handle(n) }.boxed()
     })
     .await?;
+    let mut ga = ga_mutex.lock().await;
 
-    log::debug!("Spawn p9 servers...");
-    {
-        for (i, (tag, _)) in mount_args.iter().enumerate() {
-            let _ = spawn_9p_server(
-                std::format!("C:/golem/ya-runtime-vm/runtime/temp{}", i),
-                9101 + i as i32,
-            );
-        }
-    }
-    delay_for(Duration::from_millis(1000)).await;
-
-    log::debug!("Connect to p9 servers...");
-
-    let mut vmp9stream: std::net::TcpStream =
-        std::net::TcpStream::connect(std::format!("127.0.0.1:{}", 9005))?;
-
-    let mut p9streams: Vec<std::net::TcpStream> = vec![];
-    {
-        for (i, (tag, _)) in mount_args.iter().enumerate() {
-            let mut stream =
-                std::net::TcpStream::connect(std::format!("127.0.0.1:{}", 9101 + i as i32))?;
-            p9streams.push(stream);
-        }
+    for ContainerVolume { name, path } in mount_args.iter() {
+        ga.mount(name, path).await?.expect("Mount failed");
     }
 
-    let mut r = RawSocketCommunication::new();
-    r.start_raw_comm(vmp9stream, p9streams);
+    run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-al", "/mnt"]).await?;
 
-    /*
-        let servers9p = Arc::new(Servers9p{writeHalfs: p9streams});
+    run_process_with_output(
+        &mut ga,
+        &notifications,
+        "/bin/ls",
+        &["ls", "-al", "/mnt/mnt1/tag1"],
+    )
+    .await?;
 
-        let ns9p = servers9p.clone();
-        let ga_pp = GuestAgent9p::connected("127.0.0.1:9005", 10, move |n, _g| {
-            let notifications = ns9p.clone();
-            async move { notifications.clone().handle(n) }.boxed()
-        }).await?;
-    */
-    {
-        /*
-        let mut ga = ga_mutex.lock().await;
-        log::debug!("start_mount");
-        for (i, (tag, _)) in mount_args.iter().enumerate() {
-            ga.mount(tag, &format!("/mnt/mnt{}/{}", i, tag))
-                .await?
-                .expect("Mount failed");
-        }*/
-    }
-    log::debug!("end mnt loop");
-    delay_for(Duration::from_millis(1000)).await;
-    log::debug!("end delay");
+    test_write(&mut ga, &notifications).await?;
 
-    let no_redir = [None, None, None];
+    test_start_and_kill(&mut ga, &notifications).await?;
 
-    {
-        let mut ga = ga_mutex.lock().await;
+    test_big_write(&mut ga, &notifications).await?;
 
-        let id = ga
-            .run_process(
-                "/bin/ls",
-                &["ls", "-al", "."],
-                None,
-                0,
-                0,
-                &no_redir,
-                Some("/mnt"),
-            )
-            .await?
-            .expect("Run process failed");
-        println!("Spawned process with id: {}", id);
-        notifications.process_died.notified().await;
-        println!("Notification send: {}", id);
-        let out = ga
-            .query_output(id, 1, 0, u64::MAX)
-            .await?
-            .expect("Output query failed");
-        println!("Output:");
-        io::stdout().write_all(&out)?;
+    // ga.quit().await?.expect("Quit failed");
 
-        run_process_with_output(
-            &mut ga,
-            &notifications,
-            "/bin/ls",
-            &["ls", "-al", "/mnt/mnt1/tag1"],
-        )
-        .await?;
+    let id = ga
+        .run_entrypoint("/bin/sleep", &["sleep", "2"], None, 0, 0, &NO_REDIR, None)
+        .await?
+        .expect("Run process failed");
+    println!("Spawned process with id: {}", id);
+    notifications.process_died.notified().await;
 
-        let fds = [
+    /* VM should quit now. */
+    let e = child.wait().await.expect("failed to wait on child");
+    println!("{:?}", e);
+
+    Ok(())
+}
+
+const NO_REDIR: [Option<RedirectFdType>; 3] = [None, None, None];
+
+async fn test_big_write(ga: &mut GuestAgent, notifications: &Notifications) -> io::Result<()> {
+    println!("***** test_big_write *****");
+    let id = ga
+        .run_process(
+            "/bin/bash",
+            &[
+                "bash",
+                "-c",
+                "for i in {1..3311}; do echo -ne a >> /big; done; cat /big",
+            ],
             None,
-            Some(RedirectFdType::RedirectFdFile(
-                "/mnt/mnt1/tag1/write_test".as_bytes(),
-            )),
+            0,
+            0,
+            &[
+                None,
+                Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
+                None,
+            ],
             None,
-        ];
-
-        let id = ga
-            .run_process("/bin/echo", &["echo", "WRITE TEST"], None, 0, 0, &fds, None)
-            .await?
-            .expect("Run process failed");
-        println!("Spawned process with id: {}", id);
-        notifications.process_died.notified().await;
-
-        run_process_with_output(
-            &mut ga,
-            &notifications,
-            "/bin/cat",
-            &["cat", "/mnt/mnt1/tag1/write_test"],
         )
-        .await?;
+        .await
+        .expect("Run process failed")
+        .expect("Remote command failed");
 
-        let id = ga
-            .run_process("/bin/sleep", &["sleep", "10"], None, 0, 0, &no_redir, None)
-            .await?
-            .expect("Run process failed");
-        println!("Spawned process with id: {}", id);
+    println!("Spawned process with id: {}", id);
+    notifications.process_died.notified().await;
 
-        ga.kill(id).await?.expect("Kill failed");
-        notifications.process_died.notified().await;
+    notifications.output_available.notified().await;
 
-        let id = ga
-            .run_process(
-                "/bin/bash",
-                &[
-                    "bash",
-                    "-c",
-                    "for i in {1..8000}; do echo -ne a >> /big; done; cat /big",
-                ],
-                None,
-                0,
-                0,
-                &[
-                    None,
-                    Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
-                    None,
-                ],
-                None,
-            )
-            .await?
-            .expect("Run process failed");
-        println!("Spawned process with id: {}", id);
-        notifications.output_available.notified().await;
-        let out = ga
-            .query_output(id, 1, 0, u64::MAX)
-            .await?
-            .expect("Output query failed");
-        println!(
-            "Big output 1: {} {}",
-            out.len(),
-            out.iter().filter(|x| **x != 0x61).count()
-        );
-        notifications.output_available.notified().await;
-    }
+    let out = ga
+        .query_output(id, 1, 0, u64::MAX)
+        .await?
+        .expect("Output query failed");
 
-    /*
-        simple_run_command(&ga_mutex, "/bin/ls", &["ls", "-la"], "/", Some(&notifications)).await?;
-        delay_for(Duration::from_millis(1000)).await;
-        simple_run_command(&ga_mutex, "/bin/ls", &["ls", "-la"], "/dev", Some(&notifications)).await?;
-        delay_for(Duration::from_millis(1000)).await;
-        simple_run_command(&ga_mutex, "/bin/bash", &["bash", "-c",  "mkdir /mnt/mnt0/tag0/host_files  > /result.log 2> /error.log; echo output:; cat /result.log; echo errors:;cat /error.log"], "/mnt", Some(&notifications)).await?;
-        delay_for(Duration::from_millis(1000)).await;
-        //simple_run_command(&ga_mutex, "/bin/bash", &["bash", "-c",  "echo DUPA >> /dev/vport0p3"], "/dev", Some(&notifications)).await?;
+    println!("Big Output:");
+    println!(
+        "Big output 1: len: {} unexpected characters: {}",
+        out.len(),
+        out.iter().filter(|x| **x != 'a' as u8).count()
+    );
 
-        //simple_run_command(&ga_mutex, "/bin/bash", &["bash", "-c",  "mount -t 9p -o trans=fd,rfdno=/dev/vport0p3,wfdno=/dev/vport0p3,version=9p2000.L hostshare /mnt/host_files > /result.log 2> /error.log; echo output:; cat /result.log; echo errors:;cat /error.log"], "/dev", Some(&notifications)).await?;
-        delay_for(Duration::from_millis(1000)).await;
-    */
-    if false {
-        let mut ga = ga_mutex.lock().await;
+    Ok(())
+}
 
-        //run_ls(&ga_mutex, &notifications, "/").await?;
-        //run_ls(&ga_mutex, &notifications, "/bin").await?;
-        //run_ls(&ga_mutex, &notifications, "/dev").await?;
-        //run_ls(&ga_mutex, &notifications, "/mnt").await?;
-        //run_cat(&ga_mutex, &notifications, "/dev", ".env").await?;
+async fn test_start_and_kill(ga: &mut GuestAgent, notifications: &Notifications) -> io::Result<()> {
+    println!("***** test_start_and_kill *****");
 
-        run_process_with_output(
-            &mut ga,
-            &notifications,
-            "/bin/ls",
-            &["ls", "-al", "/mnt/mnt1/tag1"],
-        )
-        .await?;
+    let id = ga
+        .run_process("/bin/sleep", &["sleep", "10"], None, 0, 0, &NO_REDIR, None)
+        .await?
+        .expect("Run process failed");
+    println!("Spawned process with id: {}", id);
 
-        let fds = [
-            None,
-            Some(RedirectFdType::RedirectFdFile("/write_test".as_bytes())),
-            None,
-        ];
-        let mut ga = ga_mutex.lock().await;
+    ga.kill(id).await?.expect("Kill failed");
 
-        let id = ga
-            .run_process("/bin/echo", &["echo", "WRITE TEST"], None, 0, 0, &fds, None)
-            .await?
-            .expect("Run process failed");
-        println!("Spawned process with id: {}", id);
-        notifications.process_died.notified().await;
+    // TODO: timeout
+    notifications.process_died.notified().await;
 
-        run_process_with_output(
-            &mut ga,
-            &notifications,
-            "/bin/cat",
-            &["cat", "/mnt/mnt1/tag1/write_test"],
-        )
-        .await?;
+    Ok(())
+}
 
-        let id = ga
-            .run_process("/bin/sleep", &["sleep", "10"], None, 0, 0, &no_redir, None)
-            .await?
-            .expect("Run process failed");
-        println!("Spawned process with id: {}", id);
+async fn test_write(ga: &mut GuestAgent, notifications: &Notifications) -> io::Result<()> {
+    println!("***** test_write *****");
 
-        ga.kill(id).await?.expect("Kill failed");
-        notifications.process_died.notified().await;
+    let fds = [
+        None,
+        Some(RedirectFdType::RedirectFdFile(
+            "/mnt/mnt1/tag1/write_test".as_bytes(),
+        )),
+        None,
+    ];
+    // Write something to the file
+    let id = ga
+        .run_process("/bin/echo", &["echo", "WRITE TEST"], None, 0, 0, &fds, None)
+        .await?
+        .expect("Run process failed");
+    println!("Spawned process with id: {}", id);
+    notifications.process_died.notified().await;
 
-        let id = ga
-            .run_process(
-                "/bin/bash",
-                &[
-                    "bash",
-                    "-c",
-                    "for i in {1..30}; do echo -ne a >> /big; sleep 1; done; cat /big",
-                ],
-                None,
-                0,
-                0,
-                &[
-                    None,
-                    Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
-                    None,
-                ],
-                None,
-            )
-            .await?
-            .expect("Run process failed");
-        println!("Spawned process with id: {}", id);
-        notifications.output_available.notified().await;
-        let out = ga
-            .query_output(id, 1, 0, u64::MAX)
-            .await?
-            .expect("Output query failed");
-        println!(
-            "Big output 1: {} {}",
-            out.len(),
-            out.iter().filter(|x| **x != 0x61).count()
-        );
-        notifications.output_available.notified().await;
-        ga.quit().await?.expect("Quit failed");
-        let out = ga
-            .query_output(id, 1, 0, u64::MAX)
-            .await?
-            .expect("Output query failed");
-        println!(
-            "Big output 2: {} {}",
-            out.len(),
-            out.iter().filter(|x| **x != 0x61).count()
-        );
+    // Check it's there
+    run_process_with_output(
+        ga,
+        &notifications,
+        "/bin/cat",
+        &["cat", "/mnt/mnt1/tag1/write_test"],
+    )
+    .await?;
 
-        let id = ga
-            .run_process(
-                "/bin/bash",
-                &[
-                    "bash",
-                    "-c",
-                    "echo > /big; for i in {1..4000}; do echo -ne a >> /big; done; for i in {1..4096}; do echo -ne b >> /big; done; cat /big",
-                ],
-                None,
-                0,
-                0,
-                &[
-                    None,
-                    Some(RedirectFdType::RedirectFdPipeCyclic(0x1000)),
-                    None,
-                ],
-                None,
-            )
-            .await?
-            .expect("Run process failed");
-        println!("Spawned process with id: {}", id);
-        notifications.process_died.notified().await;
-        notifications.output_available.notified().await;
-        let out = ga
-            .query_output(id, 1, 0, u64::MAX)
-            .await?
-            .expect("Output query failed");
-        println!(
-            "Big output 1: {} {}",
-            out.len(),
-            out.iter().filter(|x| **x != 0x62).count()
-        );
+    // Check timestamp
+    run_process_with_output(
+        ga,
+        &notifications,
+        "/bin/ls",
+        &["ls", "-la", "/mnt/mnt1/tag1/"],
+    )
+    .await?;
 
-        let out = ga
-            .query_output(id, 1, 0, u64::MAX)
-            .await?
-            .expect("Output query failed");
-        println!("Big output 2: {}, expected 0", out.len());
-
-        let id = ga
-            .run_entrypoint("/bin/sleep", &["sleep", "2"], None, 0, 0, &no_redir, None)
-            .await?
-            .expect("Run process failed");
-        println!("Spawned process with id: {}", id);
-        notifications.process_died.notified().await;
-
-        /* VM should quit now. */
-        //let e = child.await.expect("failed to wait on child");
-        //println!("{:?}", e);
-    }
-    r.finish_raw_comm();
     Ok(())
 }

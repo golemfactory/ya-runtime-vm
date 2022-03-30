@@ -1,7 +1,5 @@
 #define _GNU_SOURCE
 
-#if BUILD_FOR_WIN_P9
-
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -65,7 +63,7 @@ static int write_exact(int fd, const void* buf, size_t size) {
     while (size) {
         ssize_t ret = write(fd, buf, size);
         if (ret == 0) {
-            puts("writen: WAITING FOR HOST (2) ...");
+            puts("written: WAITING FOR HOST (2) ...");
             sleep(1);
             continue;
         }
@@ -210,7 +208,6 @@ mutex_unlock:
     }
 }
 
-
 int initialize_p9_socket_descriptors() {
     for (int i = 0; i < MAX_P9_VOLUMES; i++) {
         g_p9_socket_fds[i][0] = -1;
@@ -243,6 +240,7 @@ uint32_t do_mount_win_p9(const char* tag, uint8_t channel, char* path) {
         return errno;
     }
 
+    // TODO: there could be one thread with poll
     //for every socket pair we need one reader
     uintptr_t channel_wide_int = channel;
     if (pthread_create(&g_p9_tunnel_thread_sender[channel], NULL, &tunnel_from_p9_sock_to_virtio, (void*) channel_wide_int) == -1) {
@@ -253,6 +251,7 @@ uint32_t do_mount_win_p9(const char* tag, uint8_t channel, char* path) {
     tag = tag;
     char* mount_cmd = NULL;
     int mount_socked_fd = g_p9_socket_fds[channel][0];
+    // TODO: snprintf
     int buf_size = asprintf(&mount_cmd, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L", mount_socked_fd, mount_socked_fd);
     if (buf_size < 0) {
         free(mount_cmd);
@@ -264,39 +263,7 @@ uint32_t do_mount_win_p9(const char* tag, uint8_t channel, char* path) {
         return errno;
     }
 
-//create test file <- use it for debugging and preliminary testing
-#define CREATE_DEBUG_FILE 0
-#if CREATE_DEBUG_FILE
-    {
-        FILE * fd;
-        fprintf(stderr, "Checking mount volume: path: %s\n", path);
-        const int MAX_FILE_TEST_SIZE_NAME = 256;
-        char *test_file_path = malloc(MAX_FILE_TEST_SIZE_NAME);
-        snprintf(test_file_path, MAX_FILE_TEST_SIZE_NAME, "%s/internal_mount_test.txt", path);
-        fd = fopen(test_file_path, "w");
-
-        if (fd == NULL) {
-            fprintf(stderr, "Failed to create test file: %s\n", test_file_path);
-            free(test_file_path);
-            return errno;
-        }
-        fprintf(stderr, "Successfully created test file: %s\n", test_file_path);
-
-        fprintf(fd, "Internal mount testing...\n");
-        fprintf(fd, "Tag: %s\n", tag);
-        fprintf(fd, "Mount path: %s\n", path);
-        fprintf(fd, "Test file path: %s\n", test_file_path);
-
-
-        free(test_file_path);
-
-        fclose(fd);
-    }
-#endif
-
     fprintf(stderr, "Mount finished.\n");
     free(mount_cmd);
     return 0;
 }
-
-#endif //BUILD_FOR_WIN_P9

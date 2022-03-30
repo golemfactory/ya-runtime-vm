@@ -98,8 +98,8 @@ pub fn start_demux_communication(
             Ok(()) => {
                 log::error!("Reader part of p9 communication ended too soon");
             }
-            Err(_e) => {
-                log::info!("Future aborted");
+            Err(e) => {
+                log::info!("Future aborted, reason {e}");
             }
         }
     });
