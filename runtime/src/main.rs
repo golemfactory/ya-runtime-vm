@@ -309,12 +309,7 @@ async fn start(
 
     let demux_socket_handle = start_demux_communication(vmp9stream, p9streams)?;
 
-    #[cfg(unix)]
-    let path = manager_sock.to_str().unwrap();
-    #[cfg(windows)]
-    let path = vm.get_manager_sock();
-
-    let ga = GuestAgent::connected(path, 10, move |notification, ga| {
+    let ga = GuestAgent::connected(vm.get_manager_sock(), 10, move |notification, ga| {
         let mut emitter = emitter.clone();
         async move {
             let status = notification_into_status(notification, ga).await;
@@ -338,7 +333,7 @@ async fn start(
     data.p9_communication_handle.replace(demux_socket_handle); //prevent dropping
     data.runtime.replace(runtime);
     data.network
-        .replace(NetworkEndpoint::Socket(vm.get_net_sock().to_owned()));
+        .replace(NetworkEndpoint::Socket(vm.get_net_sock().into()));
     data.ga.replace(ga);
 
     Ok(None)

@@ -142,12 +142,20 @@ impl VMBuilder {
         let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
 
         #[cfg(windows)]
-        VM {
+        return VM {
             manager_sock: manager_sock.to_string(),
             net_sock: net_sock.to_string(),
             p9_sock: p9_sock.to_string(),
             args,
-        }
+        };
+
+        #[cfg(unix)]
+        return VM {
+            manager_sock: manager_sock.display().to_string(),
+            net_sock: net_sock.display().to_string(),
+            p9_sock: p9_sock.to_string(),
+            args,
+        };
     }
 }
 
@@ -162,10 +170,7 @@ pub struct VM {
 
 impl VM {
     pub fn get_manager_sock(&self) -> &str {
-        #[cfg(unix)]
-        return manager_sock.to_str().unwrap();
-        #[cfg(windows)]
-        return &self.manager_sock;
+        &self.manager_sock.as_str()
     }
 
     pub fn get_net_sock(&self) -> &str {

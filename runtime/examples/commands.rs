@@ -73,6 +73,7 @@ impl server::RuntimeHandler for Events {
                 }
             }
         }
+
         futures::future::ready(()).boxed()
     }
 
