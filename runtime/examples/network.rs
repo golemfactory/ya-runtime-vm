@@ -350,8 +350,14 @@ fn handle_ethernet_packet(data: &[u8]) -> Option<Vec<u8>> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    env_logger::init();
+
     let notifications = Arc::new(Mutex::new(Notifications::new()));
     let (mut child, vm) = spawn_vm();
+
+    let temp_dir = tempdir::TempDir::new("ya-vm-network").expect("Failed to create temp dir");
+    let temp_path = temp_dir.path();
+    let (_p9streams, _muxer_handle) = vm.start_9p_service(&temp_path, &[]).await.unwrap();
 
     let ns = notifications.clone();
 

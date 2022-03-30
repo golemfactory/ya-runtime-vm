@@ -11,10 +11,13 @@ use std::{
 use tokio::net::TcpStream;
 use tokio::time::sleep;
 use tokio::{process::Child, sync};
+use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 use ya_runtime_vm::demux_socket_comm::{start_demux_communication, DemuxSocketHandle};
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
-use ya_runtime_vm::vm::{VMBuilder, VM};
+use ya_runtime_vm::vm::{self, VMBuilder, VM};
 use ya_vm_file_server::InprocServer;
+
+mod common;
 
 struct Notifications {
     process_died: sync::Notify,
@@ -126,6 +129,9 @@ fn spawn_vm() -> (Child, VM) {
     println!("CMD: {cmd:?}");
 
     cmd.stdin(Stdio::null());
+    // TODO: remove it!
+    cmd.stdout(Stdio::null());
+
     cmd.current_dir(runtime_dir);
     (cmd.spawn().expect("failed to spawn VM"), vm)
 }
@@ -142,12 +148,19 @@ async fn main() -> io::Result<()> {
 
     let notifications = Arc::new(Notifications::new());
     let mount_args = [
-        ("tag0", temp_path.display()),
-        ("tag1", inner_path.display()),
+        ContainerVolume {
+            name: "".to_string(),
+            path: "/mnt/mnt0/tag0".to_string(),
+        },
+        ContainerVolume {
+            name: "inner".to_string(),
+            path: "/mnt/mnt1/tag1".to_string(),
+        },
     ];
+
     let (mut child, vm) = spawn_vm();
 
-    let (_p9streams, _muxer_handle) = start_9p_service(&mount_args).await.unwrap();
+    let (_p9streams, _muxer_handle) = vm.start_9p_service(&temp_path, &mount_args).await.unwrap();
 
     let ns = notifications.clone();
     let ga_mutex = GuestAgent::connected(
@@ -163,10 +176,8 @@ async fn main() -> io::Result<()> {
     .await?;
     let mut ga = ga_mutex.lock().await;
 
-    for (i, (tag, _)) in mount_args.iter().enumerate() {
-        ga.mount(tag, &format!("/mnt/mnt{}/{}", i, tag))
-            .await?
-            .expect("Mount failed");
+    for ContainerVolume { name, path } in mount_args.iter() {
+        ga.mount(name, path).await?.expect("Mount failed");
     }
 
     run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-al", "/mnt"]).await?;
@@ -201,59 +212,6 @@ async fn main() -> io::Result<()> {
     Ok(())
 }
 
-async fn connect_to_vm_9p_endpoint(address: &str, tries: i32) -> anyhow::Result<TcpStream> {
-    log::debug!("Connect to the VM 9P endpoint...");
-
-    for _ in 0..tries {
-        match TcpStream::connect(address).await {
-            Ok(stream) => {
-                log::debug!("Connected to the VM 9P endpoint");
-                return Ok(stream);
-            }
-            Err(e) => {
-                log::debug!("Failed to connect to the VM 9P endpoint: {e}");
-                // The VM is not ready yet, try again
-                sleep(Duration::from_secs(1)).await;
-            }
-        };
-    }
-
-    Err(anyhow!(
-        "Failed to connect to the VM 9P endpoint after #{tries} tries"
-    ))
-}
-
-async fn start_9p_service(
-    mount_args: &[(&str, impl ToString)],
-) -> anyhow::Result<(Vec<InprocServer>, DemuxSocketHandle)> {
-    log::debug!("Connecting to the 9P VM endpoint...");
-    let vmp9stream = connect_to_vm_9p_endpoint(&std::format!("127.0.0.1:{}", 9005), 10).await?;
-
-    // TODO: make this common?
-    log::debug!("Spawn 9P inproc servers...");
-
-    let mut runtime_9ps = vec![];
-
-    for (_, mount_point) in mount_args {
-        let runtime_9p = InprocServer::new(&mount_point.to_string());
-        runtime_9ps.push(runtime_9p);
-    }
-
-    log::debug!("Connect to 9P inproc servers...");
-
-    let mut p9streams = vec![];
-
-    for server in &runtime_9ps {
-        let client_stream = server.attach_client();
-        p9streams.push(client_stream);
-    }
-
-    let demux_socket_handle = start_demux_communication(vmp9stream, p9streams)?;
-
-    // start_demux_communication(vm_stream, p9_streams);
-    Ok((runtime_9ps, demux_socket_handle))
-}
-
 const NO_REDIR: [Option<RedirectFdType>; 3] = [None, None, None];
 
 async fn test_big_write(ga: &mut GuestAgent, notifications: &Notifications) -> io::Result<()> {
@@ -264,7 +222,7 @@ async fn test_big_write(ga: &mut GuestAgent, notifications: &Notifications) -> i
             &[
                 "bash",
                 "-c",
-                "for i in {1..8000}; do echo -ne a >> /big; done; cat /big",
+                "for i in {1..3311}; do echo -ne a >> /big; done; cat /big",
             ],
             None,
             0,

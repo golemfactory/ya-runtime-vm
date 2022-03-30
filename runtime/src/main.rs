@@ -6,7 +6,6 @@ use log::LevelFilter;
 use log4rs::append::file::FileAppender;
 use log4rs::config::{Appender, Config, Root};
 use log4rs::encode::pattern::PatternEncoder;
-use ya_runtime_vm::vm::VMBuilder;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -14,20 +13,20 @@ use std::time::Duration;
 use structopt::StructOpt;
 use tokio::net::TcpStream;
 use tokio::time::sleep;
+use ya_runtime_vm::vm::{self, VMBuilder};
 
 use tokio::{
     fs,
     io::{self, AsyncBufReadExt, AsyncWriteExt},
-    process,
-    spawn,
+    process, spawn,
 };
 use ya_runtime_sdk::{
     runtime_api::{
         deploy::{DeployResult, StartMode},
         server,
     },
-    server::Server,
     serialize,
+    server::Server,
     Context, EmptyResponse, EndpointResponse, EventEmitter, OutputResponse, ProcessId,
     ProcessIdResponse, RuntimeMode,
 };
@@ -253,7 +252,12 @@ async fn start(
     let mut data = runtime_data.lock().await;
     let deployment = data.deployment().expect("Missing deployment data");
 
-    let vm = VMBuilder::new(deployment.cpu_cores, deployment.mem_mib, &deployment.task_package).build();
+    let vm = VMBuilder::new(
+        deployment.cpu_cores,
+        deployment.mem_mib,
+        &deployment.task_package,
+    )
+    .build();
     let mut cmd = vm.create_cmd(runtime_dir.join(FILE_RUNTIME));
 
     cmd.current_dir(&runtime_dir);
@@ -270,44 +274,15 @@ async fn start(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
-        .spawn().context(format!("Failed command: {cmd:?}"))?;
+        .spawn()
+        .context(format!("Failed command: {cmd:?}"))?;
 
     let stdout = runtime.stdout.take().unwrap();
     let stderr = runtime.stderr.take().unwrap();
     spawn(reader_to_log(stdout));
     spawn(reader_to_log_error(stderr));
 
-
-    let vmp9stream = connect_to_vm_endpoint(&vm.get_9p_sock(), 10).await?;
-
-    log::debug!("Spawn 9P inproc servers...");
-
-    let mut runtime_9ps = vec![];
-
-    for volume in deployment.volumes.iter() {
-        let mount_point_host = work_dir
-            .join(&volume.name)
-            .to_str()
-            .ok_or(anyhow!("cannot resolve 9P mount point"))?
-            .to_string();
-
-        let runtime_9p = InprocServer::new(&mount_point_host);
-
-        runtime_9ps.push(runtime_9p);
-    }
-
-    log::debug!("Connect to 9P inproc servers...");
-
-
-    let mut p9streams = vec![];
-
-
-    for server in &runtime_9ps {
-        let client_stream = server.attach_client();
-        p9streams.push(client_stream);
-    }
-
-    let demux_socket_handle = start_demux_communication(vmp9stream, p9streams)?;
+    let (runtime_9ps, demux_socket_handle) = vm.start_9p_service(&work_dir, &deployment.volumes).await?;
 
     let ga = GuestAgent::connected(vm.get_manager_sock(), 10, move |notification, ga| {
         let mut emitter = emitter.clone();
@@ -318,7 +293,6 @@ async fn start(
         .boxed()
     })
     .await?;
-
 
     {
         let mut ga = ga.lock().await;
@@ -337,26 +311,6 @@ async fn start(
     data.ga.replace(ga);
 
     Ok(None)
-}
-
-async fn connect_to_vm_endpoint(address: &str, tries: i32) -> anyhow::Result<TcpStream> {
-    log::debug!("Connect to the VM endpoint...");
-
-    for _ in 0..tries {
-        match TcpStream::connect(address).await {
-            Ok(stream) => {
-                log::debug!("Connected to the VM endpoint");
-                return Ok(stream);
-            }
-            Err(e) => {
-                log::debug!("Failed to connect to the VM endpoint: {e}");
-                // The VM is not ready yet, try again
-                sleep(Duration::from_secs(1)).await;
-            },
-        };
-    }
-
-    Err(anyhow!("Failed to connect to the VM endpoint after #{tries} tries"))
 }
 
 async fn run_command(
