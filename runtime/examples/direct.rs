@@ -17,8 +17,6 @@ use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
 use ya_runtime_vm::vm::{self, VMBuilder, VM};
 use ya_vm_file_server::InprocServer;
 
-mod common;
-
 struct Notifications {
     process_died: sync::Notify,
     output_available: sync::Notify,
