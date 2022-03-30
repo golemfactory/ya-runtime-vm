@@ -86,14 +86,16 @@ fn get_root_dir() -> PathBuf {
 }
 
 fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
+    let joined = path.as_ref().join(file.to_string());
+
     // Under windows Paths has UNC prefix that is not parsed correctly by qemu
     // Wrap Path with simplified method to remove that prefix
     // It has no effect on Unix
     dunce::simplified(
-        path.as_ref()
-            .join(file.to_string())
+        joined
+            // canonicalize checks existence of the file, it may failed, if does not exist
             .canonicalize()
-            .unwrap()
+            .expect(&joined.display().to_string())
             .as_path(),
     )
     .display()
@@ -153,14 +155,10 @@ async fn main() -> io::Result<()> {
     let (_p9streams, _muxer_handle) = vm.start_9p_service(&temp_path, &mount_args).await.unwrap();
 
     let ns = notifications.clone();
-    let ga_mutex = GuestAgent::connected(
-        vm.get_manager_sock(),
-        10,
-        move |n, _g| {
-            let notifications = ns.clone();
-            async move { notifications.clone().handle(n) }.boxed()
-        },
-    )
+    let ga_mutex = GuestAgent::connected(vm.get_manager_sock(), 10, move |n, _g| {
+        let notifications = ns.clone();
+        async move { notifications.clone().handle(n) }.boxed()
+    })
     .await?;
     let mut ga = ga_mutex.lock().await;
 
