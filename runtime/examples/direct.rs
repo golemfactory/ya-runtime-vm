@@ -1,21 +1,15 @@
-use anyhow::anyhow;
 use futures::FutureExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 use std::{
     env,
     io::{self, prelude::*},
     process::Stdio,
     sync::Arc,
 };
-use tokio::net::TcpStream;
-use tokio::time::sleep;
 use tokio::{process::Child, sync};
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
-use ya_runtime_vm::demux_socket_comm::{start_demux_communication, DemuxSocketHandle};
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
-use ya_runtime_vm::vm::{self, VMBuilder, VM};
-use ya_vm_file_server::InprocServer;
+use ya_runtime_vm::vm::{VMBuilder, VM};
 
 struct Notifications {
     process_died: sync::Notify,

@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context as _};
+use anyhow::Context as _;
 use futures::future::FutureExt;
 use futures::lock::Mutex;
 use futures::TryFutureExt;
@@ -6,14 +6,12 @@ use log::LevelFilter;
 use log4rs::append::file::FileAppender;
 use log4rs::config::{Appender, Config, Root};
 use log4rs::encode::pattern::PatternEncoder;
+use ya_runtime_vm::demux_socket_comm::{DemuxSocketHandle, stop_demux_communication};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
 use structopt::StructOpt;
-use tokio::net::TcpStream;
-use tokio::time::sleep;
-use ya_runtime_vm::vm::{self, VMBuilder};
+use ya_runtime_vm::vm::VMBuilder;
 
 use tokio::{
     fs,
@@ -30,9 +28,7 @@ use ya_runtime_sdk::{
     Context, EmptyResponse, EndpointResponse, EventEmitter, OutputResponse, ProcessId,
     ProcessIdResponse, RuntimeMode,
 };
-use ya_runtime_vm::demux_socket_comm::{
-    start_demux_communication, stop_demux_communication, DemuxSocketHandle,
-};
+
 use ya_runtime_vm::{
     cpu::CpuInfo,
     deploy::Deployment,
@@ -282,7 +278,8 @@ async fn start(
     spawn(reader_to_log(stdout));
     spawn(reader_to_log_error(stderr));
 
-    let (runtime_9ps, demux_socket_handle) = vm.start_9p_service(&work_dir, &deployment.volumes).await?;
+    let (runtime_9ps, demux_socket_handle) =
+        vm.start_9p_service(&work_dir, &deployment.volumes).await?;
 
     let ga = GuestAgent::connected(vm.get_manager_sock(), 10, move |notification, ga| {
         let mut emitter = emitter.clone();
