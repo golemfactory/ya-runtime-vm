@@ -121,8 +121,6 @@ fn spawn_vm() -> (Child, VM) {
     println!("CMD: {cmd:?}");
 
     cmd.stdin(Stdio::null());
-    // TODO: remove it!
-    cmd.stdout(Stdio::null());
 
     cmd.current_dir(runtime_dir);
     (cmd.spawn().expect("failed to spawn VM"), vm)
@@ -156,8 +154,6 @@ async fn main() -> io::Result<()> {
 
     let ns = notifications.clone();
     let ga_mutex = GuestAgent::connected(
-        // TODO: test on linux
-        // temp_path.join("manager.sock").as_os_str().to_str().unwrap(),
         vm.get_manager_sock(),
         10,
         move |n, _g| {
