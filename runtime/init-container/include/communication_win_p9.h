@@ -15,7 +15,6 @@ extern int g_p9_fd;
 extern int g_p9_current_channel;
 extern int g_p9_socket_fds[MAX_P9_VOLUMES][2];
 
-extern pthread_t g_p9_tunnel_thread_sender[MAX_P9_VOLUMES];
 extern pthread_mutex_t g_p9_tunnel_mutex_sender;
 extern pthread_t g_p9_tunnel_thread_receiver;
 

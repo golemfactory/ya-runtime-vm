@@ -1,5 +1,6 @@
 use futures::FutureExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use std::{
     env,
     io::{self, prelude::*},
@@ -81,10 +82,6 @@ fn get_project_dir() -> PathBuf {
         .expect("invalid manifest dir")
 }
 
-fn get_root_dir() -> PathBuf {
-    get_project_dir().parent().unwrap().canonicalize().unwrap()
-}
-
 fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
     let joined = path.as_ref().join(file.to_string());
 
@@ -108,7 +105,6 @@ fn spawn_vm() -> (Child, VM) {
     #[cfg(unix)]
     let vm_executable = "vmrt";
 
-    let root_dir = get_root_dir();
     let project_dir = get_project_dir();
     let runtime_dir = project_dir.join("poc").join("runtime");
     let image_dir = project_dir.join("poc").join("squashfs");
@@ -179,6 +175,8 @@ async fn main() -> io::Result<()> {
 
     test_write(&mut ga, &notifications).await?;
 
+    // test_indirect(&mut ga, &notifications).await?;
+
     test_start_and_kill(&mut ga, &notifications).await?;
 
     test_big_write(&mut ga, &notifications).await?;
@@ -195,6 +193,10 @@ async fn main() -> io::Result<()> {
     /* VM should quit now. */
     let e = child.wait().await.expect("failed to wait on child");
     println!("{:?}", e);
+
+    println!("inner path: {}", inner_path.as_os_str().to_string_lossy());
+
+    // tokio::time::sleep(Duration::from_secs(30)).await;
 
     Ok(())
 }
