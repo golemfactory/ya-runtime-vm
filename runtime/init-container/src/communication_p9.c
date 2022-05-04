@@ -188,36 +188,39 @@ static void* tunnel_from_p9_sock_to_virtio(void *data) {
     (void)data;
 
     fprintf(stderr, "POLL: P9 sender started polling\n");
-    char* buffer = malloc(MAX_PACKET_SIZE);
-
-    // TODO: pre C99?
     int epoll_fd = -1;
-    epoll_fd = CHECK_NO_FATAL(epoll_create1(EPOLL_CLOEXEC));
+    char* buffer = NULL;
+
+    buffer = malloc(MAX_PACKET_SIZE);
+
+    if (buffer == NULL) {
+        fprintf(stderr, "Failed to allocate the message buffer\n");
+        goto error;
+    }
+
+    epoll_fd = TRY_OR_GOTO(epoll_create1(EPOLL_CLOEXEC), error);
 
     fprintf(stderr, "POLL: P9 adding descriptors\n");
 
     for (int i = 0; i < MAX_P9_VOLUMES; i++) {
         int channel_rx = g_p9_socket_fds[i][1];
 
-        // TODO: read about that struct fields
         struct epoll_event event = {};
         event.events = EPOLLIN;
         event.data.fd = channel_rx;
 
-        CHECK_NO_FATAL(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, channel_rx, &event));
+        TRY_OR_GOTO(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, channel_rx, &event), error);
     }
-
 
     while (1) {
         struct epoll_event event = {};
 
-        // TODO: max event set to 1, but I don't think that's a problem
         if (epoll_wait(epoll_fd, &event, 1, -1) < 0) {
             if (errno == EINTR || errno == EAGAIN) {
-                fprintf(stderr, "POLL: continue %m\n");
+                fprintf(stderr, "POLL: wait continue %m\n");
                 continue;
             }
-            fprintf(stderr, "epoll failed: %m\n");
+            fprintf(stderr, "POLL: wait failed: %m\n");
             goto error;
         }
 
@@ -235,8 +238,8 @@ static void* tunnel_from_p9_sock_to_virtio(void *data) {
     }
 
 error:
-    free(buffer);
     close(epoll_fd);
+    free(buffer);
     // TODO: return anything meaningful?
     return NULL;
 }
