@@ -23,7 +23,7 @@
 #include <unistd.h>
 
 #include "communication.h"
-#include "communication_p9.h"
+#include "communication_win_p9.h"
 #include "common.h"
 
 #include "cyclic_buffer.h"
@@ -987,7 +987,8 @@ static void handle_mount(msg_id_t msg_id) {
         goto out;
     }
 
-    ret = do_mount_p9(tag, path);
+    ret = do_mount_win_p9(tag, g_p9_current_channel, path);
+    g_p9_current_channel += 1;
 
 out:
     free(path);

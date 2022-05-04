@@ -31,7 +31,7 @@ SRC_DIR ?= src
 TEST_DIR ?= tests
 LIBURING_DIR ?= external/liburing
 
-OBJECTS = $(addprefix $(SRC_DIR)/,init.o communication.o communication_p9.o process_bookkeeping.o cyclic_buffer.o common.o)
+OBJECTS = $(addprefix $(SRC_DIR)/,init.o communication.o communication_win_p9.o process_bookkeeping.o cyclic_buffer.o)
 OBJECTS_EXT = $(addprefix $(SRC_DIR)/,network.o forward.o)
 
 # Below are the steps performed by this Makefile:

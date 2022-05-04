@@ -23,8 +23,7 @@
 #include <unistd.h>
 
 #include "communication.h"
-#include "communication_p9.h"
-#include "common.h"
+#include "communication_win_p9.h"
 
 #include "cyclic_buffer.h"
 #include "forward.h"
@@ -40,7 +39,7 @@
 #define DEFAULT_UID 0
 #define DEFAULT_GID 0
 #define DEFAULT_OUT_FILE_PERM S_IRWXU
-
+#define DEFAULT_DIR_PERMS (S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH)
 #define DEFAULT_FD_DESC {           \
         .type = REDIRECT_FD_FILE,   \
         .path = NULL,               \
@@ -118,6 +117,18 @@ static void load_module(const char* path) {
     int fd = CHECK(open(path, O_RDONLY | O_CLOEXEC));
     CHECK(syscall(SYS_finit_module, fd, "", 0));
     CHECK(close(fd));
+}
+
+int make_nonblocking(int fd) {
+    errno = 0;
+    int flags = fcntl(fd, F_GETFL);
+    if (flags == -1 && errno) {
+        return -1;
+    }
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        return -1;
+    }
+    return 0;
 }
 
 /*
@@ -298,6 +309,28 @@ static void setup_sigfd(void) {
     g_sig_fd = CHECK(signalfd(g_sig_fd, &set, SFD_CLOEXEC));
 }
 
+static int create_dir_path(char* path) {
+    assert(path[0] == '/');
+
+    char* next = path;
+    while (1) {
+        next = strchr(next + 1, '/');
+        if (!next) {
+            break;
+        }
+        *next = '\0';
+        int ret = mkdir(path, DEFAULT_DIR_PERMS);
+        *next = '/';
+        if (ret < 0 && errno != EEXIST) {
+            return -1;
+        }
+    }
+
+    if (mkdir(path, DEFAULT_DIR_PERMS) < 0 && errno != EEXIST) {
+        return -1;
+    }
+    return 0;
+}
 
 static void setup_agent_directories(void) {
     char* path = strdup(OUTPUT_PATH_PREFIX);
@@ -986,8 +1019,8 @@ static void handle_mount(msg_id_t msg_id) {
         ret = errno;
         goto out;
     }
-
-    ret = do_mount_p9(tag, path);
+    ret = do_mount_win_p9(tag, g_p9_current_channel, path);
+    g_p9_current_channel += 1;
 
 out:
     free(path);

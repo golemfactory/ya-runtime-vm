@@ -211,7 +211,7 @@ error:
 // }
 
 void handle_data_on_channel(int channel) {
-    fprintf(stderr, "POLL: handling data on channel %d\n", channel);
+    // fprintf(stderr, "POLL: handling data on channel %d\n", channel);
 
     // TODO: don't do allocations over and over
     const int bufferSize = MAX_PACKET_SIZE;
@@ -334,7 +334,7 @@ static void* tunnel_from_p9_sock_to_virtio(void *data) {
 }
 
 // TODO: create Twrite request that exceeds hardcoded packet size
-
+// TODO: do highly concurrent write requests from rust side to see congestion in this part of code
 int initialize_p9_socket_descriptors() {
     // for (int i = 0; i < MAX_P9_VOLUMES; i++) {
     //     g_p9_socket_fds[i][0] = -1;
