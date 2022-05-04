@@ -98,6 +98,7 @@ static void* tunnel_from_p9_virtio_to_sock(void* data) {
         int     bytes_read = read_exact(g_p9_fd, &channel, sizeof(channel));
 
         if (bytes_read == 0) {
+            fprintf(stderr, "No data on g_p9_fd\n");
             goto success;
         }
 
@@ -146,39 +147,26 @@ error:
 }
 
 void handle_data_on_channel(int channel, char* buffer, uint32_t buffer_size) {
-    // fprintf(stderr, "POLL: handling data on channel %d\n", channel);
-
     ssize_t bytes_read = recv(g_p9_socket_fds[channel][1], buffer, buffer_size, 0);
 
     if (bytes_read == 0) {
-        fprintf(stderr, "no data on channel %u\n", channel);
+        fprintf(stderr, "No data on channel %u\n", channel);
         goto error;
     }
 
-    // TODO: CHECK macro?
-    if (bytes_read == -1) {
-        fprintf(stderr, "failed while reading bytes %m\n");
-        goto error;
-    }
+    TRY_OR_GOTO(bytes_read, error);
 
 #if WIN_P9_EXTRA_DEBUG_INFO
     fprintf(stderr, "send message to channel %d, length: %ld\n", channel, bytes_read);
 #endif
 
-    if (write_exact(g_p9_fd, &channel, 1) == -1) {
-        fprintf(stderr, "Failed write g_p9_fd 1\n");
-        goto error;
-    }
+    TRY_OR_GOTO(write_exact(g_p9_fd, &channel, 1), error);
+
     uint16_t bytes_read_to_send = (uint16_t)bytes_read;
     assert(sizeof(bytes_read_to_send) == 2);
-    if (write_exact(g_p9_fd, &bytes_read_to_send, sizeof(bytes_read_to_send)) == -1) {
-        fprintf(stderr, "Failed write g_p9_fd 2\n");
-        goto error;
-    }
-    if (write_exact(g_p9_fd, buffer, bytes_read) == -1) {
-        fprintf(stderr, "Failed write g_p9_fd 3\n");
-        goto error;
-    }
+
+    TRY_OR_GOTO(write_exact(g_p9_fd, &bytes_read_to_send, sizeof(bytes_read_to_send)), error);
+    TRY_OR_GOTO(write_exact(g_p9_fd, buffer, bytes_read), error);
 
 error:;
 }
@@ -247,9 +235,9 @@ error:
 // TODO: do highly concurrent write requests from rust side to see congestion in this part of code
 int initialize_p9_socket_descriptors() {
     for (int i = 0; i < MAX_P9_VOLUMES; i++) {
-        if (socketpair(AF_LOCAL, SOCK_STREAM, 0, g_p9_socket_fds[i]) == -1) {
-            fprintf(stderr, "Error: Failed to create a socket pair for channel %d, errno: %d\n", i, errno);
-            return errno;
+        if (socketpair(AF_LOCAL, SOCK_STREAM, 0, g_p9_socket_fds[i]) != 0) {
+            fprintf(stderr, "Error: Failed to create a socket pair for channel %d, errno: %m\n", i);
+            goto error;
         }
 
         // TODO: make fds nonblocking?
@@ -258,50 +246,40 @@ int initialize_p9_socket_descriptors() {
         // make_nonblocking(g_p9_socket_fds[i][1]);
     }
 
-    if (pthread_create(&g_p9_tunnel_thread_receiver, NULL, &tunnel_from_p9_virtio_to_sock, NULL) == -1) {
-        fprintf(stderr, "Error: pthread_create failed pthread_create(&g_p9_tunnel_thread_receiver...\n");
-        return -1;
-    }
-
-    if (pthread_create(&g_p9_tunnel_thread_sender, NULL, &tunnel_from_p9_sock_to_virtio, NULL) == -1) {
-        fprintf(stderr, "Error: pthread_create failed pthread_create(&g_p9_tunnel_thread_sender...\n");
-        return -1;
-    }
+    TRY_OR_GOTO(pthread_create(&g_p9_tunnel_thread_receiver, NULL, &tunnel_from_p9_virtio_to_sock, NULL), error);
+    TRY_OR_GOTO(pthread_create(&g_p9_tunnel_thread_sender, NULL, &tunnel_from_p9_sock_to_virtio, NULL), error);
 
     return 0;
+
+error:
+    return -1;
 }
 
 uint32_t do_mount_p9(const char* tag, char* path) {
-    // TODO: why it's uint8_t on the first place?
-    uint8_t channel = g_p9_current_channel++;
+    int channel = g_p9_current_channel++;
 
-    if (channel >= MAX_P9_VOLUMES) {
-        fprintf(stderr, "ERROR: channel >= MAX_P9_VOLUMES\n");
-        return -1;
-    }
-
-    // TODO: clang-format
-    // TODO: it will condense to epoll_ctl(ADD)
-
-    fprintf(stderr, "$$$$$$$$$$$$$$$$$$$$$$ Handling a mount for channel %u\n", (unsigned)channel);
+    fprintf(stderr, "Starting mount: tag: %s, path: %s, channel %d\n", tag, path, channel);
 
     static const uint32_t CMD_SIZE = 256;
     char                  mount_cmd[CMD_SIZE];
     int                   mount_socket_fd = g_p9_socket_fds[channel][0];
 
-    // TODO: use some kind of CHECK macro
-    int buf_size =
-        snprintf(mount_cmd, CMD_SIZE, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L", mount_socket_fd, mount_socket_fd);
-    if (buf_size < 0) {
-        return errno;
+    if (channel >= MAX_P9_VOLUMES) {
+        fprintf(stderr, "ERROR: channel >= MAX_P9_VOLUMES\n");
+        goto error;
     }
 
-    fprintf(stderr, "Starting mount: tag: %s, path: %s\n", tag, path);
-    if (mount(tag, path, "9p", 0, mount_cmd) < 0) {
-        fprintf(stderr, "Mount finished with error: %d\n", errno);
-        return errno;
-    }
+    // TODO: it will condense to epoll_ctl(ADD)
+
+    TRY_OR_GOTO(
+        snprintf(mount_cmd, CMD_SIZE, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L", mount_socket_fd, mount_socket_fd),
+        error);
+
+    TRY_OR_GOTO(mount(tag, path, "9p", 0, mount_cmd), error);
 
     fprintf(stderr, "Mount finished.\n");
     return 0;
+error:
+    fprintf(stderr, "Mount failed.\n");
+    return -1;
 }
