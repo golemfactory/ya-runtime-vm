@@ -5,8 +5,8 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include <stdio.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <stdnoreturn.h>
 #include <string.h>
@@ -22,17 +22,16 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "common.h"
 #include "communication.h"
 #include "communication_p9.h"
-#include "common.h"
-
 #include "cyclic_buffer.h"
 #include "forward.h"
 #include "network.h"
 #include "process_bookkeeping.h"
 #include "proto.h"
 
-#define CONTAINER_OF(ptr, type, member) (type*)((char*)(ptr) - offsetof(type, member))
+#define CONTAINER_OF(ptr, type, member) (type*)((char*)(ptr)-offsetof(type, member))
 
 // XXX: maybe obtain this with sysconf?
 #define PAGE_SIZE 0x1000
@@ -41,10 +40,8 @@
 #define DEFAULT_GID 0
 #define DEFAULT_OUT_FILE_PERM S_IRWXU
 
-#define DEFAULT_FD_DESC {           \
-        .type = REDIRECT_FD_FILE,   \
-        .path = NULL,               \
-    }
+#define DEFAULT_FD_DESC \
+    { .type = REDIRECT_FD_FILE, .path = NULL, }
 
 #define VPORT_CMD "/dev/vport0p1"
 #define VPORT_NET "/dev/vport0p2"
@@ -53,15 +50,14 @@
 #define MODE_RW_UGO (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)
 #define OUTPUT_PATH_PREFIX "/var/tmp/guest_agent_private/fds"
 
-
 struct new_process_args {
-    char* bin;
-    char** argv;
-    char** envp;
+    char*    bin;
+    char**   argv;
+    char**   envp;
     uint32_t uid;
     uint32_t gid;
-    char* cwd;
-    bool is_entrypoint;
+    char*    cwd;
+    bool     is_entrypoint;
 };
 
 enum epoll_fd_type {
@@ -72,19 +68,19 @@ enum epoll_fd_type {
 };
 
 struct epoll_fd_desc {
-    enum epoll_fd_type type;
-    int fd;
-    int src_fd;
+    enum epoll_fd_type    type;
+    int                   fd;
+    int                   src_fd;
     struct redir_fd_desc* data;
 };
 
 extern char** environ;
 
-static int g_cmds_fd = -1;
-static int g_net_fd = -1;
-static int g_sig_fd = -1;
+static int g_cmds_fd  = -1;
+static int g_net_fd   = -1;
+static int g_sig_fd   = -1;
 static int g_epoll_fd = -1;
-static int g_tap_fd = -1;
+static int g_tap_fd   = -1;
 
 static char g_lo_name[16];
 static char g_tap_name[16];
@@ -101,18 +97,19 @@ static noreturn void die(void) {
 
     while (1) {
         (void)reboot(RB_POWER_OFF);
-        __asm__ volatile ("hlt");
+        __asm__ volatile("hlt");
     }
 }
 
-#define CHECK(x) ({                                                     \
-    __typeof__(x) _x = (x);                                             \
-    if (_x == -1) {                                                     \
-        fprintf(stderr, "Error at %s:%d: %m\n", __FILE__, __LINE__);    \
-        die();                                                          \
-    }                                                                   \
-    _x;                                                                 \
-})
+#define CHECK(x)                                                         \
+    ({                                                                   \
+        __typeof__(x) _x = (x);                                          \
+        if (_x == -1) {                                                  \
+            fprintf(stderr, "Error at %s:%d: %m\n", __FILE__, __LINE__); \
+            die();                                                       \
+        }                                                                \
+        _x;                                                              \
+    })
 
 static void load_module(const char* path) {
     int fd = CHECK(open(path, O_RDONLY | O_CLOEXEC));
@@ -155,8 +152,8 @@ static void cleanup_fd_desc(struct redir_fd_desc* fd_desc) {
     fd_desc->type = REDIRECT_FD_INVALID;
 }
 
-static bool redir_buffers_empty(struct redir_fd_desc *redirs, size_t len) {
-    FILE *f;
+static bool redir_buffers_empty(struct redir_fd_desc* redirs, size_t len) {
+    FILE* f;
     for (size_t fd = 0; fd < len; ++fd) {
         switch (redirs[fd].type) {
             case REDIRECT_FD_FILE:
@@ -200,7 +197,7 @@ struct exit_reason {
 static void send_process_died(uint64_t id, struct exit_reason reason) {
     struct msg_hdr resp = {
         .msg_id = 0,
-        .type = NOTIFY_PROCESS_DIED,
+        .type   = NOTIFY_PROCESS_DIED,
     };
 
     CHECK(writen(g_cmds_fd, &resp, sizeof(resp)));
@@ -233,7 +230,7 @@ static struct exit_reason encode_status(int status, int type) {
 }
 
 static void handle_sigchld(void) {
-    struct signalfd_siginfo siginfo = { 0 };
+    struct signalfd_siginfo siginfo = {0};
 
     if (read(g_sig_fd, &siginfo, sizeof(siginfo)) != sizeof(siginfo)) {
         fprintf(stderr, "Invalid signalfd read: %m\n");
@@ -241,16 +238,13 @@ static void handle_sigchld(void) {
     }
 
     if (siginfo.ssi_signo != SIGCHLD) {
-        fprintf(stderr, "BUG: read unexpected signal from signalfd: %d\n",
-                siginfo.ssi_signo);
+        fprintf(stderr, "BUG: read unexpected signal from signalfd: %d\n", siginfo.ssi_signo);
         die();
     }
 
     pid_t child_pid = (pid_t)siginfo.ssi_pid;
 
-    if (siginfo.ssi_code != CLD_EXITED
-            && siginfo.ssi_code != CLD_KILLED
-            && siginfo.ssi_code != CLD_DUMPED) {
+    if (siginfo.ssi_code != CLD_EXITED && siginfo.ssi_code != CLD_KILLED && siginfo.ssi_code != CLD_DUMPED) {
         /* Received spurious SIGCHLD - ignore it. */
         return;
     }
@@ -269,8 +263,7 @@ static void handle_sigchld(void) {
 
     proc_desc->is_alive = false;
 
-    send_process_died(proc_desc->id, encode_status(siginfo.ssi_status,
-                      siginfo.ssi_code));
+    send_process_died(proc_desc->id, encode_status(siginfo.ssi_status, siginfo.ssi_code));
 
     if (proc_desc == g_entrypoint_desc) {
         fprintf(stderr, "Entrypoint exited\n");
@@ -298,7 +291,6 @@ static void setup_sigfd(void) {
     g_sig_fd = CHECK(signalfd(g_sig_fd, &set, SFD_CLOEXEC));
 }
 
-
 static void setup_agent_directories(void) {
     char* path = strdup(OUTPUT_PATH_PREFIX);
     if (!path) {
@@ -311,8 +303,8 @@ static void setup_agent_directories(void) {
     free(path);
 }
 
-static int add_network_hosts(char *entries[][2], int n) {
-    FILE *f;
+static int add_network_hosts(char* entries[][2], int n) {
+    FILE* f;
     if ((f = fopen("/etc/hosts", "a")) == 0) {
         return -1;
     }
@@ -329,13 +321,9 @@ static int add_network_hosts(char *entries[][2], int n) {
 }
 
 static void setup_network(void) {
-    char *hosts[][2] = {
-        {"127.0.0.1",   "localhost"},
-        {"::1",         "ip6-localhost ip6-loopback"},
-        {"fe00::0",     "ip6-localnet"},
-        {"ff00::0",     "ip6-mcastprefix"},
-        {"ff02::1",     "ip6-allnodes"},
-        {"ff02::2",     "ip6-allrouters"},
+    char* hosts[][2] = {
+        {"127.0.0.1", "localhost"},     {"::1", "ip6-localhost ip6-loopback"}, {"fe00::0", "ip6-localnet"},
+        {"ff00::0", "ip6-mcastprefix"}, {"ff02::1", "ip6-allnodes"},           {"ff02::2", "ip6-allrouters"},
     };
 
     strcpy(g_lo_name, "lo");
@@ -352,21 +340,17 @@ static void setup_network(void) {
     CHECK(fwd_start(g_net_fd, g_tap_fd, MTU, true, false));
 }
 
-static void stop_network(void) {
-    fwd_stop();
-}
+static void stop_network(void) { fwd_stop(); }
 
 static void send_response_hdr(msg_id_t msg_id, enum GUEST_MSG_TYPE type) {
     struct msg_hdr resp = {
         .msg_id = msg_id,
-        .type = type,
+        .type   = type,
     };
     CHECK(writen(g_cmds_fd, &resp, sizeof(resp)));
 }
 
-static void send_response_ok(msg_id_t msg_id) {
-    send_response_hdr(msg_id, RESP_OK);
-}
+static void send_response_ok(msg_id_t msg_id) { send_response_hdr(msg_id, RESP_OK); }
 
 static void send_response_err(msg_id_t msg_id, uint32_t ret_val) {
     send_response_hdr(msg_id, RESP_ERR);
@@ -393,22 +377,20 @@ static noreturn void handle_quit(msg_id_t msg_id) {
     die();
 }
 
-static int add_epoll_fd_desc(struct redir_fd_desc* redir_fd_desc,
-                             int fd,
-                             int src_fd,
+static int add_epoll_fd_desc(struct redir_fd_desc* redir_fd_desc, int fd, int src_fd,
                              struct epoll_fd_desc** epoll_fd_desc_ptr) {
     struct epoll_fd_desc* epoll_fd_desc = malloc(sizeof(*epoll_fd_desc));
     if (!epoll_fd_desc) {
         return -1;
     }
 
-    epoll_fd_desc->type = (src_fd == 0) ? EPOLL_FD_OUT : EPOLL_FD_IN;
-    epoll_fd_desc->fd = fd;
+    epoll_fd_desc->type   = (src_fd == 0) ? EPOLL_FD_OUT : EPOLL_FD_IN;
+    epoll_fd_desc->fd     = fd;
     epoll_fd_desc->src_fd = src_fd;
-    epoll_fd_desc->data = redir_fd_desc;
+    epoll_fd_desc->data   = redir_fd_desc;
 
     struct epoll_event event = {
-        .events = (src_fd == 0) ? EPOLLOUT : EPOLLIN,
+        .events   = (src_fd == 0) ? EPOLLOUT : EPOLLIN,
         .data.ptr = epoll_fd_desc,
     };
 
@@ -423,7 +405,6 @@ static int add_epoll_fd_desc(struct redir_fd_desc* redir_fd_desc,
         *epoll_fd_desc_ptr = epoll_fd_desc;
     }
     return 0;
-
 }
 
 static int del_epoll_fd_desc(struct epoll_fd_desc* epoll_fd_desc) {
@@ -480,8 +461,7 @@ static void close_child_pipe() {
     }
 }
 
-static noreturn void child_wrapper(int parent_pipe[2],
-                                   struct new_process_args* new_proc_args,
+static noreturn void child_wrapper(int parent_pipe[2], struct new_process_args* new_proc_args,
                                    struct redir_fd_desc fd_descs[3]) {
     child_pipe = parent_pipe[1];
     atexit(close_child_pipe);
@@ -516,8 +496,7 @@ static noreturn void child_wrapper(int parent_pipe[2],
                 if (dup2(fd_descs[fd].buffer.fds[fd ? 1 : 0], fd) < 0) {
                     goto out;
                 }
-                if (close(fd_descs[fd].buffer.fds[0]) < 0
-                        || close(fd_descs[fd].buffer.fds[1]) < 0) {
+                if (close(fd_descs[fd].buffer.fds[0]) < 0 || close(fd_descs[fd].buffer.fds[1]) < 0) {
                     goto out;
                 }
                 break;
@@ -538,9 +517,7 @@ static noreturn void child_wrapper(int parent_pipe[2],
     }
 
     /* If execve returns we know an error happened. */
-    (void)execve(new_proc_args->bin,
-                 new_proc_args->argv,
-                 new_proc_args->envp ?: environ);
+    (void)execve(new_proc_args->bin, new_proc_args->argv, new_proc_args->envp ?: environ);
 
 out:
     exit(errno);
@@ -577,12 +554,11 @@ static char* construct_output_path(uint64_t id, unsigned int fd) {
     return path;
 }
 
-static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
-                                  struct redir_fd_desc fd_descs[3],
+static uint32_t spawn_new_process(struct new_process_args* new_proc_args, struct redir_fd_desc fd_descs[3],
                                   uint64_t* id) {
-    uint32_t ret = 0;
-    pid_t p = 0;
-    struct epoll_fd_desc* epoll_fd_descs[3] = { NULL };
+    uint32_t              ret               = 0;
+    pid_t                 p                 = 0;
+    struct epoll_fd_desc* epoll_fd_descs[3] = {NULL};
 
     if (new_proc_args->is_entrypoint && g_entrypoint_desc) {
         return EEXIST;
@@ -604,7 +580,7 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
 
     /* All these shenanigans with pipes are so that we can distinguish internal
      * failures from spawned process exiting. */
-    int status_pipe[2] = { -1, -1 };
+    int status_pipe[2] = {-1, -1};
     if (pipe2(status_pipe, O_CLOEXEC | O_DIRECT) < 0) {
         ret = errno;
         goto out_err;
@@ -621,15 +597,12 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
                         goto out_err;
                     }
                 } else {
-                    proc_desc->redirs[fd].path =
-                        construct_output_path(proc_desc->id, fd);
+                    proc_desc->redirs[fd].path = construct_output_path(proc_desc->id, fd);
                     if (!proc_desc->redirs[fd].path) {
                         ret = errno;
                         goto out_err;
                     }
-                    int tmp_fd = open(proc_desc->redirs[fd].path,
-                                      O_RDWR | O_CREAT | O_EXCL,
-                                      S_IRWXU);
+                    int tmp_fd = open(proc_desc->redirs[fd].path, O_RDWR | O_CREAT | O_EXCL, S_IRWXU);
                     if (tmp_fd < 0 || close(tmp_fd) < 0) {
                         ret = errno;
                         goto out_err;
@@ -667,7 +640,7 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
     CHECK(close(status_pipe[1]));
     status_pipe[1] = -1;
 
-    char c;
+    char    c;
     ssize_t x = read(status_pipe[0], &c, sizeof(c));
     if (x < 0) {
         ret = errno;
@@ -684,21 +657,18 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
             ret = ENOTRECOVERABLE;
         }
         goto out_err;
-    } // else x == 0, which means successful process spawn.
+    }  // else x == 0, which means successful process spawn.
 
     CHECK(close(status_pipe[0]));
     status_pipe[0] = -1;
 
-
     for (size_t fd = 0; fd < 3; ++fd) {
-        if (proc_desc->redirs[fd].type == REDIRECT_FD_PIPE_BLOCKING
-                || proc_desc->redirs[fd].type == REDIRECT_FD_PIPE_CYCLIC) {
+        if (proc_desc->redirs[fd].type == REDIRECT_FD_PIPE_BLOCKING ||
+            proc_desc->redirs[fd].type == REDIRECT_FD_PIPE_CYCLIC) {
             CHECK(close(proc_desc->redirs[fd].buffer.fds[fd ? 1 : 0]));
             proc_desc->redirs[fd].buffer.fds[fd ? 1 : 0] = -1;
 
-            if (add_epoll_fd_desc(&proc_desc->redirs[fd],
-                                  proc_desc->redirs[fd].buffer.fds[fd ? 0 : 1],
-                                  fd,
+            if (add_epoll_fd_desc(&proc_desc->redirs[fd], proc_desc->redirs[fd].buffer.fds[fd ? 0 : 1], fd,
                                   &epoll_fd_descs[fd]) < 0) {
                 if (errno == ENOMEM || errno == ENOSPC) {
                     ret = errno;
@@ -711,7 +681,7 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
         }
     }
 
-    proc_desc->pid = p;
+    proc_desc->pid      = p;
     proc_desc->is_alive = true;
 
     *id = proc_desc->id;
@@ -747,9 +717,7 @@ out_err:
     return ret;
 }
 
-static bool is_fd_buf_size_valid(size_t size) {
-    return size > 0 && (size % PAGE_SIZE) == 0;
-}
+static bool is_fd_buf_size_valid(size_t size) { return size > 0 && (size % PAGE_SIZE) == 0; }
 
 static uint32_t parse_fd_redir(struct redir_fd_desc fd_descs[3]) {
     uint32_t fd = 0;
@@ -758,7 +726,7 @@ static uint32_t parse_fd_redir(struct redir_fd_desc fd_descs[3]) {
     uint8_t type;
     CHECK(recv_u8(g_cmds_fd, &type));
 
-    struct redir_fd_desc fd_desc = { .type = type };
+    struct redir_fd_desc fd_desc = {.type = type};
 
     switch (type) {
         case REDIRECT_FD_FILE:
@@ -783,8 +751,7 @@ static uint32_t parse_fd_redir(struct redir_fd_desc fd_descs[3]) {
         return EINVAL;
     }
 
-    if (fd_desc.type == REDIRECT_FD_PIPE_BLOCKING
-            || fd_desc.type == REDIRECT_FD_PIPE_CYCLIC) {
+    if (fd_desc.type == REDIRECT_FD_PIPE_BLOCKING || fd_desc.type == REDIRECT_FD_PIPE_CYCLIC) {
         if (!is_fd_buf_size_valid(fd_desc.buffer.cb.size)) {
             return EINVAL;
         }
@@ -798,15 +765,15 @@ static uint32_t parse_fd_redir(struct redir_fd_desc fd_descs[3]) {
 }
 
 static void handle_run_process(msg_id_t msg_id) {
-    bool done = false;
-    uint32_t ret = 0;
+    bool                    done          = false;
+    uint32_t                ret           = 0;
     struct new_process_args new_proc_args = {
-        .bin = NULL,
-        .argv = NULL,
-        .envp = NULL,
-        .uid = DEFAULT_UID,
-        .gid = DEFAULT_GID,
-        .cwd = NULL,
+        .bin           = NULL,
+        .argv          = NULL,
+        .envp          = NULL,
+        .uid           = DEFAULT_UID,
+        .gid           = DEFAULT_GID,
+        .cwd           = NULL,
         .is_entrypoint = false,
     };
     struct redir_fd_desc fd_descs[3] = {
@@ -841,7 +808,7 @@ static void handle_run_process(msg_id_t msg_id) {
             case SUB_MSG_RUN_PROCESS_GID:
                 CHECK(recv_u32(g_cmds_fd, &new_proc_args.gid));
                 break;
-            case SUB_MSG_RUN_PROCESS_RFD: ;
+            case SUB_MSG_RUN_PROCESS_RFD:;
                 /* This error is recoverable - we report the first one found. We
                  * still need to consume the rest of sub-messages to keep
                  * the state consistent though. */
@@ -858,8 +825,7 @@ static void handle_run_process(msg_id_t msg_id) {
                 new_proc_args.is_entrypoint = true;
                 break;
             default:
-                fprintf(stderr, "Unknown MSG_RUN_PROCESS subtype: %hhu\n",
-                        subtype);
+                fprintf(stderr, "Unknown MSG_RUN_PROCESS subtype: %hhu\n", subtype);
                 die();
         }
     }
@@ -911,9 +877,9 @@ static uint32_t do_kill_process(uint64_t id) {
 }
 
 static void handle_kill_process(msg_id_t msg_id) {
-    bool done = false;
-    uint32_t ret = 0;
-    uint64_t id = 0;
+    bool     done = false;
+    uint32_t ret  = 0;
+    uint64_t id   = 0;
 
     while (!done) {
         uint8_t subtype = 0;
@@ -928,8 +894,7 @@ static void handle_kill_process(msg_id_t msg_id) {
                 CHECK(recv_u64(g_cmds_fd, &id));
                 break;
             default:
-                fprintf(stderr, "Unknown MSG_KILL_PROCESS subtype: %hhu\n",
-                        subtype);
+                fprintf(stderr, "Unknown MSG_KILL_PROCESS subtype: %hhu\n", subtype);
                 die();
         }
     }
@@ -950,10 +915,10 @@ out:
 }
 
 static void handle_mount(msg_id_t msg_id) {
-    bool done = false;
-    uint32_t ret = 0;
-    char* tag = NULL;
-    char* path = NULL;
+    bool     done = false;
+    uint32_t ret  = 0;
+    char*    tag  = NULL;
+    char*    path = NULL;
 
     while (!done) {
         uint8_t subtype = 0;
@@ -971,8 +936,7 @@ static void handle_mount(msg_id_t msg_id) {
                 CHECK(recv_bytes(g_cmds_fd, &path, NULL, /*is_cstring=*/true));
                 break;
             default:
-                fprintf(stderr, "Unknown MSG_MOUNT_VOLUME subtype: %hhu\n",
-                        subtype);
+                fprintf(stderr, "Unknown MSG_MOUNT_VOLUME subtype: %hhu\n", subtype);
                 die();
         }
     }
@@ -999,11 +963,10 @@ out:
     }
 }
 
-static uint32_t do_query_output_path(char* path, uint64_t off, char** buf_ptr,
-                                     uint64_t* len_ptr) {
+static uint32_t do_query_output_path(char* path, uint64_t off, char** buf_ptr, uint64_t* len_ptr) {
     uint32_t ret = 0;
-    char* buf = MAP_FAILED;
-    size_t len = 0;
+    char*    buf = MAP_FAILED;
+    size_t   len = 0;
 
     int fd = open(path, O_RDONLY);
     if (fd < 0) {
@@ -1032,14 +995,13 @@ static uint32_t do_query_output_path(char* path, uint64_t off, char** buf_ptr,
         goto out;
     }
 
-    buf = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE,
-               -1, 0);
+    buf = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
     if (buf == MAP_FAILED) {
         ret = errno;
         goto out;
     }
 
-again: ;
+again:;
     ssize_t real_len = read(fd, buf, len);
     if (real_len < 0) {
         if (errno == EINTR) {
@@ -1050,7 +1012,7 @@ again: ;
     }
 
     *buf_ptr = buf;
-    buf = MAP_FAILED;
+    buf      = MAP_FAILED;
     *len_ptr = real_len;
 
 out:
@@ -1062,13 +1024,13 @@ out:
 }
 
 static void handle_query_output(msg_id_t msg_id) {
-    bool done = false;
-    uint32_t ret = 0;
-    uint64_t id = 0;
-    uint8_t fd = 1;
-    uint64_t off = 0;
-    uint64_t len = 0;
-    char* buf = NULL;
+    bool     done = false;
+    uint32_t ret  = 0;
+    uint64_t id   = 0;
+    uint8_t  fd   = 1;
+    uint64_t off  = 0;
+    uint64_t len  = 0;
+    char*    buf  = NULL;
 
     while (!done) {
         uint8_t subtype = 0;
@@ -1091,8 +1053,7 @@ static void handle_query_output(msg_id_t msg_id) {
                 CHECK(recv_u64(g_cmds_fd, &len));
                 break;
             default:
-                fprintf(stderr, "Unknown MSG_QUERY_OUTPUT subtype: %hhu\n",
-                        subtype);
+                fprintf(stderr, "Unknown MSG_QUERY_OUTPUT subtype: %hhu\n", subtype);
                 die();
         }
     }
@@ -1126,10 +1087,7 @@ static void handle_query_output(msg_id_t msg_id) {
             bool was_full = cyclic_buffer_free_size(&proc_desc->redirs[fd].buffer.cb) == 0;
             send_response_cyclic_buffer(msg_id, &proc_desc->redirs[fd].buffer.cb, len);
             if (was_full && proc_desc->redirs[fd].type != REDIRECT_FD_PIPE_CYCLIC) {
-                if (add_epoll_fd_desc(&proc_desc->redirs[fd],
-                                      proc_desc->redirs[fd].buffer.fds[0],
-                                      fd,
-                                      NULL) < 0) {
+                if (add_epoll_fd_desc(&proc_desc->redirs[fd], proc_desc->redirs[fd].buffer.fds[0], fd, NULL) < 0) {
                     if (errno != EEXIST) {
                         CHECK(-1);
                     }
@@ -1153,7 +1111,7 @@ out_err:
 static void send_output_available_notification(uint64_t id, uint32_t fd) {
     struct msg_hdr resp = {
         .msg_id = 0,
-        .type = NOTIFY_OUTPUT_AVAILABLE,
+        .type   = NOTIFY_OUTPUT_AVAILABLE,
     };
 
     CHECK(writen(g_cmds_fd, &resp, sizeof(resp)));
@@ -1162,10 +1120,10 @@ static void send_output_available_notification(uint64_t id, uint32_t fd) {
 }
 
 static void handle_output_available(struct epoll_fd_desc** epoll_fd_desc_ptr) {
-    struct epoll_fd_desc* epoll_fd_desc = *epoll_fd_desc_ptr;
-    struct cyclic_buffer* cb = &epoll_fd_desc->data->buffer.cb;
-    size_t to_read = cyclic_buffer_free_size(cb);
-    bool needs_notification = cyclic_buffer_data_size(cb) == 0;
+    struct epoll_fd_desc* epoll_fd_desc      = *epoll_fd_desc_ptr;
+    struct cyclic_buffer* cb                 = &epoll_fd_desc->data->buffer.cb;
+    size_t                to_read            = cyclic_buffer_free_size(cb);
+    bool                  needs_notification = cyclic_buffer_data_size(cb) == 0;
 
     if (epoll_fd_desc->data->type == REDIRECT_FD_PIPE_CYCLIC) {
         /* Since fd is marked as non-blocking, it will return EAGAIN once we
@@ -1199,20 +1157,20 @@ static void handle_output_available(struct epoll_fd_desc** epoll_fd_desc_ptr) {
 
     if (needs_notification) {
         /* XXX: this is ugly, but for now there is no other way of obtaining process id here. */
-        int fd = epoll_fd_desc->src_fd;
+        int                  fd           = epoll_fd_desc->src_fd;
         struct process_desc* process_desc = CONTAINER_OF(epoll_fd_desc->data, struct process_desc, redirs[fd]);
         send_output_available_notification(process_desc->id, fd);
     }
 }
 
 static void handle_net_ctl(msg_id_t msg_id) {
-    bool done = false;
-    uint16_t flags = 0;
-    char* addr = NULL;
-    char* mask = NULL;
-    char* gateway = NULL;
-    char* if_addr = NULL;
-    int ret = 0;
+    bool     done    = false;
+    uint16_t flags   = 0;
+    char*    addr    = NULL;
+    char*    mask    = NULL;
+    char*    gateway = NULL;
+    char*    if_addr = NULL;
+    int      ret     = 0;
 
     while (!done) {
         uint8_t subtype = 0;
@@ -1238,8 +1196,7 @@ static void handle_net_ctl(msg_id_t msg_id) {
                 CHECK(recv_bytes(g_cmds_fd, &if_addr, NULL, /*is_cstring=*/true));
                 break;
             default:
-                fprintf(stderr, "Unknown MSG_NET_CTL subtype: %hhu\n",
-                        subtype);
+                fprintf(stderr, "Unknown MSG_NET_CTL subtype: %hhu\n", subtype);
                 die();
         }
     }
@@ -1286,18 +1243,16 @@ out_err:
     if (mask) free(mask);
     if (gateway) free(gateway);
 
-    ret == 0
-        ? send_response_ok(msg_id)
-        : send_response_err(msg_id, ret);
+    ret == 0 ? send_response_ok(msg_id) : send_response_err(msg_id, ret);
 }
 
 static void handle_net_host(msg_id_t msg_id) {
-    bool done = false;
-    size_t cap = 8;
-    size_t sz = 0;
-    int ret = 0;
+    bool   done = false;
+    size_t cap  = 8;
+    size_t sz   = 0;
+    int    ret  = 0;
 
-    char* (*hosts)[][2] = malloc(sizeof(char*[cap][2]));
+    char*(*hosts)[][2] = malloc(sizeof(char* [cap][2]));
     char *ip, *hostname;
 
     while (!done) {
@@ -1314,20 +1269,20 @@ static void handle_net_host(msg_id_t msg_id) {
 
                 if (sz == cap - 1) {
                     cap *= 2;
-                    hosts = realloc(hosts, sizeof(char*[cap][2]));
+                    hosts = realloc(hosts, sizeof(char* [cap][2]));
                     if (!hosts) {
-                        free(ip); free(hostname);
+                        free(ip);
+                        free(hostname);
                         ret = ENOMEM;
                         goto out_err;
                     }
                 }
 
-                (*hosts)[sz][0] = ip;
+                (*hosts)[sz][0]   = ip;
                 (*hosts)[sz++][1] = hostname;
                 break;
             default:
-                fprintf(stderr, "Unknown MSG_NET_HOST subtype: %hhu\n",
-                        subtype);
+                fprintf(stderr, "Unknown MSG_NET_HOST subtype: %hhu\n", subtype);
                 die();
         }
     }
@@ -1341,9 +1296,7 @@ out_err:
     }
     free((*hosts));
 
-    ret == 0
-        ? send_response_ok(msg_id)
-        : send_response_err(msg_id, ret);
+    ret == 0 ? send_response_ok(msg_id) : send_response_err(msg_id, ret);
 }
 
 static void handle_message(void) {
@@ -1403,10 +1356,10 @@ static noreturn void main_loop(void) {
     }
 
     epoll_fd_desc->type = EPOLL_FD_CMDS;
-    epoll_fd_desc->fd = g_cmds_fd;
+    epoll_fd_desc->fd   = g_cmds_fd;
     epoll_fd_desc->data = NULL;
-    event.events = EPOLLIN;
-    event.data.ptr = epoll_fd_desc;
+    event.events        = EPOLLIN;
+    event.data.ptr      = epoll_fd_desc;
     CHECK(epoll_ctl(g_epoll_fd, EPOLL_CTL_ADD, g_cmds_fd, &event));
 
     epoll_fd_desc = malloc(sizeof(*epoll_fd_desc));
@@ -1416,10 +1369,10 @@ static noreturn void main_loop(void) {
     }
 
     epoll_fd_desc->type = EPOLL_FD_SIG;
-    epoll_fd_desc->fd = g_sig_fd;
+    epoll_fd_desc->fd   = g_sig_fd;
     epoll_fd_desc->data = NULL;
-    event.events = EPOLLIN;
-    event.data.ptr = epoll_fd_desc;
+    event.events        = EPOLLIN;
+    event.data.ptr      = epoll_fd_desc;
     CHECK(epoll_ctl(g_epoll_fd, EPOLL_CTL_ADD, g_sig_fd, &event));
 
     while (1) {
@@ -1437,8 +1390,7 @@ static noreturn void main_loop(void) {
         }
 
         if ((event.events & EPOLLERR) && epoll_fd_desc->type != EPOLL_FD_OUT) {
-            fprintf(stderr, "Got EPOLLERR on fd: %d, type: %d\n",
-                    epoll_fd_desc->fd, epoll_fd_desc->type);
+            fprintf(stderr, "Got EPOLLERR on fd: %d, type: %d\n", epoll_fd_desc->fd, epoll_fd_desc->type);
             die();
         }
 
@@ -1467,14 +1419,13 @@ static noreturn void main_loop(void) {
                 }
                 break;
             default:
-                fprintf(stderr, "epoll_wait: invalid fd type: %d\n",
-                        epoll_fd_desc->type);
+                fprintf(stderr, "epoll_wait: invalid fd type: %d\n", epoll_fd_desc->type);
                 die();
         }
     }
 }
 
-static void create_dir(const char *pathname, mode_t mode) {
+static void create_dir(const char* pathname, mode_t mode) {
     if (mkdir(pathname, mode) < 0 && errno != EEXIST) {
         fprintf(stderr, "mkdir(%s) failed with: %m\n", pathname);
         die();
@@ -1487,8 +1438,7 @@ int main(void) {
     setbuf(stderr, NULL);
 
     create_dir("/dev", DEFAULT_DIR_PERMS);
-    CHECK(mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID,
-                "mode=0755,size=2M"));
+    CHECK(mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID, "mode=0755,size=2M"));
 
     load_module("/virtio.ko");
     load_module("/virtio_ring.ko");
@@ -1508,8 +1458,8 @@ int main(void) {
     load_module("/9p.ko");
 
     g_cmds_fd = CHECK(open(VPORT_CMD, O_RDWR | O_CLOEXEC));
-    g_net_fd = CHECK(open(VPORT_NET, O_RDWR | O_CLOEXEC));
-    g_p9_fd = CHECK(open(VPORT_P9, O_RDWR | O_CLOEXEC));
+    g_net_fd  = CHECK(open(VPORT_NET, O_RDWR | O_CLOEXEC));
+    g_p9_fd   = CHECK(open(VPORT_P9, O_RDWR | O_CLOEXEC));
 
     CHECK(mkdir("/mnt", S_IRWXU));
     CHECK(mkdir("/mnt/image", S_IRWXU));
@@ -1517,9 +1467,7 @@ int main(void) {
     CHECK(mkdir("/mnt/newroot", DEFAULT_DIR_PERMS));
 
     // 'workdir' and 'upperdir' have to be on the same filesystem
-    CHECK(mount("tmpfs", "/mnt/overlay", "tmpfs",
-                MS_NOSUID,
-                "mode=0777,size=128M"));
+    CHECK(mount("tmpfs", "/mnt/overlay", "tmpfs", MS_NOSUID, "mode=0777,size=128M"));
 
     CHECK(mkdir("/mnt/overlay/upper", S_IRWXU));
     CHECK(mkdir("/mnt/overlay/work", S_IRWXU));
@@ -1538,38 +1486,22 @@ int main(void) {
     create_dir("/dev", DEFAULT_DIR_PERMS);
     create_dir("/tmp", DEFAULT_DIR_PERMS);
 
-    CHECK(mount("proc", "/proc", "proc",
-                MS_NODEV | MS_NOSUID | MS_NOEXEC,
-                NULL));
-    CHECK(mount("sysfs", "/sys", "sysfs",
-                MS_NODEV | MS_NOSUID | MS_NOEXEC,
-                NULL));
-    CHECK(mount("devtmpfs", "/dev", "devtmpfs",
-                MS_NOSUID,
-                "exec,mode=0755,size=2M"));
-    CHECK(mount("tmpfs", "/tmp", "tmpfs",
-                MS_NOSUID,
-                "mode=0777"));
+    CHECK(mount("proc", "/proc", "proc", MS_NODEV | MS_NOSUID | MS_NOEXEC, NULL));
+    CHECK(mount("sysfs", "/sys", "sysfs", MS_NODEV | MS_NOSUID | MS_NOEXEC, NULL));
+    CHECK(mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID, "exec,mode=0755,size=2M"));
+    CHECK(mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID, "mode=0777"));
 
     create_dir("/dev/pts", DEFAULT_DIR_PERMS);
     create_dir("/dev/shm", DEFAULT_DIR_PERMS);
 
-    CHECK(mount("devpts", "/dev/pts", "devpts",
-                MS_NOSUID | MS_NOEXEC,
-                "gid=5,mode=0620"));
-    CHECK(mount("tmpfs", "/dev/shm", "tmpfs",
-                MS_NODEV | MS_NOSUID | MS_NOEXEC,
-                NULL));
+    CHECK(mount("devpts", "/dev/pts", "devpts", MS_NOSUID | MS_NOEXEC, "gid=5,mode=0620"));
+    CHECK(mount("tmpfs", "/dev/shm", "tmpfs", MS_NODEV | MS_NOSUID | MS_NOEXEC, NULL));
 
     if (access("/dev/null", F_OK) != 0) {
-        CHECK(mknod("/dev/null",
-                    MODE_RW_UGO | S_IFCHR,
-                    makedev(1, 3)));
+        CHECK(mknod("/dev/null", MODE_RW_UGO | S_IFCHR, makedev(1, 3)));
     }
     if (access("/dev/ptmx", F_OK) != 0) {
-        CHECK(mknod("/dev/ptmx",
-                    MODE_RW_UGO | S_IFCHR,
-                    makedev(5, 2)));
+        CHECK(mknod("/dev/ptmx", MODE_RW_UGO | S_IFCHR, makedev(5, 2)));
     }
 
     setup_network();
@@ -1578,7 +1510,7 @@ int main(void) {
     block_signals();
     setup_sigfd();
 
-    //make sure to create threads after blocking signals, not before. Otherwise signals are blocked.
+    // make sure to create threads after blocking signals, not before. Otherwise signals are blocked.
     CHECK(initialize_p9_socket_descriptors());
 
     main_loop();

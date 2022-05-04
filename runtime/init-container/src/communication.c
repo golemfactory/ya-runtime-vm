@@ -1,10 +1,11 @@
+#include "communication.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 
-#include "communication.h"
 #include "cyclic_buffer.h"
 
 int readn(int fd, void* buf, size_t size) {
@@ -28,24 +29,15 @@ int readn(int fd, void* buf, size_t size) {
     return 0;
 }
 
-int recv_u64(int fd, uint64_t* res) {
-    return readn(fd, res, sizeof(*res));
-}
+int recv_u64(int fd, uint64_t* res) { return readn(fd, res, sizeof(*res)); }
 
-int recv_u32(int fd, uint32_t* res) {
-    return readn(fd, res, sizeof(*res));
-}
+int recv_u32(int fd, uint32_t* res) { return readn(fd, res, sizeof(*res)); }
 
-int recv_u16(int fd, uint16_t* res) {
-    return readn(fd, res, sizeof(*res));
-}
+int recv_u16(int fd, uint16_t* res) { return readn(fd, res, sizeof(*res)); }
 
-int recv_u8(int fd, uint8_t* res) {
-    return readn(fd, res, sizeof(*res));
-}
+int recv_u8(int fd, uint8_t* res) { return readn(fd, res, sizeof(*res)); }
 
-int recv_bytes(int fd, char** buf_ptr, uint64_t* size_ptr,
-                      bool is_cstring) {
+int recv_bytes(int fd, char** buf_ptr, uint64_t* size_ptr, bool is_cstring) {
     uint64_t size = 0;
 
     if (recv_u64(fd, &size) < 0) {
@@ -89,7 +81,7 @@ void free_strings_array(char** array) {
 
 int recv_strings_array(int fd, char*** array_ptr) {
     uint64_t size = 0;
-    int ret = -1;
+    int      ret  = -1;
 
     if (recv_u64(fd, &size) < 0) {
         return -1;
@@ -107,8 +99,8 @@ int recv_strings_array(int fd, char*** array_ptr) {
     }
 
     *array_ptr = array;
-    array = NULL;
-    ret = 0;
+    array      = NULL;
+    ret        = 0;
 
 out:
     if (array) {

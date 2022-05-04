@@ -1,5 +1,7 @@
 #define _GNU_SOURCE
 
+#include "communication_p9.h"
+
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -7,8 +9,8 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include <stdio.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <stdnoreturn.h>
 #include <string.h>
@@ -25,7 +27,6 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include "communication_p9.h"
 #include "common.h"
 
 #define MAX_P9_VOLUMES (100)
@@ -84,7 +85,7 @@ static int write_exact(int fd, const void* buf, size_t size) {
     return bytes_written;
 }
 
-static void* tunnel_from_p9_virtio_to_sock(void *data) {
+static void* tunnel_from_p9_virtio_to_sock(void* data) {
     char* buffer = malloc(MAX_PACKET_SIZE);
 
     if (data != NULL) {
@@ -93,10 +94,9 @@ static void* tunnel_from_p9_virtio_to_sock(void *data) {
     }
 
     while (true) {
-        ssize_t bytes_read = 0;
+        uint8_t channel    = 0;
+        int     bytes_read = read_exact(g_p9_fd, &channel, sizeof(channel));
 
-        uint8_t channel = 0;
-        bytes_read = read_exact(g_p9_fd, &channel, sizeof(channel));
         if (bytes_read == 0) {
             goto success;
         }
@@ -107,7 +107,8 @@ static void* tunnel_from_p9_virtio_to_sock(void *data) {
         }
 
         uint16_t packet_size = 0;
-        bytes_read = read_exact(g_p9_fd, &packet_size, sizeof(packet_size));
+        bytes_read           = read_exact(g_p9_fd, &packet_size, sizeof(packet_size));
+
         if (bytes_read != sizeof(packet_size)) {
             fprintf(stderr, "Error during read from g_p9_fd: bytes_read != sizeof(packet_size)\n");
             goto error;
@@ -144,7 +145,7 @@ error:
     return (void*)-1;
 }
 
-void handle_data_on_channel(int channel, char *buffer, uint32_t buffer_size) {
+void handle_data_on_channel(int channel, char* buffer, uint32_t buffer_size) {
     // fprintf(stderr, "POLL: handling data on channel %d\n", channel);
 
     ssize_t bytes_read = recv(g_p9_socket_fds[channel][1], buffer, buffer_size, 0);
@@ -158,7 +159,6 @@ void handle_data_on_channel(int channel, char *buffer, uint32_t buffer_size) {
     if (bytes_read == -1) {
         fprintf(stderr, "failed while reading bytes %m\n");
         goto error;
-
     }
 
 #if WIN_P9_EXTRA_DEBUG_INFO
@@ -180,16 +180,15 @@ void handle_data_on_channel(int channel, char *buffer, uint32_t buffer_size) {
         goto error;
     }
 
-error:
-;
+error:;
 }
 
-static void* tunnel_from_p9_sock_to_virtio(void *data) {
+static void* tunnel_from_p9_sock_to_virtio(void* data) {
     (void)data;
 
     fprintf(stderr, "POLL: P9 sender started polling\n");
-    int epoll_fd = -1;
-    char* buffer = NULL;
+    int   epoll_fd = -1;
+    char* buffer   = NULL;
 
     buffer = malloc(MAX_PACKET_SIZE);
 
@@ -206,8 +205,8 @@ static void* tunnel_from_p9_sock_to_virtio(void *data) {
         int channel_rx = g_p9_socket_fds[i][1];
 
         struct epoll_event event = {};
-        event.events = EPOLLIN;
-        event.data.fd = channel_rx;
+        event.events             = EPOLLIN;
+        event.data.fd            = channel_rx;
 
         TRY_OR_GOTO(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, channel_rx, &event), error);
     }
@@ -259,15 +258,15 @@ int initialize_p9_socket_descriptors() {
         // make_nonblocking(g_p9_socket_fds[i][1]);
     }
 
-	if (pthread_create(&g_p9_tunnel_thread_receiver, NULL, &tunnel_from_p9_virtio_to_sock, NULL) == -1) {
+    if (pthread_create(&g_p9_tunnel_thread_receiver, NULL, &tunnel_from_p9_virtio_to_sock, NULL) == -1) {
         fprintf(stderr, "Error: pthread_create failed pthread_create(&g_p9_tunnel_thread_receiver...\n");
         return -1;
-	}
+    }
 
     if (pthread_create(&g_p9_tunnel_thread_sender, NULL, &tunnel_from_p9_sock_to_virtio, NULL) == -1) {
         fprintf(stderr, "Error: pthread_create failed pthread_create(&g_p9_tunnel_thread_sender...\n");
         return -1;
-	}
+    }
 
     return 0;
 }
@@ -284,14 +283,15 @@ uint32_t do_mount_p9(const char* tag, char* path) {
     // TODO: clang-format
     // TODO: it will condense to epoll_ctl(ADD)
 
-    fprintf(stderr, "$$$$$$$$$$$$$$$$$$$$$$ Handling a mount for channel %u\n", (unsigned) channel);
+    fprintf(stderr, "$$$$$$$$$$$$$$$$$$$$$$ Handling a mount for channel %u\n", (unsigned)channel);
 
     static const uint32_t CMD_SIZE = 256;
-    char mount_cmd[CMD_SIZE];
-    int mount_socket_fd = g_p9_socket_fds[channel][0];
+    char                  mount_cmd[CMD_SIZE];
+    int                   mount_socket_fd = g_p9_socket_fds[channel][0];
 
     // TODO: use some kind of CHECK macro
-    int buf_size = snprintf(mount_cmd, CMD_SIZE, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L", mount_socket_fd, mount_socket_fd);
+    int buf_size =
+        snprintf(mount_cmd, CMD_SIZE, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L", mount_socket_fd, mount_socket_fd);
     if (buf_size < 0) {
         return errno;
     }

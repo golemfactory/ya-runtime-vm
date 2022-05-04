@@ -1,9 +1,9 @@
+#include "cyclic_buffer.h"
+
 #include <err.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
-
-#include "cyclic_buffer.h"
 
 static void pipe_to_cb(int p[2], struct cyclic_buffer* cb, char* buf, size_t size) {
     ssize_t ret = write(p[1], buf, size);
@@ -68,8 +68,8 @@ int main(void) {
         err(1, "pipe");
     }
 
-    char buf[BUF_SIZE] = { 0 };
-    char buf_out[BUF_SIZE] = { 0 };
+    char buf[BUF_SIZE]     = {0};
+    char buf_out[BUF_SIZE] = {0};
 
     memset(buf, 'a', 7);
     pipe_to_cb(p_in, &cb, buf, 7);
@@ -94,10 +94,10 @@ int main(void) {
         errx(1, "got wrong data from cyclic buffer");
     }
 
-    memset(buf, 'c', BUF_SIZE/2);
-    pipe_to_cb(p_in, &cb, buf, BUF_SIZE/2);
+    memset(buf, 'c', BUF_SIZE / 2);
+    pipe_to_cb(p_in, &cb, buf, BUF_SIZE / 2);
     size = cyclic_buffer_data_size(&cb);
-    if (size != BUF_SIZE/2) {
+    if (size != BUF_SIZE / 2) {
         errx(1, "wrong data size of buffer ('c'): %zu", size);
     }
 

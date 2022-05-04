@@ -1,6 +1,6 @@
-#include <stddef.h>
-
 #include "process_bookkeeping.h"
+
+#include <stddef.h>
 
 static struct process_desc* g_all_processes = NULL;
 

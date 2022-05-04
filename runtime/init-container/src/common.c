@@ -1,13 +1,14 @@
 #include "common.h"
 
-#include <fcntl.h>
-#include <errno.h>
-#include <sys/stat.h>
 #include <assert.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <string.h>
+#include <sys/stat.h>
 
 int make_nonblocking(int fd) {
-    errno = 0;
+    // TODO: !!!???
+    errno     = 0;
     int flags = fcntl(fd, F_GETFL);
     if (flags == -1 && errno) {
         return -1;
@@ -27,9 +28,9 @@ int create_dir_path(char* path) {
         if (!next) {
             break;
         }
-        *next = '\0';
+        *next   = '\0';
         int ret = mkdir(path, DEFAULT_DIR_PERMS);
-        *next = '/';
+        *next   = '/';
         if (ret < 0 && errno != EEXIST) {
             return -1;
         }

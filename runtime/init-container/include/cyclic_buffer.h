@@ -1,6 +1,9 @@
 #ifndef _CYCLIC_BUFFER_H
 #define _CYCLIC_BUFFER_H
 
+#include <stddef.h>
+#include <unistd.h>
+
 /*
  * Struct describing a cyclic buffer.
  * `buf` - pointer to the beginning of the buffer,
@@ -15,10 +18,10 @@
  * If the buffer is full and `begin == buf`, then `end == buf + size`.
  */
 struct cyclic_buffer {
-    char* buf;
+    char*  buf;
     size_t size;
-    char* begin;
-    char* end;
+    char*  begin;
+    char*  end;
 };
 
 /*
@@ -61,4 +64,4 @@ ssize_t cyclic_buffer_read(int fd, struct cyclic_buffer* cb, size_t count);
  */
 ssize_t cyclic_buffer_write(int fd, struct cyclic_buffer* cb, size_t count);
 
-#endif // _CYCLIC_BUFFER_H
+#endif  // _CYCLIC_BUFFER_H
