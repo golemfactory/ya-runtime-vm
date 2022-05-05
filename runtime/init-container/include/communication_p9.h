@@ -6,7 +6,7 @@
 #include <pthread.h>
 
 
-int initialize_p9_socket_descriptors();
+int initialize_p9_communication();
 uint32_t do_mount_p9(const char* tag, char* path);
 
 extern int g_p9_fd;

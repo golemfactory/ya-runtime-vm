@@ -1511,7 +1511,7 @@ int main(void) {
     setup_sigfd();
 
     // make sure to create threads after blocking signals, not before. Otherwise signals are blocked.
-    CHECK(initialize_p9_socket_descriptors());
+    CHECK(initialize_p9_communication());
 
     main_loop();
     stop_network();

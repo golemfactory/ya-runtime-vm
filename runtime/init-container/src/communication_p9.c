@@ -29,16 +29,15 @@
 
 #include "common.h"
 
+// TODO: is it a good value?
 #define MAX_P9_VOLUMES (100)
 #define MAX_PACKET_SIZE (16384)
 
 int g_p9_fd = -1;
-// TODO: use in mount
 // TODO: add unmount?
 static int g_p9_current_channel = 0;
 static int g_p9_socket_fds[MAX_P9_VOLUMES][2];
 
-static pthread_t g_p9_tunnel_thread_receiver;
 static pthread_t g_p9_tunnel_thread_sender;
 
 static int read_exact(int fd, void* buf, size_t size) {
@@ -85,65 +84,55 @@ static int write_exact(int fd, const void* buf, size_t size) {
     return bytes_written;
 }
 
-static void* tunnel_from_p9_virtio_to_sock(void* data) {
-    char* buffer = malloc(MAX_PACKET_SIZE);
+static void handle_data_on_sock(char* buffer, uint32_t buffer_size) {
+    uint8_t channel    = -1;
+    int     bytes_read = read_exact(g_p9_fd, &channel, sizeof(channel));
 
-    if (data != NULL) {
-        fprintf(stderr, "tunnel_from_p9_virtio_to_sock: data != NULL\n");
+    // fprintf(stderr, "data on sock for channel %d\n", (int32_t)channel);
+
+    if (bytes_read == 0) {
+        fprintf(stderr, "No data on g_p9_fd\n");
         goto error;
     }
 
-    while (true) {
-        uint8_t channel    = 0;
-        int     bytes_read = read_exact(g_p9_fd, &channel, sizeof(channel));
+    if (bytes_read != sizeof(channel)) {
+        fprintf(stderr, "Error during read from g_p9_fd: bytes_read != sizeof(channel)\n");
+        goto error;
+    }
 
-        if (bytes_read == 0) {
-            fprintf(stderr, "No data on g_p9_fd\n");
-            goto success;
-        }
+    uint16_t packet_size = 0;
+    bytes_read           = read_exact(g_p9_fd, &packet_size, sizeof(packet_size));
 
-        if (bytes_read != sizeof(channel)) {
-            fprintf(stderr, "Error during read from g_p9_fd: bytes_read != sizeof(channel)\n");
-            goto error;
-        }
+    if (bytes_read != sizeof(packet_size)) {
+        fprintf(stderr, "Error during read from g_p9_fd: bytes_read != sizeof(packet_size)\n");
+        goto error;
+    }
 
-        uint16_t packet_size = 0;
-        bytes_read           = read_exact(g_p9_fd, &packet_size, sizeof(packet_size));
+    if (packet_size > MAX_PACKET_SIZE) {
+        fprintf(stderr, "Error: Maximum packet size exceeded: packet_size > MAX_PACKET_SIZE\n");
+        goto error;
+    }
 
-        if (bytes_read != sizeof(packet_size)) {
-            fprintf(stderr, "Error during read from g_p9_fd: bytes_read != sizeof(packet_size)\n");
-            goto error;
-        }
-
-        if (packet_size > MAX_PACKET_SIZE) {
-            fprintf(stderr, "Error: Maximum packet size exceeded: packet_size > MAX_PACKET_SIZE\n");
-            goto error;
-        }
-
-        bytes_read = read_exact(g_p9_fd, buffer, packet_size);
-        if (bytes_read != packet_size) {
-            fprintf(stderr, "Error during read from g_p9_fd: bytes_read != packet_size\n");
-            goto error;
-        }
+    bytes_read = read_exact(g_p9_fd, buffer, packet_size);
+    if (bytes_read != packet_size) {
+        fprintf(stderr, "Error during read from g_p9_fd: bytes_read != packet_size\n");
+        goto error;
+    }
 
 #if WIN_P9_EXTRA_DEBUG_INFO
-        fprintf(stderr, "RECEIVE MESSAGE %ld\n", bytes_read);
+    fprintf(stderr, "RECEIVE MESSAGE %ld\n", bytes_read);
 #endif
-        if (bytes_read == -1) {
-            fprintf(stderr, "Error during read from g_p9_fd: bytes_read == -1\n");
-            goto error;
-        }
-        if (write_exact(g_p9_socket_fds[channel][1], buffer, bytes_read) == -1) {
-            fprintf(stderr, "Error writing to g_p9_socket_fds\n");
-            goto error;
-        }
+    if (bytes_read == -1) {
+        fprintf(stderr, "Error during read from g_p9_fd: bytes_read == -1\n");
+        goto error;
     }
-success:
-    free(buffer);
-    return (void*)0;
-error:
-    free(buffer);
-    return (void*)-1;
+
+    if (write_exact(g_p9_socket_fds[channel][1], buffer, bytes_read) == -1) {
+        fprintf(stderr, "Error writing to g_p9_socket_fds\n");
+        goto error;
+    }
+
+error:;
 }
 
 void handle_data_on_channel(int channel, char* buffer, uint32_t buffer_size) {
@@ -171,7 +160,7 @@ void handle_data_on_channel(int channel, char* buffer, uint32_t buffer_size) {
 error:;
 }
 
-static void* tunnel_from_p9_sock_to_virtio(void* data) {
+static void* poll_9p_messages(void* data) {
     (void)data;
 
     fprintf(stderr, "POLL: P9 sender started polling\n");
@@ -199,8 +188,20 @@ static void* tunnel_from_p9_sock_to_virtio(void* data) {
         TRY_OR_GOTO(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, channel_rx, &event), error);
     }
 
+    fprintf(stderr, "POLL: P9 adding g_p9_fd\n");
+
+    struct epoll_event event = {};
+    event.events             = EPOLLIN;
+    event.data.fd            = g_p9_fd;
+
+    TRY_OR_GOTO(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, g_p9_fd, &event), error);
+
     while (1) {
         struct epoll_event event = {};
+
+        // TODO: future improvement in reducing number of syscalls might be to set up
+        // FD's in non-blocking mode, epoll in edge triggered mode, increase number of events
+        // https://eklitzke.org/blocking-io-nonblocking-io-and-epoll
 
         if (epoll_wait(epoll_fd, &event, 1, -1) < 0) {
             if (errno == EINTR || errno == EAGAIN) {
@@ -222,33 +223,29 @@ static void* tunnel_from_p9_sock_to_virtio(void* data) {
                 handle_data_on_channel(channel, buffer, MAX_PACKET_SIZE);
             }
         }
+
+        if (event.data.fd == g_p9_fd) {
+            handle_data_on_sock(buffer, MAX_PACKET_SIZE);
+        }
     }
 
 error:
     close(epoll_fd);
     free(buffer);
-    // TODO: return anything meaningful?
     return NULL;
 }
 
 // TODO: create Twrite request that exceeds hardcoded packet size
 // TODO: do highly concurrent write requests from rust side to see congestion in this part of code
-int initialize_p9_socket_descriptors() {
+int initialize_p9_communication() {
     for (int i = 0; i < MAX_P9_VOLUMES; i++) {
         if (socketpair(AF_LOCAL, SOCK_STREAM, 0, g_p9_socket_fds[i]) != 0) {
             fprintf(stderr, "Error: Failed to create a socket pair for channel %d, errno: %m\n", i);
             goto error;
         }
-
-        // TODO: make fds nonblocking?
-        // TODO: great article:
-        // https://eklitzke.org/blocking-io-nonblocking-io-and-epoll
-        // make_nonblocking(g_p9_socket_fds[i][1]);
     }
 
-    TRY_OR_GOTO(pthread_create(&g_p9_tunnel_thread_receiver, NULL, &tunnel_from_p9_virtio_to_sock, NULL), error);
-    TRY_OR_GOTO(pthread_create(&g_p9_tunnel_thread_sender, NULL, &tunnel_from_p9_sock_to_virtio, NULL), error);
-
+    TRY_OR_GOTO(pthread_create(&g_p9_tunnel_thread_sender, NULL, &poll_9p_messages, NULL), error);
     return 0;
 
 error:
@@ -269,7 +266,7 @@ uint32_t do_mount_p9(const char* tag, char* path) {
         goto error;
     }
 
-    // TODO: it will condense to epoll_ctl(ADD)
+    // TODO: leave like that? Or add sockets lazily?
 
     TRY_OR_GOTO(
         snprintf(mount_cmd, CMD_SIZE, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L", mount_socket_fd, mount_socket_fd),
