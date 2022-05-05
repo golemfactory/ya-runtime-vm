@@ -29,13 +29,21 @@ int readn(int fd, void* buf, size_t size) {
     return 0;
 }
 
-int recv_u64(int fd, uint64_t* res) { return readn(fd, res, sizeof(*res)); }
+int recv_u64(int fd, uint64_t* res) {
+    return readn(fd, res, sizeof(*res));
+}
 
-int recv_u32(int fd, uint32_t* res) { return readn(fd, res, sizeof(*res)); }
+int recv_u32(int fd, uint32_t* res) {
+    return readn(fd, res, sizeof(*res));
+}
 
-int recv_u16(int fd, uint16_t* res) { return readn(fd, res, sizeof(*res)); }
+int recv_u16(int fd, uint16_t* res) {
+    return readn(fd, res, sizeof(*res));
+}
 
-int recv_u8(int fd, uint8_t* res) { return readn(fd, res, sizeof(*res)); }
+int recv_u8(int fd, uint8_t* res) {
+    return readn(fd, res, sizeof(*res));
+}
 
 int recv_bytes(int fd, char** buf_ptr, uint64_t* size_ptr, bool is_cstring) {
     uint64_t size = 0;

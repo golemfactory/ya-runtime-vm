@@ -29,12 +29,10 @@
 
 #include "common.h"
 
-// TODO: is it a good value?
-#define MAX_P9_VOLUMES (100)
+#define MAX_P9_VOLUMES (16)
 #define MAX_PACKET_SIZE (16384)
 
 int g_p9_fd = -1;
-// TODO: add unmount?
 static int g_p9_current_channel = 0;
 static int g_p9_socket_fds[MAX_P9_VOLUMES][2];
 
@@ -85,8 +83,8 @@ static int write_exact(int fd, const void* buf, size_t size) {
 }
 
 static void handle_data_on_sock(char* buffer, uint32_t buffer_size) {
-    uint8_t channel    = -1;
-    int     bytes_read = read_exact(g_p9_fd, &channel, sizeof(channel));
+    uint8_t channel = -1;
+    int bytes_read = read_exact(g_p9_fd, &channel, sizeof(channel));
 
     // fprintf(stderr, "data on sock for channel %d\n", (int32_t)channel);
 
@@ -101,15 +99,15 @@ static void handle_data_on_sock(char* buffer, uint32_t buffer_size) {
     }
 
     uint16_t packet_size = 0;
-    bytes_read           = read_exact(g_p9_fd, &packet_size, sizeof(packet_size));
+    bytes_read = read_exact(g_p9_fd, &packet_size, sizeof(packet_size));
 
     if (bytes_read != sizeof(packet_size)) {
         fprintf(stderr, "Error during read from g_p9_fd: bytes_read != sizeof(packet_size)\n");
         goto error;
     }
 
-    if (packet_size > MAX_PACKET_SIZE) {
-        fprintf(stderr, "Error: Maximum packet size exceeded: packet_size > MAX_PACKET_SIZE\n");
+    if (packet_size > buffer_size) {
+        fprintf(stderr, "Error: Maximum packet size exceeded: packet_size > buffer_size\n");
         goto error;
     }
 
@@ -164,8 +162,8 @@ static void* poll_9p_messages(void* data) {
     (void)data;
 
     fprintf(stderr, "POLL: P9 sender started polling\n");
-    int   epoll_fd = -1;
-    char* buffer   = NULL;
+    int epoll_fd = -1;
+    char* buffer = NULL;
 
     buffer = malloc(MAX_PACKET_SIZE);
 
@@ -182,8 +180,8 @@ static void* poll_9p_messages(void* data) {
         int channel_rx = g_p9_socket_fds[i][1];
 
         struct epoll_event event = {};
-        event.events             = EPOLLIN;
-        event.data.fd            = channel_rx;
+        event.events = EPOLLIN;
+        event.data.fd = channel_rx;
 
         TRY_OR_GOTO(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, channel_rx, &event), error);
     }
@@ -191,17 +189,13 @@ static void* poll_9p_messages(void* data) {
     fprintf(stderr, "POLL: P9 adding g_p9_fd\n");
 
     struct epoll_event event = {};
-    event.events             = EPOLLIN;
-    event.data.fd            = g_p9_fd;
+    event.events = EPOLLIN;
+    event.data.fd = g_p9_fd;
 
     TRY_OR_GOTO(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, g_p9_fd, &event), error);
 
     while (1) {
         struct epoll_event event = {};
-
-        // TODO: future improvement in reducing number of syscalls might be to set up
-        // FD's in non-blocking mode, epoll in edge triggered mode, increase number of events
-        // https://eklitzke.org/blocking-io-nonblocking-io-and-epoll
 
         if (epoll_wait(epoll_fd, &event, 1, -1) < 0) {
             if (errno == EINTR || errno == EAGAIN) {
@@ -258,8 +252,8 @@ uint32_t do_mount_p9(const char* tag, char* path) {
     fprintf(stderr, "Starting mount: tag: %s, path: %s, channel %d\n", tag, path, channel);
 
     static const uint32_t CMD_SIZE = 256;
-    char                  mount_cmd[CMD_SIZE];
-    int                   mount_socket_fd = g_p9_socket_fds[channel][0];
+    char mount_cmd[CMD_SIZE];
+    int mount_socket_fd = g_p9_socket_fds[channel][0];
 
     if (channel >= MAX_P9_VOLUMES) {
         fprintf(stderr, "ERROR: channel >= MAX_P9_VOLUMES\n");
