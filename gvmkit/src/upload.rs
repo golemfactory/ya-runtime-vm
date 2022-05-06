@@ -1,5 +1,4 @@
 use crate::progress::{Progress, ProgressResult, Spinner, SpinnerResult};
-use actix_rt::Arbiter;
 use anyhow::Context;
 use awc::error::PayloadError;
 use awc::ClientResponse;
@@ -26,8 +25,7 @@ lazy_static::lazy_static! {
 }
 
 async fn resolve_repo() -> anyhow::Result<String> {
-    let resolver: TokioAsyncResolver =
-        TokioAsyncResolver::tokio(ResolverConfig::google(), ResolverOpts::default()).await?;
+    let resolver = TokioAsyncResolver::tokio(ResolverConfig::google(), ResolverOpts::default())?;
 
     let lookup = resolver
         .srv_lookup(format!("_girepo._tcp.{}", DOMAIN))
@@ -92,7 +90,8 @@ pub async fn upload_image<P: AsRef<Path>>(file_path: P) -> anyhow::Result<()> {
     let (htx, hrx) = oneshot::channel();
 
     let progress_ = progress.clone();
-    Arbiter::spawn(async move {
+
+    actix_rt::spawn(async move {
         let mut buf = [0; 1024 * 64];
         let mut reader = BufReader::new(file);
         let mut hasher = sha3::Sha3_224::new();

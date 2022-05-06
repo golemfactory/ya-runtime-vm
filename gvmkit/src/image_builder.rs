@@ -1,11 +1,10 @@
 use bytes::Bytes;
-use crc::crc32;
+use crc::{self, Crc, CRC_32_ISO_HDLC};
 use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
 };
-use tar;
 
 use crate::docker::{ContainerOptions, DockerInstance};
 use crate::progress::{from_progress_output, Progress, ProgressResult, Spinner, SpinnerResult};
@@ -131,7 +130,9 @@ fn add_metadata_outside(image_path: &Path, config: &ContainerConfig) -> anyhow::
     serde_json::to_writer(&mut json_buf, config)?;
     let mut file = fs::OpenOptions::new().append(true).open(image_path)?;
     let meta_size = json_buf.bytes.len();
-    let crc = crc32::checksum_ieee(&json_buf.bytes);
+
+    let crc32 = Crc::<u32>::new(&CRC_32_ISO_HDLC);
+    let crc = crc32.checksum(&json_buf.bytes);
     log::debug!("Image metadata checksum: 0x{:x}", crc);
     file.write(&crc.to_le_bytes())?;
     file.write(&json_buf.bytes)?;
