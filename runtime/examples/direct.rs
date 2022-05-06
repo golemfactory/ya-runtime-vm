@@ -81,10 +81,6 @@ fn get_project_dir() -> PathBuf {
         .expect("invalid manifest dir")
 }
 
-fn get_root_dir() -> PathBuf {
-    get_project_dir().parent().unwrap().canonicalize().unwrap()
-}
-
 fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
     let joined = path.as_ref().join(file.to_string());
 
@@ -108,7 +104,6 @@ fn spawn_vm() -> (Child, VM) {
     #[cfg(unix)]
     let vm_executable = "vmrt";
 
-    let root_dir = get_root_dir();
     let project_dir = get_project_dir();
     let runtime_dir = project_dir.join("poc").join("runtime");
     let image_dir = project_dir.join("poc").join("squashfs");
