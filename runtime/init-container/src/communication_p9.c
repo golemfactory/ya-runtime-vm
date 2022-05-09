@@ -30,7 +30,9 @@
 #include "common.h"
 
 #define MAX_P9_VOLUMES (16)
-#define MAX_PACKET_SIZE (16384)
+#define MAX_PACKET_SIZE (1048576)
+// #define MAX_PACKET_SIZE (16384)
+
 
 int g_p9_fd = -1;
 static int g_p9_current_channel = 0;
@@ -89,7 +91,7 @@ static void handle_data_on_sock(char* buffer, uint32_t buffer_size) {
     // fprintf(stderr, "data on sock for channel %d\n", (int32_t)channel);
 
     if (bytes_read == 0) {
-        fprintf(stderr, "No data on g_p9_fd\n");
+        // fprintf(stderr, "No data on g_p9_fd\n");
         goto error;
     }
 

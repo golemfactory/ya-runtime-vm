@@ -109,15 +109,15 @@ async fn run_process_with_output(
             log::info!("STDOUT Output {argv:?}:");
             io::stdout().write_all(&out)?;
         }
-        Err(code) => log::error!("STDOUT Output {argv:?} query failed with: {}", code),
+        Err(code) => log::info!("{argv:?} no data on STDOUT, reason {code}"),
     }
 
     match ga.query_output(id, 2, 0, u64::MAX).await? {
         Ok(out) => {
-            log::info!("STDERR Output {argv:?}:");
+            log::error!("STDERR Output {argv:?}:");
             io::stdout().write_all(&out)?;
         }
-        Err(code) => log::error!("STDERR Output {argv:?} query failed with: {}", code),
+        Err(code) => log::info!("{argv:?} no data on STDERR, reason {code}"),
     }
     Ok(())
 }
@@ -167,6 +167,9 @@ fn spawn_vm() -> (Child, VM) {
 
     cmd.stdin(Stdio::null());
 
+    // cmd.stderr(Stdio::null());
+    // cmd.stdout(Stdio::null());
+
     cmd.current_dir(runtime_dir);
     (cmd.spawn().expect("failed to spawn VM"), vm)
 }
@@ -213,18 +216,29 @@ async fn test_parallel_write_big_chunk(
     ga_mutex: Arc<Mutex<GuestAgent>>,
     notifications: Arc<Notifications>,
 ) {
-
     // prepare chunk
     {
         let mut ga = ga_mutex.lock().await;
         // List files
-        run_process_with_output(&mut ga, &notifications, "/bin/dd", &["dd", "if=/dev/random", "of=/tmp/big_file", "bs=1048576", "count=20"])
-            .await
-            .unwrap();
+        run_process_with_output(
+            &mut ga,
+            &notifications,
+            "/bin/dd",
+            &[
+                "dd",
+                "if=/dev/random",
 
-            run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-la", "/tmp/"])
-            .await
-            .unwrap();
+                "of=mnt/mnt1/tag0/big_file",
+                "bs=1048576",
+                "count=2000",
+            ],
+        )
+        .await
+        .unwrap();
+
+        // run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls","-la", "/bin"])
+        //     .await
+        //     .unwrap();
     }
 
     let mut tasks = vec![];
@@ -234,8 +248,7 @@ async fn test_parallel_write_big_chunk(
         let notifications = notifications.clone();
 
         // let cmd = format!("A=\"A\"; for i in {{1..24}}; do A=\"${{A}}${{A}}\"; done; echo -ne $A >> {path}/big_chunk");
-        let cmd = format!("cat /tmp/big_file > {path}/big_chunk");
-
+        let cmd = format!("cat /mnt/mnt1/tag0/big_file > {path}/big_chunk");
 
         let name = name.clone();
         let path = path.clone();
@@ -264,8 +277,10 @@ async fn test_parallel_write_big_chunk(
 async fn main() -> io::Result<()> {
     env_logger::init();
 
+    log::info!("hai!");
     let (mut child, vm) = spawn_vm();
 
+    log::info!("hai!");
     let temp_dir = tempdir::TempDir::new("ya-vm-direct").expect("Failed to create temp dir");
     let temp_path = temp_dir.path();
     let notifications = Arc::new(Notifications::new());
@@ -381,7 +396,7 @@ async fn test_write(
     let notif = notifications.get_process_died_notification(id).await;
     let fut = notif.notified();
 
-    if let Err(_) = timeout(Duration::from_secs(30), fut).await {
+    if let Err(_) = timeout(Duration::from_secs(60), fut).await {
         log::error!("Got timeout on died notification for process {id}");
     }
 
