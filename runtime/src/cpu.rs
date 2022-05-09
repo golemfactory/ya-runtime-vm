@@ -21,6 +21,7 @@ impl CpuInfo {
 }
 
 pub struct CpuModel {
+    pub brand: String,
     pub vendor: String,
     pub stepping: u8,
     pub family: u16,
@@ -31,6 +32,9 @@ impl<'a> TryFrom<&'a CpuId> for CpuModel {
     type Error = anyhow::Error;
 
     fn try_from(info: &'a CpuId) -> Result<Self, Self::Error> {
+        let brand = info
+            .get_processor_brand_string()
+            .ok_or_else(|| anyhow::anyhow!("Unable to read CPU brand"))?;
         let vendor = info
             .get_vendor_info()
             .ok_or_else(|| anyhow::anyhow!("Unable to read CPU vendor info"))?;
@@ -39,6 +43,7 @@ impl<'a> TryFrom<&'a CpuId> for CpuModel {
             .ok_or_else(|| anyhow::anyhow!("Unable to read CPU features"))?;
 
         Ok(CpuModel {
+            brand: brand.as_str().to_string(),
             vendor: vendor.to_string(),
             stepping: features.stepping_id(),
             family: (features.extended_family_id() as u16) + (features.family_id() as u16),
@@ -131,16 +136,20 @@ fn cpu_features(info: &CpuId) -> anyhow::Result<Vec<String>> {
             ext_features,
             (has_fsgsbase, FSGSBASE),
             (has_tsc_adjust_msr, ADJUST_MSR),
+            (has_bmi1, BMI1),
+            (has_hle, HLE),
+            (has_avx2, AVX2),
             (has_fdp, FDP),
             (has_smep, SMEP),
+            (has_bmi2, BMI2),
             (has_rep_movsb_stosb, REP_MOVSB_STOSB),
             (has_invpcid, INVPCID),
+            (has_rtm, RTM),
             (has_rdtm, RDTM),
             (has_fpu_cs_ds_deprecated, DEPRECATE_FPU_CS_DS),
             (has_mpx, MPX),
             (has_rdta, RDTA),
             (has_rdseed, RDSEED),
-            (has_rdseet, RDSEED),
             (has_adx, ADX),
             (has_smap, SMAP),
             (has_clflushopt, CLFLUSHOPT),
@@ -155,6 +164,7 @@ fn cpu_features(info: &CpuId) -> anyhow::Result<Vec<String>> {
             (has_avx512cd, AVX512CD),
             (has_avx512bw, AVX512BW),
             (has_avx512vl, AVX512VL),
+            (has_clwb, CLWB),
             (has_prefetchwt1, PREFETCHWT1),
             (has_umip, UMIP),
             (has_pku, PKU),
