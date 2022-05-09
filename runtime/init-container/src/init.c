@@ -257,11 +257,15 @@ static void handle_sigchld(void) {
 
     struct process_desc* proc_desc = find_process_by_pid(child_pid);
     if (!proc_desc) {
+        fprintf(stderr, "UNTRACKED %d\n", child_pid);
         /* This process was not tracked. */
         return;
     }
+    fprintf(stderr, "GOT SIGCHILD %ld\n", proc_desc->id);
 
     proc_desc->is_alive = false;
+
+
 
     send_process_died(proc_desc->id, encode_status(siginfo.ssi_status, siginfo.ssi_code));
 
@@ -952,6 +956,7 @@ static void handle_mount(msg_id_t msg_id) {
     }
 
     ret = do_mount_p9(tag, path);
+    // TODO: rm path, if mount fails?
 
 out:
     free(path);

@@ -224,6 +224,8 @@ static void* poll_9p_messages(void* data) {
     }
 
 error:
+    fprintf(stderr, "POLL: P9 thread is leaving!\n");
+
     close(epoll_fd);
     free(buffer);
     return NULL;
@@ -260,10 +262,8 @@ uint32_t do_mount_p9(const char* tag, char* path) {
         goto error;
     }
 
-    // TODO: leave like that? Or add sockets lazily?
-
     TRY_OR_GOTO(
-        snprintf(mount_cmd, CMD_SIZE, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L", mount_socket_fd, mount_socket_fd),
+        snprintf(mount_cmd, CMD_SIZE, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L,msize=104857600", mount_socket_fd, mount_socket_fd),
         error);
 
     TRY_OR_GOTO(mount(tag, path, "9p", 0, mount_cmd), error);

@@ -1,5 +1,6 @@
-
-use ::futures::{future, FutureExt, lock::Mutex};
+use ::futures::{future, lock::Mutex, FutureExt};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::{
@@ -8,33 +9,61 @@ use std::{
     process::Stdio,
     sync::Arc,
 };
+use tokio::time::timeout;
 use tokio::{process::Child, sync};
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
 use ya_runtime_vm::vm::{VMBuilder, VM};
 
 struct Notifications {
-    process_died: sync::Notify,
-    output_available: sync::Notify,
+    process_died: Mutex<HashMap<u64, Arc<sync::Notify>>>,
+    output_available: Mutex<HashMap<u64, Arc<sync::Notify>>>,
 }
 
 impl Notifications {
     fn new() -> Self {
         Notifications {
-            process_died: sync::Notify::new(),
-            output_available: sync::Notify::new(),
+            process_died: Mutex::new(HashMap::new()),
+            output_available: Mutex::new(HashMap::new()),
         }
     }
 
-    fn handle(&self, notification: Notification) {
+    async fn get_process_died_notification(&self, id: u64) -> Arc<sync::Notify> {
+        let notif = {
+            let mut lock = self.process_died.lock().await;
+            lock.entry(id)
+                .or_insert(Arc::new(sync::Notify::new()))
+                .clone()
+        };
+
+        notif
+    }
+
+    async fn get_output_available_notification(&self, id: u64) -> Arc<sync::Notify> {
+        let notif = {
+            let mut lock = self.output_available.lock().await;
+            lock.entry(id)
+                .or_insert(Arc::new(sync::Notify::new()))
+                .clone()
+        };
+
+        notif
+    }
+
+    async fn handle(&self, notification: Notification) {
+        log::info!("GOT NOTIFICATION {notification:?}");
+
         match notification {
             Notification::OutputAvailable { id, fd } => {
                 log::debug!("Process {} has output available on fd {}", id, fd);
-                self.output_available.notify_one();
+
+                self.get_output_available_notification(id)
+                    .await
+                    .notify_one();
             }
             Notification::ProcessDied { id, reason } => {
                 log::debug!("Process {} died with {:?}", id, reason);
-                self.process_died.notify_one();
+                self.get_process_died_notification(id).await.notify_one();
             }
         }
     }
@@ -63,16 +92,32 @@ async fn run_process_with_output(
         .await?
         .expect("Run process failed");
 
-    println!("Spawned process with id: {}", id);
-    notifications.process_died.notified().await;
-    notifications.output_available.notified().await;
+    log::info!("Spawned process with id: {}", id);
+    notifications
+        .get_process_died_notification(id)
+        .await
+        .notified()
+        .await;
+    notifications
+        .get_output_available_notification(id)
+        .await
+        .notified()
+        .await;
 
     match ga.query_output(id, 1, 0, u64::MAX).await? {
         Ok(out) => {
-            println!("Output:");
+            log::info!("STDOUT Output {argv:?}:");
             io::stdout().write_all(&out)?;
         }
-        Err(code) => println!("Output query failed with: {}", code),
+        Err(code) => log::error!("STDOUT Output {argv:?} query failed with: {}", code),
+    }
+
+    match ga.query_output(id, 2, 0, u64::MAX).await? {
+        Ok(out) => {
+            log::info!("STDERR Output {argv:?}:");
+            io::stdout().write_all(&out)?;
+        }
+        Err(code) => log::error!("STDERR Output {argv:?} query failed with: {}", code),
     }
     Ok(())
 }
@@ -118,7 +163,7 @@ fn spawn_vm() -> (Child, VM) {
 
     let mut cmd = vm.create_cmd(&runtime_dir.join(vm_executable));
 
-    println!("CMD: {cmd:?}");
+    log::info!("CMD: {cmd:?}");
 
     cmd.stdin(Stdio::null());
 
@@ -126,7 +171,94 @@ fn spawn_vm() -> (Child, VM) {
     (cmd.spawn().expect("failed to spawn VM"), vm)
 }
 
-async fn test_multiple_fs_calls(bytes_to_write: usize, vm_manager_sock: &str) {}
+/// Write for one byte to the file, create as many tasks as there are mount points
+async fn test_parallel_write_small_chunks(
+    mount_args: Arc<Vec<ContainerVolume>>,
+    ga_mutex: Arc<Mutex<GuestAgent>>,
+    notifications: Arc<Notifications>,
+) {
+    let mut tasks = vec![];
+
+    for ContainerVolume { name, path } in mount_args.as_ref() {
+        let ga_mutex = ga_mutex.clone();
+        let notifications = notifications.clone();
+
+        let cmd = format!("for i in {{1..100}}; do echo -ne a >> {path}/small_chunks; done; cat {path}/small_chunks");
+
+        let name = name.clone();
+        let path = path.clone();
+        let join = tokio::spawn(async move {
+            log::info!("Spawning task for {name}");
+            let ga = ga_mutex.clone();
+            test_write(ga_mutex, &notifications, &cmd).await.unwrap();
+
+            {
+                let mut ga = ga.lock().await;
+                // List files
+                run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-la", &path])
+                    .await
+                    .unwrap();
+            }
+        });
+
+        tasks.push(join);
+    }
+
+    log::info!("Joining...");
+    future::join_all(tasks).await;
+}
+
+async fn test_parallel_write_big_chunk(
+    mount_args: Arc<Vec<ContainerVolume>>,
+    ga_mutex: Arc<Mutex<GuestAgent>>,
+    notifications: Arc<Notifications>,
+) {
+
+    // prepare chunk
+    {
+        let mut ga = ga_mutex.lock().await;
+        // List files
+        run_process_with_output(&mut ga, &notifications, "/bin/dd", &["dd", "if=/dev/random", "of=/tmp/big_file", "bs=1048576", "count=20"])
+            .await
+            .unwrap();
+
+            run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-la", "/tmp/"])
+            .await
+            .unwrap();
+    }
+
+    let mut tasks = vec![];
+
+    for ContainerVolume { name, path } in mount_args.as_ref() {
+        let ga_mutex = ga_mutex.clone();
+        let notifications = notifications.clone();
+
+        // let cmd = format!("A=\"A\"; for i in {{1..24}}; do A=\"${{A}}${{A}}\"; done; echo -ne $A >> {path}/big_chunk");
+        let cmd = format!("cat /tmp/big_file > {path}/big_chunk");
+
+
+        let name = name.clone();
+        let path = path.clone();
+        let join = tokio::spawn(async move {
+            log::info!("Spawning task for {name}");
+            let ga = ga_mutex.clone();
+            test_write(ga_mutex, &notifications, &cmd).await.unwrap();
+
+            {
+                let mut ga = ga.lock().await;
+                // List files
+                run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-la", &path])
+                    .await
+                    .unwrap();
+            }
+        });
+
+        tasks.push(join);
+    }
+
+    log::info!("Joining...");
+    future::join_all(tasks).await;
+}
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -138,7 +270,7 @@ async fn main() -> io::Result<()> {
     let temp_path = temp_dir.path();
     let notifications = Arc::new(Notifications::new());
 
-    const MOUNTS: usize = 5;
+    const MOUNTS: usize = 1;
 
     let mut mount_args = vec![];
 
@@ -158,12 +290,14 @@ async fn main() -> io::Result<()> {
         });
     }
 
+    let mount_args = Arc::new(mount_args);
+
     let (_p9streams, _muxer_handle) = vm.start_9p_service(&temp_path, &mount_args).await.unwrap();
 
     let ns = notifications.clone();
     let ga_mutex = GuestAgent::connected(vm.get_manager_sock(), 10, move |n, _g| {
         let notifications = ns.clone();
-        async move { notifications.clone().handle(n) }.boxed()
+        async move { notifications.clone().handle(n).await }.boxed()
     })
     .await?;
 
@@ -171,7 +305,9 @@ async fn main() -> io::Result<()> {
         let mut ga = ga_mutex.lock().await;
 
         for ContainerVolume { name, path } in mount_args.iter() {
-            ga.mount(name, path).await?.expect("Mount failed");
+            if let Err(e) = ga.mount(name, path).await? {
+                log::error!("Mount failed at {name}, {path}, {e}")
+            }
         }
 
         run_process_with_output(
@@ -183,53 +319,32 @@ async fn main() -> io::Result<()> {
         .await?;
     }
 
-    let mut tasks = vec![];
-    for ContainerVolume { name, path } in mount_args {
-        let manager_sock = vm.get_manager_sock().to_owned();
+    // test_parallel_write_small_chunks(mount_args.clone(), ga_mutex.clone(), notifications.clone())
+    //     .await;
 
-        let ga_mutex = ga_mutex.clone();
-        let notifications = notifications.clone();
-
-        let join = tokio::spawn(async move {
-            println!("Spawning task for {name}");
-            // let notifications = Arc::new(Notifications::new());
-
-            // let ns = notifications.clone();
-
-            // let ga_mutex = GuestAgent::connected(&manager_sock, 10, move |n, _g| {
-            //     let notifications = ns.clone();
-            //     async move { notifications.clone().handle(n) }.boxed()
-            // })
-            // .await
-            // .expect("Cannot connect to guest agent");
-
-            // let mut ga = ga_mutex.lock().await;
-
-
-            test_big_write(ga_mutex, &notifications, &path)
-                .await
-                .unwrap();
-        });
-
-        tasks.push(join);
-    }
-
-    println!("Joining...");
-    future::join_all(tasks).await;
+    test_parallel_write_big_chunk(mount_args.clone(), ga_mutex.clone(), notifications.clone())
+        .await;
 
     {
         let mut ga = ga_mutex.lock().await;
+
+        run_process_with_output(&mut ga, &notifications, "/bin/ps", &["ps", "auxjf"]).await?;
+
         let id = ga
             .run_entrypoint("/bin/sleep", &["sleep", "2"], None, 0, 0, &NO_REDIR, None)
             .await?
             .expect("Run process failed");
-        println!("Spawned process with id: {}", id);
-        notifications.process_died.notified().await;
+        log::info!("Spawned process with id: {}", id);
+        notifications
+            .get_process_died_notification(id)
+            .await
+            .notified()
+            .await;
     }
 
     /* VM should quit now. */
-    let e = child.wait().await.expect("failed to wait on child");
-    println!("{:?}", e);
+    let e = timeout(Duration::from_secs(5), child.wait()).await;
+    log::info!("{:?}", e);
 
     // tokio::time::sleep(Duration::from_secs(30)).await;
 
@@ -238,56 +353,55 @@ async fn main() -> io::Result<()> {
 
 const NO_REDIR: [Option<RedirectFdType>; 3] = [None, None, None];
 
-async fn test_big_write(
+async fn test_write(
     ga: Arc<Mutex<GuestAgent>>,
     notifications: &Notifications,
-    path: &str,
+    cmd: &str,
 ) -> io::Result<()> {
-    println!("***** test_big_write *****");
+    log::info!("***** test_big_write *****");
 
-    let mut ga = ga.lock().await;
+    let fds = &[
+        None,
+        Some(RedirectFdType::RedirectFdPipeBlocking(0x10000)),
+        None,
+    ];
+    let argv = ["bash", "-c", &cmd];
 
-    let id = ga
-        .run_process(
-            "/bin/bash",
-            &[
-                "bash",
-                "-c",
-                &format!("for i in {{1..100}}; do echo -ne a >> {path}/big; done; cat {path}/big"),
-            ],
-            None,
-            0,
-            0,
-            &[
-                None,
-                Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
-                None,
-            ],
-            None,
-        )
-        .await
-        .expect("Run process failed")
-        .expect("Remote command failed");
+    let id = {
+        let mut ga = ga.lock().await;
+        ga.run_process("/bin/bash", &argv, None, 0, 0, fds, None)
+            .await
+            .expect("Run process failed")
+            .expect("Remote command failed")
+    };
 
-    println!("Spawned process with id: {}", id);
-    notifications.process_died.notified().await;
+    log::info!("Spawned process with id: {}, for {}", id, cmd);
 
-    notifications.output_available.notified().await;
+    log::info!("waiting on died for {id}");
+    let notif = notifications.get_process_died_notification(id).await;
+    let fut = notif.notified();
 
-    let out = ga
-        .query_output(id, 1, 0, u64::MAX)
-        .await?
-        .expect("Output query failed");
+    if let Err(_) = timeout(Duration::from_secs(30), fut).await {
+        log::error!("Got timeout on died notification for process {id}");
+    }
 
-    println!("Big Output:");
-    println!(
-        "Big output 1: len: {} unexpected characters: {}",
-        out.len(),
-        out.iter().filter(|x| **x != 'a' as u8).count()
-    );
+    // log::info!("waiting on output for {id}");
+    // notifications
+    //     .get_output_available_notification(id)
+    //     .await
+    //     .notified()
+    //     .await;
 
-    // List files
-    run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-la", path]).await?;
+    // log::info!("waiting on query for {id}");
+    // let out = {
+    //     let mut ga = ga.lock().await;
+    //     ga.query_output(id, 1, 0, u64::MAX)
+    //         .await?
+    //         .expect("Output query failed")
+    // };
+
+    // log::info!("Cmd output: {cmd}");
+    // log::info!("Output len: {}", out.len());
 
     Ok(())
 }
