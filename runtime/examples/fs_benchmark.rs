@@ -226,19 +226,20 @@ async fn test_parallel_write_big_chunk(
             "/bin/dd",
             &[
                 "dd",
-                "if=/dev/random",
+                // TODO: /dev/random causes problems?
+                "if=/dev/zero",
 
-                "of=mnt/mnt1/tag0/big_file",
+                "of=/mnt/mnt1/tag0/big_file",
                 "bs=1048576",
-                "count=2000",
+                "count=10",
             ],
         )
         .await
         .unwrap();
 
-        run_process_with_output(&mut ga, &notifications, "/bin/df", &["df","-h"])
-            .await
-            .unwrap();
+        // run_process_with_output(&mut ga, &notifications, "/bin/df", &["df","-h"])
+        //     .await
+        //     .unwrap();
     }
 
     let mut tasks = vec![];
@@ -248,7 +249,9 @@ async fn test_parallel_write_big_chunk(
         let notifications = notifications.clone();
 
         // let cmd = format!("A=\"A\"; for i in {{1..24}}; do A=\"${{A}}${{A}}\"; done; echo -ne $A >> {path}/big_chunk");
-        let cmd = format!("cat /mnt/mnt1/tag0/big_file > {path}/big_chunk");
+        let cmd = format!("cat /mnt/mnt1/tag0/big_file > {path}/big_chunk;");
+        // let cmd = format!("cp /mnt/mnt1/tag0/big_file  /{path}/big_chunk");
+
 
         let name = name.clone();
         let path = path.clone();
@@ -260,7 +263,7 @@ async fn test_parallel_write_big_chunk(
             {
                 let mut ga = ga.lock().await;
                 // List files
-                run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-la", &path])
+                run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-lh", &path])
                     .await
                     .unwrap();
             }
@@ -301,13 +304,13 @@ async fn main() -> io::Result<()> {
 
         mount_args.push(ContainerVolume {
             name,
-            path: format!("mnt/mnt1/tag{id}"),
+            path: format!("/mnt/mnt1/tag{id}"),
         });
     }
 
     let mount_args = Arc::new(mount_args);
 
-    // let (_p9streams, _muxer_handle) = vm.start_9p_service(&temp_path, &mount_args).await.unwrap();
+    let (_p9streams, _muxer_handle) = vm.start_9p_service(&temp_path, &mount_args).await.unwrap();
 
     let ns = notifications.clone();
     let ga_mutex = GuestAgent::connected(vm.get_manager_sock(), 10, move |n, _g| {
@@ -346,7 +349,7 @@ async fn main() -> io::Result<()> {
         run_process_with_output(&mut ga, &notifications, "/bin/ps", &["ps", "auxjf"]).await?;
 
         let id = ga
-            .run_entrypoint("/bin/sleep", &["sleep", "2"], None, 0, 0, &NO_REDIR, None)
+            .run_entrypoint("/bin/sleep", &["sleep", "60"], None, 0, 0, &NO_REDIR, None)
             .await?
             .expect("Run process failed");
         log::info!("Spawned process with id: {}", id);
@@ -357,11 +360,11 @@ async fn main() -> io::Result<()> {
             .await;
     }
 
+
     /* VM should quit now. */
     let e = timeout(Duration::from_secs(5), child.wait()).await;
     log::info!("{:?}", e);
 
-    // tokio::time::sleep(Duration::from_secs(30)).await;
 
     Ok(())
 }

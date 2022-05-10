@@ -1,9 +1,10 @@
 CC := musl-gcc
 CXX := /bin/false
 ifdef IGNORE_WARNINGS
-CFLAGS := -std=c11 -O2 -fPIE -pie -Iinclude/
+# liburing uses GNU extensions, hence use std=gnu11, not c11
+CFLAGS := -std=gnu11 -O2 -fPIE -pie -Iinclude/
 else
-CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror -fPIE -pie -Iinclude/
+CFLAGS := -std=gnu11 -O2 -Wall -Wextra -Werror -fPIE -pie -Iinclude/
 endif
 
 ifneq ($(DEBUG), "")
@@ -48,6 +49,15 @@ OBJECTS_EXT = $(addprefix $(SRC_DIR)/,network.o forward.o)
 .DEFAULT_GOAL = all
 .PHONY: all
 all: vmlinuz-virt initramfs.cpio.gz
+
+$(SRC_DIR)/communication_p9.o: $(SRC_DIR)/communication_p9.c
+	$(QUIET_CC)$(CC) $(CFLAGS) \
+	    -I"$(CURDIR)/$(UNPACKED_HEADERS)/usr/include" \
+        -I"$(LIBURING_DIR)/src/include/" \
+		-Iinclude/ \
+        -lstdthreads \
+	    -o $@ -c $^
+
 
 $(SRC_DIR)/network.o: $(SRC_DIR)/network.c
 	$(QUIET_CC)$(CC) $(CFLAGS) \

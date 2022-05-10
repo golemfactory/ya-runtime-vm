@@ -24,7 +24,7 @@
 
 #include "common.h"
 #include "communication.h"
-//#include "communication_p9.h"
+#include "communication_p9.h"
 #include "cyclic_buffer.h"
 #include "forward.h"
 #include "network.h"
@@ -92,7 +92,7 @@ static noreturn void die(void) {
     (void)close(g_epoll_fd);
     (void)close(g_sig_fd);
     (void)close(g_net_fd);
-//    (void)close(g_p9_fd);
+    (void)close(g_p9_fd);
     (void)close(g_cmds_fd);
 
     while (1) {
@@ -918,18 +918,18 @@ out:
     }
 }
 
-static uint32_t do_mount(const char* tag, char* path) {
-    if (create_dir_path(path) < 0) {
-        return errno;
-    }
-    if (mount(tag, path, "9p", 0, "trans=virtio,version=9p2000.L") < 0) {
-        return errno;
-    }
+// static uint32_t do_mount(const char* tag, char* path) {
+//     if (create_dir_path(path) < 0) {
+//         return errno;
+//     }
+//     if (mount(tag, path, "9p", 0, "trans=virtio,version=9p2000.L") < 0) {
+//         return errno;
+//     }
 
-    fprintf(stderr, "successfully mount using kernel 9p: %s", path);
+//     fprintf(stderr, "successfully mount using kernel 9p: %s", path);
 
-    return 0;
-}
+//     return 0;
+// }
 
 static void handle_mount(msg_id_t msg_id) {
     bool     done = false;
@@ -968,8 +968,8 @@ static void handle_mount(msg_id_t msg_id) {
         goto out;
     }
 
-    // ret = do_mount_p9(tag, path);
-    ret = do_mount(tag, path);
+    ret = do_mount_p9(tag, path);
+    // ret = do_mount(tag, path);
     // TODO: rm path, if mount fails?
 
 out:
@@ -1478,7 +1478,7 @@ int main(void) {
 
     g_cmds_fd = CHECK(open(VPORT_CMD, O_RDWR | O_CLOEXEC));
     g_net_fd  = CHECK(open(VPORT_NET, O_RDWR | O_CLOEXEC));
-//    g_p9_fd   = CHECK(open(VPORT_P9, O_RDWR | O_CLOEXEC));
+    g_p9_fd   = CHECK(open(VPORT_P9, O_RDWR | O_CLOEXEC));
 
     CHECK(mkdir("/mnt", S_IRWXU));
     CHECK(mkdir("/mnt/image", S_IRWXU));
@@ -1530,7 +1530,7 @@ int main(void) {
     setup_sigfd();
 
     // make sure to create threads after blocking signals, not before. Otherwise signals are blocked.
-//    CHECK(initialize_p9_communication());
+   CHECK(initialize_p9_communication());
 
     main_loop();
     stop_network();
