@@ -265,7 +265,7 @@ uint32_t do_mount_p9(const char* tag, char* path) {
     }
 
     TRY_OR_GOTO(
-        snprintf(mount_cmd, CMD_SIZE, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L,msize=104857600", mount_socket_fd, mount_socket_fd),
+        snprintf(mount_cmd, CMD_SIZE, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L,msize=65536", mount_socket_fd, mount_socket_fd),
         error);
 
     TRY_OR_GOTO(mount(tag, path, "9p", 0, mount_cmd), error);

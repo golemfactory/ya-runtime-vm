@@ -187,6 +187,7 @@ int fwd(void *data) {
 
 end:
     io_uring_unregister_files(&ring);
+    io_uring_queue_exit(&ring);
     free(args->fds);
     free(args);
     if (buf) free(buf);

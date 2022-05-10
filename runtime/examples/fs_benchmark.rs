@@ -236,9 +236,9 @@ async fn test_parallel_write_big_chunk(
         .await
         .unwrap();
 
-        // run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls","-la", "/bin"])
-        //     .await
-        //     .unwrap();
+        run_process_with_output(&mut ga, &notifications, "/bin/df", &["df","-h"])
+            .await
+            .unwrap();
     }
 
     let mut tasks = vec![];
@@ -307,7 +307,7 @@ async fn main() -> io::Result<()> {
 
     let mount_args = Arc::new(mount_args);
 
-    let (_p9streams, _muxer_handle) = vm.start_9p_service(&temp_path, &mount_args).await.unwrap();
+    // let (_p9streams, _muxer_handle) = vm.start_9p_service(&temp_path, &mount_args).await.unwrap();
 
     let ns = notifications.clone();
     let ga_mutex = GuestAgent::connected(vm.get_manager_sock(), 10, move |n, _g| {
