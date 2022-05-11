@@ -22,6 +22,7 @@ use tokio::{
     process::{Child, Command},
     sync,
 };
+use ya_runtime_sdk::runtime_api::server;
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
 
 const IDENTIFICATION: AtomicU16 = AtomicU16::new(42);
@@ -391,18 +392,19 @@ async fn main() -> anyhow::Result<()> {
     handle_net(temp_path.join("net.sock")).await?;
 
     {
+        let iface = server::NetworkInterface::Vpn as u16;
         let hosts = [("host0", "127.0.0.2"), ("host1", "127.0.0.3")]
             .iter()
             .map(|(h, i)| (h.to_string(), i.to_string()))
             .collect::<Vec<_>>();
 
         let mut ga = ga_mutex.lock().await;
-        match ga.add_address("10.0.0.1", "255.255.255.0").await? {
+        match ga.add_address("10.0.0.1", "255.255.255.0", iface).await? {
             Ok(_) | Err(0) => (),
             Err(code) => anyhow::bail!("Unable to set address {}", code),
         }
         match ga
-            .create_network("10.0.0.0", "255.255.255.0", "10.0.0.1")
+            .create_network("10.0.0.0", "255.255.255.0", "10.0.0.1", iface)
             .await?
         {
             Ok(_) | Err(0) => (),

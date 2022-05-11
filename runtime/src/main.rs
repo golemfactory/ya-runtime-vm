@@ -74,7 +74,8 @@ enum NetworkEndpoint {
 #[derive(Default)]
 struct RuntimeData {
     runtime: Option<process::Child>,
-    network: Option<NetworkEndpoint>,
+    vpn: Option<NetworkEndpoint>,
+    inet: Option<NetworkEndpoint>,
     deployment: Option<Deployment>,
     ga: Option<Arc<Mutex<GuestAgent>>>,
 }
@@ -182,7 +183,7 @@ impl ya_runtime_sdk::Runtime for Runtime {
 }
 
 async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<Option<serialize::json::Value>> {
-    let workdir = normalize_path(&workdir).await?;
+    let work_dir = normalize_path(&workdir).await?;
     let package_path = normalize_path(&cli.task_package.unwrap()).await?;
     let package_file = fs::File::open(&package_path).await?;
 
@@ -196,13 +197,14 @@ async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<Option<serialize::
     .expect("Error reading package metadata");
 
     for vol in &deployment.volumes {
-        fs::create_dir_all(workdir.join(&vol.name)).await?;
+        fs::create_dir_all(work_dir.join(&vol.name)).await?;
     }
+
     fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
-        .open(workdir.join(FILE_DEPLOYMENT))
+        .open(work_dir.join(FILE_DEPLOYMENT))
         .await?
         .write_all(serde_json::to_string(&deployment)?.as_bytes())
         .await?;
@@ -220,16 +222,17 @@ async fn start(
     emitter: EventEmitter,
 ) -> anyhow::Result<Option<serialize::json::Value>> {
     let runtime_dir = runtime_dir().expect("Unable to resolve current directory");
-
+    let temp_dir = std::env::temp_dir();
     let uid = uuid::Uuid::new_v4().to_simple().to_string();
-    let manager_sock = std::env::temp_dir().join(format!("{}.sock", uid));
-    let net_sock = std::env::temp_dir().join(format!("{}_net.sock", uid));
+
+    let manager_sock = temp_dir.join(format!("{}.sock", uid));
+    let net_sock = temp_dir.join(format!("{}_net.sock", uid));
+    let inet_sock = temp_dir.join(format!("{}_inet.sock", uid));
 
     let mut data = runtime_data.lock().await;
     let deployment = data.deployment().expect("Missing deployment data");
 
     let chardev = |n, p: &PathBuf| format!("socket,path={},server,nowait,id={}", p.display(), n);
-
     let mut cmd = process::Command::new(runtime_dir.join(FILE_RUNTIME));
     cmd.current_dir(&runtime_dir);
     cmd.args(&[
@@ -259,10 +262,14 @@ async fn start(
         chardev("manager_cdev", &manager_sock).as_str(),
         "-chardev",
         chardev("net_cdev", &net_sock).as_str(),
+        "-chardev",
+        chardev("inet_cdev", &inet_sock).as_str(),
         "-device",
         "virtserialport,chardev=manager_cdev,name=manager_port",
         "-device",
         "virtserialport,chardev=net_cdev,name=net_port",
+        "-device",
+        "virtserialport,chardev=inet_cdev,name=inet_port",
         "-drive",
         format!(
             "file={},cache=unsafe,readonly=on,format=raw,if=virtio",
@@ -310,7 +317,8 @@ async fn start(
     }
 
     data.runtime.replace(runtime);
-    data.network.replace(NetworkEndpoint::Socket(net_sock));
+    data.vpn.replace(NetworkEndpoint::Socket(net_sock));
+    data.inet.replace(NetworkEndpoint::Socket(inet_sock));
     data.ga.replace(ga);
 
     Ok(None)
@@ -404,7 +412,7 @@ fn offer() -> anyhow::Result<Option<serde_json::Value>> {
             "golem.inf.cpu.brand": cpu.model.brand,
             "golem.inf.cpu.model": model,
             "golem.inf.cpu.capabilities": cpu.capabilities,
-            "golem.runtime.capabilities": ["vpn"]
+            "golem.runtime.capabilities": ["inet", "vpn"]
         },
         "constraints": ""
     })))
@@ -418,8 +426,9 @@ async fn test() -> anyhow::Result<()> {
             .join(FILE_TEST_IMAGE)
             .canonicalize()
             .expect("Test image not found");
-
         println!("Task package: {}", task_package.display());
+
+        let work_dir = std::env::temp_dir();
         let runtime_data = RuntimeData {
             deployment: Some(Deployment {
                 cpu_cores: 1,
@@ -434,13 +443,9 @@ async fn test() -> anyhow::Result<()> {
         };
 
         println!("Starting runtime");
-        start(
-            std::env::temp_dir(),
-            runtime.data.clone(),
-            EventEmitter::spawn(e),
-        )
-        .await
-        .expect("Failed to start runtime");
+        start(work_dir, runtime.data.clone(), EventEmitter::spawn(e))
+            .await
+            .expect("Failed to start runtime");
 
         println!("Stopping runtime");
         stop(runtime.data.clone())
@@ -464,28 +469,47 @@ async fn join_network(
 ) -> Result<String, server::ErrorResponse> {
     let hosts = join.hosts;
     let networks = join.networks;
-    let data = runtime_data.lock().await;
+    let iface = match server::NetworkInterface::from_i32(join.interface) {
+        Some(iface) => iface,
+        _ => {
+            return Err(server::ErrorResponse::msg(format!(
+                "invalid network interface type: {:?}",
+                join.interface
+            )));
+        }
+    };
 
-    let endpoint = data
-        .network
-        .as_ref()
-        .map(|network| match network {
-            NetworkEndpoint::Socket(path) => path.display().to_string(),
-        })
-        .expect("No network endpoint");
+    let data = runtime_data.lock().await;
+    let endpoint = match iface {
+        server::NetworkInterface::Vpn => data.vpn.as_ref(),
+        server::NetworkInterface::Inet => data.inet.as_ref(),
+    }
+    .map(|network| match network {
+        NetworkEndpoint::Socket(path) => path.display().to_string(),
+    })
+    .expect("No network endpoint");
 
     let mutex = data.ga().unwrap();
     let mut ga = mutex.lock().await;
     convert_result(ga.add_hosts(hosts.iter()).await, "Updating network hosts")?;
 
     for net in networks {
+        let (net_addr, net_mask) = match iface {
+            server::NetworkInterface::Vpn => (net.addr, net.mask.clone()),
+            server::NetworkInterface::Inet => (String::new(), String::new()),
+        };
+
         convert_result(
-            ga.add_address(&net.if_addr, &net.mask).await,
+            ga.add_address(&net.if_addr, &net.mask, iface as u16).await,
             &format!("Adding interface address {} {}", net.if_addr, net.gateway),
         )?;
         convert_result(
-            ga.create_network(&net.addr, &net.mask, &net.gateway).await,
-            &format!("Creating network {} {}", net.addr, net.gateway),
+            ga.create_network(&net_addr, &net_mask, &net.gateway, iface as u16)
+                .await,
+            &format!(
+                "Creating route via {} for {} ({:?})",
+                net.gateway, net_addr, iface
+            ),
         )?;
     }
 

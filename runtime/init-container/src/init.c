@@ -45,6 +45,7 @@
 
 #define VPORT_CMD "/dev/vport0p1"
 #define VPORT_NET "/dev/vport0p2"
+#define VPORT_INET "/dev/vport0p3"
 
 #define MODE_RW_UGO (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)
 #define OUTPUT_PATH_PREFIX "/var/tmp/guest_agent_private/fds"
@@ -77,13 +78,16 @@ struct epoll_fd_desc {
 extern char** environ;
 
 static int g_cmds_fd = -1;
-static int g_net_fd = -1;
 static int g_sig_fd = -1;
 static int g_epoll_fd = -1;
-static int g_tap_fd = -1;
+static int g_net_fd = -1;
+static int g_net_tap_fd = -1;
+static int g_inet_fd = -1;
+static int g_inet_tap_fd = -1;
 
 static char g_lo_name[16];
-static char g_tap_name[16];
+static char g_net_tap_name[16];
+static char g_inet_tap_name[16];
 
 static struct process_desc* g_entrypoint_desc = NULL;
 
@@ -91,6 +95,7 @@ static noreturn void die(void) {
     sync();
     (void)close(g_epoll_fd);
     (void)close(g_sig_fd);
+    (void)close(g_inet_fd);
     (void)close(g_net_fd);
     (void)close(g_cmds_fd);
 
@@ -357,6 +362,24 @@ static int add_network_hosts(char *entries[][2], int n) {
     return 0;
 }
 
+static int set_network_ns(char *entries[], int n) {
+    FILE *f;
+    if ((f = fopen("/etc/resolv.conf", "w")) == 0) {
+        return -1;
+    }
+
+    fprintf(f, "search example.com\n");
+    for (int i = 0; i < n; ++i) {
+        fprintf(f, "nameserver %s\n", entries[i]);
+    }
+
+    fflush(f);
+    fsync(fileno(f));
+    fclose(f);
+
+    return 0;
+}
+
 static void setup_network(void) {
     char *hosts[][2] = {
         {"127.0.0.1",   "localhost"},
@@ -366,19 +389,32 @@ static void setup_network(void) {
         {"ff02::1",     "ip6-allnodes"},
         {"ff02::2",     "ip6-allrouters"},
     };
+    char *nameservers[] = {
+        "1.1.1.1",
+        "8.8.8.8",
+    };
 
     strcpy(g_lo_name, "lo");
-    strcpy(g_tap_name, "golem%d");
+    strcpy(g_net_tap_name, "vpn%d");
+    strcpy(g_inet_tap_name, "inet%d");
+
+    CHECK(add_network_hosts(hosts, sizeof(hosts) / sizeof(*hosts)));
+    CHECK(set_network_ns(nameservers, sizeof(nameservers) / sizeof(*nameservers)));
 
     CHECK(net_create_lo(g_lo_name));
-    g_tap_fd = CHECK(net_create_tap(g_tap_name));
-    CHECK(net_if_mtu(g_tap_name, MTU));
-
     CHECK(net_if_addr(g_lo_name, "127.0.0.1", "255.255.255.0"));
-    CHECK(add_network_hosts(hosts, sizeof(hosts) / sizeof(*hosts)));
 
-    CHECK(fwd_start(g_tap_fd, g_net_fd, MTU, false, true));
-    CHECK(fwd_start(g_net_fd, g_tap_fd, MTU, true, false));
+    g_net_tap_fd = CHECK(net_create_tap(g_net_tap_name));
+    CHECK(net_if_mtu(g_net_tap_name, MTU));
+
+    g_inet_tap_fd = CHECK(net_create_tap(g_inet_tap_name));
+    CHECK(net_if_mtu(g_inet_tap_name, MTU));
+
+    CHECK(fwd_start(g_net_tap_fd, g_net_fd, MTU, false, true));
+    CHECK(fwd_start(g_net_fd, g_net_tap_fd, MTU, true, false));
+
+    CHECK(fwd_start(g_inet_tap_fd, g_inet_fd, MTU, false, true));
+    CHECK(fwd_start(g_inet_fd, g_inet_tap_fd, MTU, true, false));
 }
 
 static void stop_network(void) {
@@ -1246,6 +1282,9 @@ static void handle_net_ctl(msg_id_t msg_id) {
     char* mask = NULL;
     char* gateway = NULL;
     char* if_addr = NULL;
+    uint16_t if_kind = 0;
+
+    char* if_name = NULL;
     int ret = 0;
 
     while (!done) {
@@ -1271,6 +1310,9 @@ static void handle_net_ctl(msg_id_t msg_id) {
             case SUB_MSG_NET_CTL_IF_ADDR:
                 CHECK(recv_bytes(g_cmds_fd, &if_addr, NULL, /*is_cstring=*/true));
                 break;
+            case SUB_MSG_NET_CTL_IF:
+                CHECK(recv_u16(g_cmds_fd, &if_kind));
+                break;
             default:
                 fprintf(stderr, "Unknown MSG_NET_CTL subtype: %hhu\n",
                         subtype);
@@ -1278,9 +1320,22 @@ static void handle_net_ctl(msg_id_t msg_id) {
         }
     }
 
+    if (addr && (strlen(addr) == 0)) addr = NULL;
+    if (mask && (strlen(mask) == 0)) mask = NULL;
+
+    switch (if_kind) {
+        case SUB_MSG_NET_IF_INET:
+            if_name = g_inet_tap_name;
+            break;
+        default:
+            if_name = g_net_tap_name;
+    }
+
     if (if_addr) {
+        fprintf(stderr, "Configuring '%s' with IP address: %s\n", if_name, if_addr);
+
         if (strstr(if_addr, ":")) {
-            if ((ret = net_if_addr6(g_tap_name, if_addr)) < 0) {
+            if ((ret = net_if_addr6(if_name, if_addr)) < 0) {
                 perror("Error setting IPv6 address");
                 goto out_err;
             }
@@ -1289,26 +1344,23 @@ static void handle_net_ctl(msg_id_t msg_id) {
                 ret = EINVAL;
                 goto out_err;
             }
-            if ((ret = net_if_addr(g_tap_name, if_addr, mask)) < 0) {
+            if ((ret = net_if_addr(if_name, if_addr, mask)) < 0) {
                 perror("Error setting IPv4 address");
                 goto out_err;
             }
         }
     }
 
-    if (addr || gateway) {
-        if (!addr || !gateway) {
-            ret = EINVAL;
-            goto out_err;
-        }
+    if (gateway) {
+        fprintf(stderr, "Configuring '%s' with gateway: %s\n", if_name, gateway);
 
-        if (strstr(addr, ":")) {
-            if ((ret = net_route6(g_tap_name, addr, gateway)) < 0) {
+        if (strstr(gateway, ":")) {
+            if ((ret = net_route6(if_name, addr, gateway)) < 0) {
                 perror("Error setting IPv6 route");
                 goto out_err;
             }
         } else {
-            if ((ret = net_route(g_tap_name, addr, mask, gateway)) < 0) {
+            if ((ret = net_route(if_name, addr, mask, gateway)) < 0) {
                 perror("Error setting IPv4 route");
                 goto out_err;
             }
@@ -1319,6 +1371,7 @@ out_err:
     if (addr) free(addr);
     if (mask) free(mask);
     if (gateway) free(gateway);
+    if (if_addr) free(if_addr);
 
     ret == 0
         ? send_response_ok(msg_id)
@@ -1543,6 +1596,7 @@ int main(void) {
 
     g_cmds_fd = CHECK(open(VPORT_CMD, O_RDWR | O_CLOEXEC));
     g_net_fd = CHECK(open(VPORT_NET, O_RDWR | O_CLOEXEC));
+    g_inet_fd = CHECK(open(VPORT_INET, O_RDWR | O_CLOEXEC));
 
     CHECK(mkdir("/mnt", S_IRWXU));
     CHECK(mkdir("/mnt/image", S_IRWXU));

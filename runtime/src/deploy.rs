@@ -60,7 +60,7 @@ impl Deployment {
             cpu_cores,
             mem_mib,
             task_package,
-            user: parse_user(config.user.as_ref())?,
+            user: parse_user(config.user.as_ref()).unwrap_or((0, 0)),
             volumes: parse_volumes(config.volumes.as_ref()),
             config,
         })
@@ -76,11 +76,9 @@ impl Deployment {
 }
 
 fn parse_user(user: Option<&String>) -> anyhow::Result<(u32, u32)> {
-    let user = user.map(|s| s.trim()).unwrap_or("");
-    if user.is_empty() {
-        return Ok((0, 0));
-    }
-
+    let user = user
+        .map(|s| s.trim())
+        .ok_or_else(|| anyhow::anyhow!("User field missing"))?;
     let mut split = user.splitn(2, ":");
     let uid: u32 = split
         .next()
