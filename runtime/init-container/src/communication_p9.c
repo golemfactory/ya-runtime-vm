@@ -66,6 +66,9 @@ static pthread_t g_p9_tunnel_thread_sender;
 
 #if USE_URING == 1
 
+// TODO: idea of using chains for copy fds, that's what exactly happens here
+// https://blogs.oracle.com/linux/post/an-introduction-to-the-io-uring-asynchronous-io-framework
+
 static void write_on_ring(struct io_uring* ring, char* buffer, uint32_t size, int fd) {
     struct io_uring_sqe* sqe;
     struct io_uring_cqe* cqe;
@@ -86,6 +89,7 @@ static void write_on_ring(struct io_uring* ring, char* buffer, uint32_t size, in
 
         io_uring_prep_write(sqe, fd, buffer + wo, size - wo, 0);
         sqe->user_data = ((unsigned long long )0xdeadbeef) << 32 | cnt++;
+        sqe->flags |= IOSQE_FIXED_FILE;
 
         fprintf(stderr, "submit\n");
         io_uring_submit(ring);
@@ -129,7 +133,7 @@ static void handle_data_on_sock(struct io_uring* ring, char* buffer, uint32_t bu
     //     goto error;
     // }
 
-    write_on_ring(ring, msg, packet_size, g_p9_socket_fds[channel][1]);
+    write_on_ring(ring, msg, packet_size, channel);
 
 // error:;
 }
@@ -144,13 +148,14 @@ void handle_data_on_channel(struct io_uring* ring, uint8_t channel, char* buffer
     ((uint16_t*)(buf + 1))[0] = bytes_read_to_send;
 
     memcpy(buf + 3, buffer, buffer_size);
-    write_on_ring(ring, buf, buffer_size + 3, g_p9_fd);
+    write_on_ring(ring, buf, buffer_size + 3, MAX_P9_VOLUMES);
     free(buf);
 
     // TRY_OR_GOTO(write_exact(g_p9_fd, &channel, 1), error);
     // TRY_OR_GOTO(write_exact(g_p9_fd, &bytes_read_to_send, sizeof(bytes_read_to_send)), error);
     // TRY_OR_GOTO(write_exact(g_p9_fd, buffer, buffer_size), error);
 
+    // TODO: that could be a chain
     // write_on_ring(ring, (char*)&channel, 1, g_p9_fd);
     // write_on_ring(ring, (char*)&bytes_read_to_send, sizeof(bytes_read_to_send), g_p9_fd);
     // write_on_ring(ring, buffer, buffer_size, g_p9_fd);
@@ -168,7 +173,7 @@ static void* poll_9p_messages(void* data) {
     char* buffer = NULL;
     // TODO: read as much data as possible parse packets locally
     struct io_uring ring_for_read;
-    // struct io_uring ring_for_write;
+    struct io_uring ring_for_write;
 
     const int FDS_SIZE = MAX_P9_VOLUMES + 1;
     int fds[FDS_SIZE];
@@ -177,7 +182,7 @@ static void* poll_9p_messages(void* data) {
     memset(armed_events, 0, FDS_SIZE);
 
     TRY_OR_GOTO(io_uring_queue_init(QUEUE_DEPTH, &ring_for_read, 0), error);
-    // TRY_OR_GOTO(io_uring_queue_init(QUEUE_DEPTH, &ring_for_write, 0), error);
+    TRY_OR_GOTO(io_uring_queue_init(QUEUE_DEPTH, &ring_for_write, 0), error);
 
 
     for (int i = 0; i < MAX_P9_VOLUMES; i++) {
@@ -189,7 +194,7 @@ static void* poll_9p_messages(void* data) {
     fprintf(stderr, "POLL: P9 register files\n");
     TRY_OR_GOTO(io_uring_register_files(&ring_for_read, fds, FDS_SIZE), error);
     // TODO: hopefully fds can be shared among rings
-    // TRY_OR_GOTO(io_uring_register_files(&ring_for_write, fds, FDS_SIZE), error);
+    TRY_OR_GOTO(io_uring_register_files(&ring_for_write, fds, FDS_SIZE), error);
 
 
     // Alloc buffer for each fd
@@ -214,8 +219,9 @@ static void* poll_9p_messages(void* data) {
                     goto error;
                 }
 
-                io_uring_prep_read(sqe, fds[i], buffer + i * MAX_PACKET_SIZE, MAX_PACKET_SIZE, 0);
+                io_uring_prep_read(sqe, i, buffer + i * MAX_PACKET_SIZE, MAX_PACKET_SIZE, 0);
                 sqe->user_data = ((unsigned long long)0xc0fee) << 32 | i;
+                sqe->flags |= IOSQE_FIXED_FILE;
 
                 armed_events[i] = 1;
                 new_events++;
@@ -248,9 +254,9 @@ static void* poll_9p_messages(void* data) {
         io_uring_cqe_seen(&ring_for_read, cqe);
 
         if (channel < MAX_P9_VOLUMES) {
-            handle_data_on_channel(&ring_for_read, channel, buf, bytes_read);
+            handle_data_on_channel(&ring_for_write, channel, buf, bytes_read);
         } else {
-            handle_data_on_sock(&ring_for_read, buf, bytes_read);
+            handle_data_on_sock(&ring_for_write, buf, bytes_read);
         }
 
         // Mark this fd event was consumed, and needs another seq to be created
