@@ -230,7 +230,7 @@ async fn test_parallel_write_big_chunk(
                 "if=/dev/zero",
 
                 "of=/mnt/mnt1/tag0/big_file",
-                "bs=1048576",
+                "bs=1024",
                 "count=10",
             ],
         )
