@@ -5,7 +5,11 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
-use tokio::{net::TcpStream, process::Command, time::sleep};
+use tokio::{
+    net::{TcpStream, UnixStream},
+    process::Command,
+    time::sleep,
+};
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 use ya_vm_file_server::InprocServer;
 
@@ -47,10 +51,10 @@ impl VMBuilder {
     pub fn build(self) -> VM {
         let manager_sock;
         let net_sock;
-        // TODO: that doesn't need to be a tcp connection under unix
-        let p9_sock = "127.0.0.1:9005";
+        let p9_sock;
 
         let chardev;
+        let chardev_9p;
 
         #[cfg(unix)]
         {
@@ -60,6 +64,19 @@ impl VMBuilder {
             let uid = uuid::Uuid::new_v4().to_simple().to_string();
             manager_sock = std::env::temp_dir().join(format!("{}.sock", uid));
             net_sock = std::env::temp_dir().join(format!("{}_net.sock", uid));
+            p9_sock = std::env::temp_dir().join(format!("{}_p9.sock", uid));
+            // p9_sock = "127.0.0.1:9005";
+
+            chardev_9p = |n, p: &PathBuf| format!("socket,path={},server,id={}", p.display(), n);
+            // chardev_9p = |n, p: &str| {
+            //     let addr: SocketAddr = p.parse().unwrap();
+            //     format!(
+            //         "socket,host={},port={},server,id={}",
+            //         addr.ip(),
+            //         addr.port(),
+            //         n
+            //     )
+            // };
         }
 
         #[cfg(windows)]
@@ -76,17 +93,19 @@ impl VMBuilder {
 
             manager_sock = "127.0.0.1:9003";
             net_sock = "127.0.0.1:9004";
+            p9_sock = "127.0.0.1:9005";
+
+            chardev_9p = |n, p: &str| {
+                let addr: SocketAddr = p.parse().unwrap();
+                format!(
+                    "socket,host={},port={},server,id={}",
+                    addr.ip(),
+                    addr.port(),
+                    n
+                )
+            };
         }
 
-        let chardev_9p = |n, p: &str| {
-            let addr: SocketAddr = p.parse().unwrap();
-            format!(
-                "socket,host={},port={},server,id={}",
-                addr.ip(),
-                addr.port(),
-                n
-            )
-        };
         let tmp0 = format!("{}M", self.mem_mib);
         let tmp1 = format!(
             "file={},cache=unsafe,readonly=on,format=raw,if=virtio",
@@ -162,7 +181,9 @@ impl VMBuilder {
         return VM {
             manager_sock: manager_sock.display().to_string(),
             net_sock: net_sock.display().to_string(),
-            p9_sock: p9_sock.to_string(),
+            p9_sock: p9_sock.display().to_string(),
+            // p9_sock: p9_sock.to_string(),
+
             args,
         };
     }
@@ -203,6 +224,7 @@ impl VM {
         cmd
     }
 
+    // #[cfg(windows)]
     async fn connect_to_9p_endpoint(&self, tries: usize) -> anyhow::Result<TcpStream> {
         log::debug!("Connect to the 9P VM endpoint...");
 
@@ -225,6 +247,30 @@ impl VM {
         ))
     }
 
+    // TODO: merge both methods to one?
+    #[cfg(unix)]
+    async fn connect_to_9p_socket_endpoint(&self, tries: usize) -> anyhow::Result<UnixStream> {
+        log::debug!("Connect to the 9P socket VM endpoint...");
+
+        for _ in 0..tries {
+            match UnixStream::connect(self.get_9p_sock()).await {
+                Ok(stream) => {
+                    log::debug!("Connected to the 9P socket VM endpoint");
+                    return Ok(stream);
+                }
+                Err(e) => {
+                    log::debug!("Failed to connect to 9P socket VM endpoint: {e}");
+                    // The VM is not ready yet, try again
+                    sleep(Duration::from_secs(1)).await;
+                }
+            };
+        }
+
+        Err(anyhow!(
+            "Failed to connect to the 9P VM endpoint after #{tries} tries"
+        ))
+    }
+
     /// Spawns tasks handling 9p communication for given mount points
     pub async fn start_9p_service(
         &self,
@@ -233,7 +279,16 @@ impl VM {
     ) -> anyhow::Result<(Vec<InprocServer>, DemuxSocketHandle)> {
         log::debug!("Connecting to the 9P VM endpoint...");
 
-        let vmp9stream = self.connect_to_9p_endpoint(10).await?;
+        let vmp9stream;
+
+        // #[cfg(windows)]
+        {
+            // vmp9stream = self.connect_to_9p_endpoint(10).await?;
+        }
+        // #[cfg(unix)]
+        {
+            vmp9stream = self.connect_to_9p_socket_endpoint(10).await?;
+        }
 
         log::debug!("Spawn 9P inproc servers...");
 
@@ -263,7 +318,6 @@ impl VM {
 
         let demux_socket_handle = start_demux_communication(vmp9stream, p9streams)?;
 
-        // start_demux_communication(vm_stream, p9_streams);
         Ok((runtime_9ps, demux_socket_handle))
     }
 }

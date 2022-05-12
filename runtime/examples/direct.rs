@@ -1,5 +1,6 @@
 use futures::FutureExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use std::{
     env,
     io::{self, prelude::*},
@@ -174,6 +175,8 @@ async fn main() -> io::Result<()> {
 
     test_write(&mut ga, &notifications).await?;
 
+    // test_indirect(&mut ga, &notifications).await?;
+
     test_start_and_kill(&mut ga, &notifications).await?;
 
     test_big_write(&mut ga, &notifications).await?;
@@ -190,6 +193,10 @@ async fn main() -> io::Result<()> {
     /* VM should quit now. */
     let e = child.wait().await.expect("failed to wait on child");
     println!("{:?}", e);
+
+    println!("inner path: {}", inner_path.as_os_str().to_string_lossy());
+
+    // tokio::time::sleep(Duration::from_secs(30)).await;
 
     Ok(())
 }
