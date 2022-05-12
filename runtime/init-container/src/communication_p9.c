@@ -89,7 +89,6 @@ static void write_on_ring(struct io_uring* ring, char* buffer, uint32_t size, in
 
         io_uring_prep_write(sqe, fd, buffer + wo, size - wo, 0);
         sqe->user_data = ((unsigned long long )0xdeadbeef) << 32 | cnt++;
-        sqe->flags |= IOSQE_FIXED_FILE;
 
         fprintf(stderr, "submit\n");
         io_uring_submit(ring);
@@ -105,6 +104,7 @@ static void write_on_ring(struct io_uring* ring, char* buffer, uint32_t size, in
         fprintf(stderr, "$$$ write on fd: %d, bytes: %d user data 0x%llX\n", fd, wc, cqe->user_data);
 
         io_uring_cqe_seen(ring, cqe);
+
         if (wc < 0) {
             fprintf(stderr, "write failed!\n");
             goto error;
@@ -113,10 +113,7 @@ static void write_on_ring(struct io_uring* ring, char* buffer, uint32_t size, in
         fprintf(stderr, "wo %ld, size %d\n", wo, size);
     }
 
-error:
-    if (cqe) {
-        io_uring_cqe_seen(ring, cqe);
-    }
+error:;
 }
 
 static void handle_data_on_sock(struct io_uring* ring, char* buffer, uint32_t buffer_size) {
@@ -133,7 +130,7 @@ static void handle_data_on_sock(struct io_uring* ring, char* buffer, uint32_t bu
     //     goto error;
     // }
 
-    write_on_ring(ring, msg, packet_size, channel);
+    write_on_ring(ring, msg, packet_size, g_p9_socket_fds[channel][1]);
 
 // error:;
 }
@@ -148,7 +145,7 @@ void handle_data_on_channel(struct io_uring* ring, uint8_t channel, char* buffer
     ((uint16_t*)(buf + 1))[0] = bytes_read_to_send;
 
     memcpy(buf + 3, buffer, buffer_size);
-    write_on_ring(ring, buf, buffer_size + 3, MAX_P9_VOLUMES);
+    write_on_ring(ring, buf, buffer_size + 3, g_p9_fd);
     free(buf);
 
     // TRY_OR_GOTO(write_exact(g_p9_fd, &channel, 1), error);
@@ -167,7 +164,7 @@ void handle_data_on_channel(struct io_uring* ring, uint8_t channel, char* buffer
 static void* poll_9p_messages(void* data) {
     (void)data;
 // TODO: find good value
-#define QUEUE_DEPTH MAX_P9_VOLUMES + 1
+#define QUEUE_DEPTH MAX_P9_VOLUMES*2 + 1
     fprintf(stderr, "POLL: P9 INIT IO_URING\n");
 
     char* buffer = NULL;
@@ -187,14 +184,17 @@ static void* poll_9p_messages(void* data) {
 
     for (int i = 0; i < MAX_P9_VOLUMES; i++) {
         fds[i] = g_p9_socket_fds[i][1];
+        fprintf(stderr, "channel %d -> fd %d\n", i, fds[i]);
     }
 
     fds[MAX_P9_VOLUMES] = g_p9_fd;
+    fprintf(stderr, "channel %d -> fd %d\n", MAX_P9_VOLUMES, fds[MAX_P9_VOLUMES]);
 
-    fprintf(stderr, "POLL: P9 register files\n");
-    TRY_OR_GOTO(io_uring_register_files(&ring_for_read, fds, FDS_SIZE), error);
-    // TODO: hopefully fds can be shared among rings
-    TRY_OR_GOTO(io_uring_register_files(&ring_for_write, fds, FDS_SIZE), error);
+
+    // fprintf(stderr, "POLL: P9 register files\n");
+    // TRY_OR_GOTO(io_uring_register_files(&ring_for_read, fds, FDS_SIZE), error);
+    // // TODO: hopefully fds can be shared among rings
+    // TRY_OR_GOTO(io_uring_register_files(&ring_for_write, fds, FDS_SIZE), error);
 
 
     // Alloc buffer for each fd
@@ -219,9 +219,8 @@ static void* poll_9p_messages(void* data) {
                     goto error;
                 }
 
-                io_uring_prep_read(sqe, i, buffer + i * MAX_PACKET_SIZE, MAX_PACKET_SIZE, 0);
+                io_uring_prep_read(sqe, fds[i], buffer + i * MAX_PACKET_SIZE, MAX_PACKET_SIZE, 0);
                 sqe->user_data = ((unsigned long long)0xc0fee) << 32 | i;
-                sqe->flags |= IOSQE_FIXED_FILE;
 
                 armed_events[i] = 1;
                 new_events++;
