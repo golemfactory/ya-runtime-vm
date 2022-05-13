@@ -32,7 +32,7 @@
 
 #define USE_URING 1
 #define MAX_P9_VOLUMES (16)
-#define MAX_PACKET_SIZE (65536 * 2 + 3)
+#define MAX_PACKET_SIZE (65536 + 3)
 // #define MAX_PACKET_SIZE (16384)
 
 int g_p9_fd = -1;
@@ -41,161 +41,67 @@ static int g_p9_socket_fds[MAX_P9_VOLUMES][2];
 
 static pthread_t g_p9_tunnel_thread_sender;
 
-// static int write_exact(int fd, const void* buf, size_t size) {
-//     int bytes_written = 0;
-//     while (size) {
-//         ssize_t ret = write(fd, buf, size);
-//         if (ret == 0) {
-//             puts("written: WAITING FOR HOST (2) ...");
-//             sleep(1);
-//             continue;
-//         }
-//         if (ret < 0) {
-//             if (errno == EINTR) {
-//                 continue;
-//             }
-//             /* `errno` should be set. */
-//             return -1;
-//         }
-//         bytes_written += ret;
-//         buf = (char*)buf + ret;
-//         size -= ret;
-//     }
-//     return bytes_written;
-// }
-
 #if USE_URING == 1
 
 // TODO: idea of using chains for copy fds, that's what exactly happens here
 // https://blogs.oracle.com/linux/post/an-introduction-to-the-io-uring-asynchronous-io-framework
 
-static void write_on_ring(struct io_uring* ring, char* buffer, uint32_t size, int fd) {
-    struct io_uring_sqe* sqe;
-    struct io_uring_cqe* cqe;
+// TODO: reorder fields
+struct metadata {
+    uint8_t channel;
+    int32_t link;
 
-    int ret = 0;
-    int wc = 0;
-    size_t wo = 0;
+    char* buffer;
+    uint8_t channel_to_write;
+    uint16_t bytes_to_write;
 
-    fprintf(stderr, "request to write %u bytes on fd %d\n", size, fd);
+    struct iovec io;
+};
 
-    static int cnt = 0;
+static void enqueue_channel_event(uint8_t channel, char* buffer, struct io_uring* ring, struct metadata* meta) {
+    meta->channel = channel;
+    meta->link = 0;
+    meta->buffer = buffer;
+    meta->io.iov_base = buffer + 3;
+    meta->io.iov_len = MAX_PACKET_SIZE;
 
-    while (wo < size) {
-        if (!(sqe = io_uring_get_sqe(ring))) {
-            fprintf(stderr, "Unable to get sqe!\n");
-            goto error;
-        }
+    // read from channel
+    struct io_uring_sqe* sqe = io_uring_get_sqe(ring);
 
-        io_uring_prep_write(sqe, fd, buffer + wo, size - wo, 0);
-        sqe->user_data = ((unsigned long long )0xdeadbeef) << 32 | cnt++;
+    io_uring_prep_readv(sqe, g_p9_socket_fds[channel][1], &meta->io, 1, 0);
 
-        fprintf(stderr, "submit\n");
-        io_uring_submit(ring);
-
-        fprintf(stderr, "wait\n");
-        if ((ret = io_uring_wait_cqe(ring, &cqe)) < 0) {
-            fprintf(stderr, "wait cqe failed!\n");
-
-            goto error;
-        }
-
-        wc = cqe->res;
-        fprintf(stderr, "$$$ write on fd: %d, bytes: %d user data 0x%llX\n", fd, wc, cqe->user_data);
-
-        io_uring_cqe_seen(ring, cqe);
-
-        if (wc < 0) {
-            fprintf(stderr, "write failed!\n");
-            goto error;
-        }
-        wo += wc;
-        fprintf(stderr, "wo %ld, size %d\n", wo, size);
-    }
-
-error:;
+    io_uring_sqe_set_data(sqe, meta);
 }
 
-static void handle_data_on_sock(struct io_uring* ring, char* buffer, uint32_t buffer_size) {
-    (void)buffer_size;
-    uint8_t channel = buffer[0];
+static void enqueue_socket_event(char* buffer, struct io_uring* ring, struct metadata* meta) {
+    meta->channel = MAX_P9_VOLUMES;
+    meta->link = 0;
+    meta->buffer = buffer;
+    meta->channel_to_write = -1;
+    meta->bytes_to_write = -1;
+    meta->io.iov_base = buffer;
+    meta->io.iov_len = MAX_PACKET_SIZE;
 
-    uint16_t packet_size = ((uint16_t*)(buffer + 1))[0];
+    // read from channel
+    struct io_uring_sqe* sqe = io_uring_get_sqe(ring);
+    io_uring_prep_readv(sqe, g_p9_fd, &meta->io, 1, 0);
 
-    char* msg = buffer + 3;
-
-    fprintf(stderr, "got response for channel %u, packet_size %u, buffer_size %u\n", channel, packet_size, buffer_size);
-    // if (write_exact(g_p9_socket_fds[channel][1], msg, packet_size) == -1) {
-    //     fprintf(stderr, "Error writing to g_p9_socket_fds\n");
-    //     goto error;
-    // }
-
-    write_on_ring(ring, msg, packet_size, g_p9_socket_fds[channel][1]);
-
-// error:;
-}
-
-void handle_data_on_channel(struct io_uring* ring, uint8_t channel, char* buffer, uint32_t buffer_size) {
-
-    char *buf = malloc(buffer_size + 3);
-
-    uint16_t bytes_read_to_send = (uint16_t)buffer_size;
-
-    buf[0] = channel;
-    ((uint16_t*)(buf + 1))[0] = bytes_read_to_send;
-
-    memcpy(buf + 3, buffer, buffer_size);
-    write_on_ring(ring, buf, buffer_size + 3, g_p9_fd);
-    free(buf);
-
-    // TRY_OR_GOTO(write_exact(g_p9_fd, &channel, 1), error);
-    // TRY_OR_GOTO(write_exact(g_p9_fd, &bytes_read_to_send, sizeof(bytes_read_to_send)), error);
-    // TRY_OR_GOTO(write_exact(g_p9_fd, buffer, buffer_size), error);
-
-    // TODO: that could be a chain
-    // write_on_ring(ring, (char*)&channel, 1, g_p9_fd);
-    // write_on_ring(ring, (char*)&bytes_read_to_send, sizeof(bytes_read_to_send), g_p9_fd);
-    // write_on_ring(ring, buffer, buffer_size, g_p9_fd);
-
-
-    // error:;
+    // sqe->user_data = ((unsigned long long)0xc0fe0) << 32 | i;
+    io_uring_sqe_set_data(sqe, meta);
 }
 
 static void* poll_9p_messages(void* data) {
     (void)data;
 // TODO: find good value
-#define QUEUE_DEPTH MAX_P9_VOLUMES*2 + 1
+#define QUEUE_DEPTH (MAX_P9_VOLUMES + 1) * 3
     fprintf(stderr, "POLL: P9 INIT IO_URING\n");
 
     char* buffer = NULL;
     // TODO: read as much data as possible parse packets locally
-    struct io_uring ring_for_read;
-    struct io_uring ring_for_write;
+    struct io_uring ring;
 
     const int FDS_SIZE = MAX_P9_VOLUMES + 1;
-    int fds[FDS_SIZE];
-
-    char armed_events[FDS_SIZE];
-    memset(armed_events, 0, FDS_SIZE);
-
-    TRY_OR_GOTO(io_uring_queue_init(QUEUE_DEPTH, &ring_for_read, 0), error);
-    TRY_OR_GOTO(io_uring_queue_init(QUEUE_DEPTH, &ring_for_write, 0), error);
-
-
-    for (int i = 0; i < MAX_P9_VOLUMES; i++) {
-        fds[i] = g_p9_socket_fds[i][1];
-        fprintf(stderr, "channel %d -> fd %d\n", i, fds[i]);
-    }
-
-    fds[MAX_P9_VOLUMES] = g_p9_fd;
-    fprintf(stderr, "channel %d -> fd %d\n", MAX_P9_VOLUMES, fds[MAX_P9_VOLUMES]);
-
-
-    // fprintf(stderr, "POLL: P9 register files\n");
-    // TRY_OR_GOTO(io_uring_register_files(&ring_for_read, fds, FDS_SIZE), error);
-    // // TODO: hopefully fds can be shared among rings
-    // TRY_OR_GOTO(io_uring_register_files(&ring_for_write, fds, FDS_SIZE), error);
-
+    TRY_OR_GOTO(io_uring_queue_init(QUEUE_DEPTH, &ring, 0), error);
 
     // Alloc buffer for each fd
     buffer = malloc(MAX_PACKET_SIZE * FDS_SIZE);
@@ -208,65 +114,115 @@ static void* poll_9p_messages(void* data) {
     struct io_uring_sqe* sqe;
     struct io_uring_cqe* cqe;
 
+    //////////////////
+    for (int i = 0; i < MAX_P9_VOLUMES; i++) {
+        fprintf(stderr, "register for %d\n", i);
+
+        // No event for that fd
+        struct metadata* meta = malloc(sizeof(struct metadata));
+        enqueue_channel_event(i, buffer + i * MAX_PACKET_SIZE, &ring, meta);
+    }
+
+    // read from gp9 -> write to sock
+    {
+        fprintf(stderr, "register for sock \n");
+        // No event for that fd
+        struct metadata* meta = malloc(sizeof(struct metadata));
+        enqueue_socket_event(buffer + MAX_P9_VOLUMES * MAX_PACKET_SIZE, &ring, meta);
+    }
+
+    io_uring_submit(&ring);
+
+    /////////////////////
+
     while (1) {
-        int new_events = 0;
-
-        for (int i = 0; i < FDS_SIZE; i++) {
-            if (armed_events[i] == 0) {
-                // No event for that fd
-                if (!(sqe = io_uring_get_sqe(&ring_for_read))) {
-                    fprintf(stderr, "POLL: P9 failed to allocate sqe!\n");
-                    goto error;
-                }
-
-                io_uring_prep_read(sqe, fds[i], buffer + i * MAX_PACKET_SIZE, MAX_PACKET_SIZE, 0);
-                sqe->user_data = ((unsigned long long)0xc0fee) << 32 | i;
-
-                armed_events[i] = 1;
-                new_events++;
-            }  // else event already in a buffer, no need to add another
-        }
-
-        // TODO: there should be no difference
-        if (new_events > 0) {
-            io_uring_submit(&ring_for_read);
-        }
-
-
         // TODO: consider: unsigned io_uring_peek_batch_cqe
-        TRY_OR_GOTO(io_uring_wait_cqe(&ring_for_read, &cqe), error);
+        TRY_OR_GOTO(io_uring_wait_cqe(&ring, &cqe), error);
 
+        struct metadata* meta = io_uring_cqe_get_data(cqe);
 
-        if (cqe->res <= 0) {
+        // TODO: sometimes res is == 0, why?
+        if (cqe->res < 0) {
             fprintf(stderr, "POLL: P9 cqe with data 0x%llX, returned error %d!\n", cqe->user_data, cqe->res);
-            // goto error;
-            continue;
+            fprintf(stderr, "got cqe for channel %d, link %d\n", meta->channel, meta->link);
+
+            goto error;
         }
 
-        int channel = cqe->user_data;
+#ifdef URING_TRACE
+        fprintf(stderr, "got cqe for channel %d, link %d result %d\n", meta->channel, meta->link, cqe->res);
+#endif
 
-        // cqe in user_data has info which fd has avaliable data, get that part of global buffer
-        // and pass it accordingly
-        char* buf = buffer + channel * MAX_PACKET_SIZE;
-        int bytes_read = cqe->res;
+        int new_event = 0;
 
-        io_uring_cqe_seen(&ring_for_read, cqe);
+        if (meta->channel < MAX_P9_VOLUMES) {
+            // got data from socketpair
+            if (meta->link == 0) {
+#ifdef URING_TRACE
+                fprintf(stderr, "read %d bytes\n", cqe->res);
+#endif
+                meta->buffer[0] = meta->channel;
 
-        if (channel < MAX_P9_VOLUMES) {
-            handle_data_on_channel(&ring_for_write, channel, buf, bytes_read);
+                ((uint16_t*)(meta->buffer + 1))[0] = cqe->res;
+                meta->link++;
+
+                // write preppended header
+                sqe = io_uring_get_sqe(&ring);
+
+                // TODO: handle if not all msg is written
+                io_uring_prep_write(sqe, g_p9_fd, meta->buffer, cqe->res + 3, 0);
+
+                io_uring_sqe_set_data(sqe, meta);
+
+                new_event++;
+            } else if (meta->link == 1) {
+                // requeue this event
+                enqueue_channel_event(meta->channel, meta->buffer, &ring, meta);
+                new_event++;
+            }
         } else {
-            handle_data_on_sock(&ring_for_write, buf, bytes_read);
+            if (meta->link == 0) {
+                uint8_t channel = meta->buffer[0];
+
+                uint16_t packet_size = ((uint16_t*)(meta->buffer + 1))[0];
+
+                char* msg = meta->buffer + 3;
+
+                sqe = io_uring_get_sqe(&ring);
+
+                io_uring_prep_write(sqe, g_p9_socket_fds[channel][1], msg, packet_size, 0);
+
+                meta->link++;
+                meta->channel_to_write = channel;
+                meta->bytes_to_write = packet_size;
+
+                io_uring_sqe_set_data(sqe, meta);
+
+                new_event++;
+
+            } else if (meta->link == 1) {
+                // TODO: handle if not all message is written,
+#ifdef URING_TRACE
+                fprintf(stderr, "written %d bytes of response (from %d) for channel %d\n", cqe->res,
+                        meta->bytes_to_write, meta->channel_to_write);
+#endif
+                enqueue_socket_event(meta->buffer, &ring, meta);
+                new_event++;
+            }
         }
 
-        // Mark this fd event was consumed, and needs another seq to be created
-        armed_events[channel] = 0;
+        io_uring_cqe_seen(&ring, cqe);
+
+        if (new_event > 0) {
+            io_uring_submit(&ring);
+        }
     }
 
 error:
     fprintf(stderr, "POLL: P9 thread is leaving!\n");
 
-    io_uring_unregister_files(&ring_for_read);
-    io_uring_queue_exit(&ring_for_read);
+    io_uring_unregister_files(&ring);
+    io_uring_queue_exit(&ring);
     free(buffer);
     return NULL;
 }
@@ -499,7 +455,7 @@ uint32_t do_mount_p9(const char* tag, char* path) {
         goto error;
     }
 
-    TRY_OR_GOTO(snprintf(mount_cmd, CMD_SIZE, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L,msize=65536",
+    TRY_OR_GOTO(snprintf(mount_cmd, CMD_SIZE, "trans=fd,rfdno=%d,wfdno=%d,debug=0xff,version=9p2000.L,msize=32765",
                          mount_socket_fd, mount_socket_fd),
                 error);
 

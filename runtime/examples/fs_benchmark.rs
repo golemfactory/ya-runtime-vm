@@ -228,15 +228,17 @@ async fn test_parallel_write_big_chunk(
                 "dd",
                 // TODO: /dev/random causes problems?
                 "if=/dev/zero",
-
                 "of=/mnt/mnt1/tag0/big_file",
-                "bs=1024",
+                "bs=1048576",
                 "count=10",
             ],
         )
         .await
         .unwrap();
 
+        run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-lh", &"/mnt/mnt1/tag0/"])
+            .await
+            .unwrap();
         // run_process_with_output(&mut ga, &notifications, "/bin/df", &["df","-h"])
         //     .await
         //     .unwrap();
@@ -249,9 +251,8 @@ async fn test_parallel_write_big_chunk(
         let notifications = notifications.clone();
 
         // let cmd = format!("A=\"A\"; for i in {{1..24}}; do A=\"${{A}}${{A}}\"; done; echo -ne $A >> {path}/big_chunk");
-        let cmd = format!("cat /mnt/mnt1/tag0/big_file > {path}/big_chunk;");
+        let cmd = format!("cp /mnt/mnt1/tag0/big_file  {path}/big_chunk;");
         // let cmd = format!("cp /mnt/mnt1/tag0/big_file  /{path}/big_chunk");
-
 
         let name = name.clone();
         let path = path.clone();
@@ -263,7 +264,7 @@ async fn test_parallel_write_big_chunk(
             {
                 let mut ga = ga.lock().await;
                 // List files
-                run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-lh", &path])
+                run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-l", &path])
                     .await
                     .unwrap();
             }
@@ -343,6 +344,7 @@ async fn main() -> io::Result<()> {
     test_parallel_write_big_chunk(mount_args.clone(), ga_mutex.clone(), notifications.clone())
         .await;
 
+    let e = timeout(Duration::from_secs(5), child.wait()).await;
     {
         let mut ga = ga_mutex.lock().await;
 
@@ -360,11 +362,9 @@ async fn main() -> io::Result<()> {
             .await;
     }
 
-
     /* VM should quit now. */
     let e = timeout(Duration::from_secs(5), child.wait()).await;
     log::info!("{:?}", e);
-
 
     Ok(())
 }
@@ -399,9 +399,11 @@ async fn test_write(
     let notif = notifications.get_process_died_notification(id).await;
     let fut = notif.notified();
 
-    if let Err(_) = timeout(Duration::from_secs(60), fut).await {
-        log::error!("Got timeout on died notification for process {id}");
-    }
+    // if let Err(_) = timeout(Duration::from_secs(60), fut).await {
+    //     log::error!("Got timeout on died notification for process {id}");
+    // }
+
+    fut.await;
 
     // log::info!("waiting on output for {id}");
     // notifications

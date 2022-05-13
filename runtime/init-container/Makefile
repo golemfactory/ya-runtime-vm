@@ -1,5 +1,8 @@
 CC := musl-gcc
 CXX := /bin/false
+
+IGNORE_WARNINGS := 1
+
 ifdef IGNORE_WARNINGS
 # liburing uses GNU extensions, hence use std=gnu11, not c11
 CFLAGS := -std=gnu11 -O2 -fPIE -pie -Iinclude/
