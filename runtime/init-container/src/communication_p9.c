@@ -53,8 +53,9 @@ struct metadata {
 
     char* buffer;
     uint8_t channel_to_write;
-    uint16_t bytes_to_write;
+    int32_t packet_size;
 
+    int32_t offset;
     struct iovec io;
 };
 
@@ -62,6 +63,7 @@ static void enqueue_channel_event(uint8_t channel, char* buffer, struct io_uring
     meta->channel = channel;
     meta->link = 0;
     meta->buffer = buffer;
+    meta->offset = 0;
     meta->io.iov_base = buffer + 3;
     meta->io.iov_len = MAX_PACKET_SIZE;
 
@@ -78,7 +80,8 @@ static void enqueue_socket_event(char* buffer, struct io_uring* ring, struct met
     meta->link = 0;
     meta->buffer = buffer;
     meta->channel_to_write = -1;
-    meta->bytes_to_write = -1;
+    meta->packet_size = -1;
+    meta->offset = 0;
     meta->io.iov_base = buffer;
     meta->io.iov_len = MAX_PACKET_SIZE;
 
@@ -89,6 +92,8 @@ static void enqueue_socket_event(char* buffer, struct io_uring* ring, struct met
     // sqe->user_data = ((unsigned long long)0xc0fe0) << 32 | i;
     io_uring_sqe_set_data(sqe, meta);
 }
+
+#define URING_TRACE ;
 
 static void* poll_9p_messages(void* data) {
     (void)data;
@@ -181,31 +186,75 @@ static void* poll_9p_messages(void* data) {
                 new_event++;
             }
         } else {
+#define HEADER_SIZE 3
             if (meta->link == 0) {
-                uint8_t channel = meta->buffer[0];
+                uint8_t channel;
+                uint16_t packet_size;
+                int msg_len;
+                char* msg;
 
-                uint16_t packet_size = ((uint16_t*)(meta->buffer + 1))[0];
+                if (meta->offset > 0) {
+                    // continuation of short read
+                    channel = meta->channel_to_write;
+                    packet_size = meta->packet_size;
+                    msg = meta->buffer;
+                    msg_len = cqe->res;
 
-                char* msg = meta->buffer + 3;
+                    if (packet_size + HEADER_SIZE < cqe->res + meta->offset) {
+                        fprintf(stderr, "short read too much during short read from g9p_fd wanted %d got %d\n",
+                                meta->packet_size - meta->offset, cqe->res);
+                        fflush(stderr);
+                        goto error;
+                    }
+                } else {
+                    channel = meta->buffer[0];
+                    packet_size = ((uint16_t*)(meta->buffer + 1))[0];
+                    msg = meta->buffer + HEADER_SIZE;
+                    msg_len = cqe->res - HEADER_SIZE;
+                    meta->channel_to_write = channel;
+                }
 
                 sqe = io_uring_get_sqe(&ring);
 
-                io_uring_prep_write(sqe, g_p9_socket_fds[channel][1], msg, packet_size, 0);
+                if (packet_size + HEADER_SIZE != cqe->res + meta->offset) {
+                    // short read
+                    fprintf(stderr, "short read from g9p_fd wanted %d got %d\n", packet_size + 3, cqe->res);
+                    fflush(stderr);
+                    meta->offset += cqe->res;
+                    // TODO: prep read?
+                } else {
+                    if (packet_size + HEADER_SIZE < cqe->res) {
+                        // read more than packet has
+                        fprintf(stderr, "short read too much from g9p_fd wanted %d got %d\n", packet_size + 3,
+                                cqe->res);
+                        fflush(stderr);
+                        goto error;
+                    }
 
-                meta->link++;
-                meta->channel_to_write = channel;
-                meta->bytes_to_write = packet_size;
+                    // received full message
+                    meta->link++;
+                }
 
+                // TODO: this might cause short write, during short read, sounds fun.
+                io_uring_prep_write(sqe, g_p9_socket_fds[channel][1], msg, msg_len, 0);
                 io_uring_sqe_set_data(sqe, meta);
 
                 new_event++;
 
             } else if (meta->link == 1) {
-                // TODO: handle if not all message is written,
 #ifdef URING_TRACE
-                fprintf(stderr, "written %d bytes of response (from %d) for channel %d\n", cqe->res,
-                        meta->bytes_to_write, meta->channel_to_write);
+                fprintf(stderr, "written %d bytes of response (from %d) for channel %d\n", cqe->res, meta->packet_size,
+                        meta->channel_to_write);
 #endif
+
+                // TODO: handle if not all message is written,
+                if (meta->packet_size != cqe->res) {
+
+                    fprintf(stderr, "failure 2 %d vs %d\n", meta->packet_size, cqe->res);
+                    fflush(stderr);
+                    goto error;
+                }
+
                 enqueue_socket_event(meta->buffer, &ring, meta);
                 new_event++;
             }
