@@ -64,7 +64,7 @@ struct write_metadata {
     uint16_t msg_bytes_left;
 };
 
-struct buf_info {
+struct metadata {
     int32_t reader_cursor;
     int32_t writer_cursor;
     uint8_t channel;
@@ -78,7 +78,7 @@ struct buf_info {
     int link;
 
     char* buffer;
-    uint16_t msg_bytes_left;
+    int msg_bytes_left;
 
     union {
         // writer
@@ -95,58 +95,51 @@ struct buf_info {
         // struct read_metadata;
     };
 };
-enum metadata_kind { read_type, write_type };
-struct metadata {
-    enum metadata_kind kind;
-
-    struct buf_info* buf
-};
 
 static void enqueue_channel_event(uint8_t channel, char* buffer, struct io_uring* ring, struct metadata* meta) {
-    meta->buf->channel = channel;
-    meta->buf->link = 0;
-    meta->buf->buffer = buffer;
-    meta->buf->reader_cursor = 0;
-    meta->buf->writer_cursor = 0;
-    meta->kind = read_metadata;
-    meta->buf->msg_bytes_left = 0;
-    meta->buf->channel_to_write = -1;
-    meta->buf->commited_write = 0;
-    meta->buf->io.iov_base = buffer + 3;
-    meta->buf->io.iov_len = MAX_PACKET_SIZE;
+    meta->channel = channel;
+    meta->link = 0;
+    meta->buffer = buffer;
+    meta->reader_cursor = 0;
+    meta->writer_cursor = 0;
+    meta->msg_bytes_left = 0;
+    meta->channel_to_write = -1;
+    meta->commited_write = 0;
+    meta->io.iov_base = buffer + 3;
+    meta->io.iov_len = MAX_PACKET_SIZE;
 
     // read from channel
     struct io_uring_sqe* sqe = io_uring_get_sqe(ring);
 
-    io_uring_prep_readv(sqe, g_p9_socket_fds[channel][1], &meta->buf->io, 1, 0);
+    io_uring_prep_readv(sqe, g_p9_socket_fds[channel][1], &meta->io, 1, 0);
 
     io_uring_sqe_set_data(sqe, meta);
 }
 
 static void enqueue_socket_event(char* buffer, struct io_uring* ring, struct metadata* meta) {
-    meta->buf->channel = MAX_P9_VOLUMES;
-    meta->buf->link = 0;
-    meta->buf->buffer = buffer;
-    meta->buf->channel_to_write = -1;
-    meta->buf->commited_write = 0;
+    meta->channel = MAX_P9_VOLUMES;
+    meta->link = 0;
+    meta->buffer = buffer;
+    meta->channel_to_write = -1;
+    meta->commited_write = 0;
 
-    meta->buf->reader_cursor = 0;
-    meta->buf->writer_cursor = 0;
-    meta->kind = read_metadata;
-    meta->buf->msg_bytes_left = 0;
+    meta->reader_cursor = 0;
+    meta->writer_cursor = 0;
+    meta->msg_bytes_left = 0;
 
-    meta->buf->io.iov_base = buffer;
-    meta->buf->io.iov_len = MAX_PACKET_SIZE;
+    meta->io.iov_base = buffer;
+    meta->io.iov_len = MAX_PACKET_SIZE;
 
     // read from channel
     struct io_uring_sqe* sqe = io_uring_get_sqe(ring);
-    io_uring_prep_readv(sqe, g_p9_fd, &meta->buf->io, 1, 0);
+    io_uring_prep_readv(sqe, g_p9_fd, &meta->io, 1, 0);
 
     // sqe->user_data = ((unsigned long long)0xc0fe0) << 32 | i;
     io_uring_sqe_set_data(sqe, meta);
 }
 
-#define URING_TRACE ;
+// #define URING_TRACE
+#define HEADER_SIZE 3
 
 static void* poll_9p_messages(void* data) {
     (void)data;
@@ -203,137 +196,140 @@ static void* poll_9p_messages(void* data) {
         // TODO: sometimes res is == 0, why?
         if (cqe->res < 0) {
             fprintf(stderr, "POLL: P9 cqe with data 0x%llX, returned error %d!\n", cqe->user_data, cqe->res);
-            fprintf(stderr, "got cqe for channel %d, link %d\n", meta->buf->channel, meta->buf->link);
+            fprintf(stderr, "got cqe for channel %d, link %d\n", meta->channel, meta->link);
 
             goto error;
         }
 
 #ifdef URING_TRACE
-        fprintf(stderr, "got cqe for channel %d, link %d result %d\n", meta->buf->channel, meta->buf->link, cqe->res);
+        fprintf(stderr, "got cqe for channel %d, link %d result %d\n", meta->channel, meta->link, cqe->res);
 #endif
 
         int new_event = 0;
 
-        if (meta->buf->channel < MAX_P9_VOLUMES) {
+        if (meta->channel < MAX_P9_VOLUMES) {
             // got data from socketpair
-            if (meta->buf->link == 0) {
+            if (meta->link == 0) {
 #ifdef URING_TRACE
                 fprintf(stderr, "read %d bytes\n", cqe->res);
 #endif
-                meta->buf->buffer[0] = meta->buf->channel;
+                meta->buffer[0] = meta->channel;
 
-                ((uint16_t*)(meta->buf->buffer + 1))[0] = cqe->res;
-                meta->buf->link++;
+                // TODO: handle short read - get data from 9p message?
+                ((uint16_t*)(meta->buffer + 1))[0] = cqe->res;
+
+                meta->link++;
+
+                meta->msg_bytes_left = cqe->res + HEADER_SIZE;
+                meta->writer_cursor = 0;
 
                 // write preppended header
                 sqe = io_uring_get_sqe(&ring);
 
-                // TODO: handle if not all msg is written
-                io_uring_prep_write(sqe, g_p9_fd, meta->buf->buffer, cqe->res + 3, 0);
-
+                io_uring_prep_write(sqe, g_p9_fd, meta->buffer, meta->msg_bytes_left, 0);
                 io_uring_sqe_set_data(sqe, meta);
-            } else if (meta->buf->link == 1) {
-                // requeue this event
-                enqueue_channel_event(meta->buf->channel, meta->buf->buffer, &ring, meta);
+
+            } else if (meta->link == 1) {
+                meta->msg_bytes_left -= cqe->res;
+                meta->writer_cursor += cqe->res;
+
+                if (meta->msg_bytes_left == 0) {
+                    // requeue this event
+                    enqueue_channel_event(meta->channel, meta->buffer, &ring, meta);
+                } else {
+#ifdef URING_TRACE
+                    fprintf(stderr, "SHORT WRITE TO SOCKET: Scheduling another %d bytes\n", meta->msg_bytes_left);
+#endif
+                    sqe = io_uring_get_sqe(&ring);
+                    io_uring_prep_write(sqe, g_p9_fd, meta->buffer + meta->writer_cursor, meta->msg_bytes_left, 0);
+                    io_uring_sqe_set_data(sqe, meta);
+                }
             }
         } else {
-#define HEADER_SIZE 3
+            // assumption:
+            // there can be at most one message in the buffer (kernel will not send another req)
+            // without previous reply
 
-            if (meta->kind == read_type) {
+            if (meta->link == 0) {
+                // Reading message phase
+
                 // move producer cursor
-                meta->buf->reader_cursor += cqe->res;
+                meta->reader_cursor += cqe->res;
 
-                int buffer_free_space;
-                if (meta->buf->reader_cursor == MAX_PACKET_SIZE) {
-                    // wrap around
-                    meta->buf->reader_cursor = 0;
+                if (meta->reader_cursor > HEADER_SIZE) {
+                    // Able to parse header
+                    meta->channel_to_write = meta->buffer[0];
+                    meta->packet_size = ((uint16_t*)(meta->buffer + 1))[0];
+#ifdef URING_TRACE
+                    fprintf(stderr, "Parsed header: channel %d, packet_size %d\n", meta->channel_to_write,
+                            meta->packet_size);
+#endif
+                    if (meta->reader_cursor == meta->packet_size + HEADER_SIZE) {
+                        // Read full message
+                        // Switch to writing phase
+                        meta->link = 1;
 
-                    // Do not override consumer
-                    buffer_free_space = meta->buf->writer_cursor;
-                } else {
-                    // There is still room in the buffer
-                    buffer_free_space = MAX_PACKET_SIZE - meta->buf->reader_cursor;
-                }
+                        meta->msg_bytes_left = meta->packet_size;
+                        meta->writer_cursor = HEADER_SIZE;
 
-                // Schedule another read
-                fprintf(stderr, "scheduling to read %d bytes, reader_cursor %d\n", buffer_free_space,
-                        meta->buf->reader_cursor);
+                        sqe = io_uring_get_sqe(&ring);
 
-                sqe = io_uring_get_sqe(&ring);
-                io_uring_prep_read(sqe, g_p9_fd, meta->buf->buffer + meta->buf->reader_cursor, buffer_free_space, 0);
-                io_uring_sqe_set_data(sqe, meta);
+                        io_uring_prep_write(sqe, g_p9_socket_fds[meta->channel_to_write][1],
+                                            meta->buffer + meta->writer_cursor, meta->msg_bytes_left, 0);
+                        io_uring_sqe_set_data(sqe, meta);
+                    } else {
+                        // Schedule another read
+                        int buffer_free_space = MAX_PACKET_SIZE - meta->reader_cursor;
+#ifdef URING_TRACE
+                        fprintf(stderr, "SHORT READ! Scheduling to read %d bytes, reader_cursor %d\n",
+                                buffer_free_space, meta->reader_cursor);
+#endif
+                        sqe = io_uring_get_sqe(&ring);
 
-                ////////////
-                // trigger write of new data
-
-                if (meta->buf->msg_bytes_left == 0) {
-                    if (meta->buf->writer_cursor + HEADER_SIZE >= MAX_PACKET_SIZE) {
-                        // TODO: handle this
-                        fprintf(stderr, "header is split in the buffer\n");
-                        goto error;
+                        io_uring_prep_read(sqe, g_p9_fd, meta->buffer + meta->reader_cursor, buffer_free_space, 0);
+                        io_uring_sqe_set_data(sqe, meta);
                     }
-
-                    // last message successfully sent, start parsing new one
-                    meta->buf->channel = meta->buf->buffer[meta->buf->writer_cursor];
-                    meta->buf->packet_size = (uint16_t*)(meta->buf->buffer + meta->buf->writer_cursor + 1)[0];
-                    meta->buf->msg_bytes_left = meta->buf->packet_size;
-                    meta->buf->writer_cursor += HEADER_SIZE;
-                }
-
-                int bytes_to_write;
-                if (meta->buf->writer_cursor <= meta->buf->reader_cursor) {
-                    // Writer is before the reader
-                    bytes_to_write =
-                        min(meta->buf->reader_cursor - meta->buf->writer_cursor, meta->buf->msg_bytes_left);
                 } else {
-                    // Writer boundary is the end of the buffer
-                    bytes_to_write = min(MAX_PACKET_SIZE - meta->buf->writer_cursor, meta->buf->msg_bytes_left);
+                    // TODO: read less than header, handle that later
+                    // fprintf(stderr, "read incomplete header!\n");
+                    // Schedule another read
+                    int buffer_free_space = MAX_PACKET_SIZE - meta->reader_cursor;
+#ifdef URING_TRACE
+                    fprintf(stderr, "SHORT READ! Scheduling to read %d bytes, reader_cursor %d\n", buffer_free_space,
+                            meta->reader_cursor);
+#endif
+                    sqe = io_uring_get_sqe(&ring);
+
+                    io_uring_prep_read(sqe, g_p9_fd, meta->buffer + meta->reader_cursor, buffer_free_space, 0);
+                    io_uring_sqe_set_data(sqe, meta);
+                    // goto error;
                 }
 
-                // meta->buf->commited_write = meta->buf->reader_cursor;
-
-                sqe = io_uring_get_sqe(&ring);
-                // TODO: free someday?
-                struct metadata* write_meta = malloc(sizeof(struct metadata));
-                write_meta->kind = write_type;
-                write_meta->buf = meta->buf;
-
-                io_uring_prep_write(sqe, g_p9_socket_fds[meta->buf->channel][1],
-                                    meta->buf->buffer + meta->buf->writer_cursor, bytes_to_write, 0);
-                io_uring_sqe_set_data(sqe, write_meta);
-
-            } else {
+            } else if (meta->link == 1) {
                 // write
-                meta->buf->msg_bytes_left -= cqe->res;
-                meta->buf->writer_cursor += cqe->res;
+                meta->msg_bytes_left -= cqe->res;
+                meta->writer_cursor += cqe->res;
 
-                if (meta->buf->writer_cursor == MAX_PACKET_SIZE) {
-                    meta->buf->writer_cursor = 0;
-                }
-
-                // depending where reader cursor is, before, or after writer
-                // there are different boundaries
-
-                int bytes_to_write;
-
-                if (meta->buf->writer_cursor > meta->buf->reader_cursor) {
-                    bytes_to_write = MAX_PACKET_SIZE - meta->buf->writer_cursor;
+                if (meta->msg_bytes_left > 0) {
+#ifdef URING_TRACE
+                    fprintf(stderr, "SHORT WRITE! Scheduling to write left %d bytes\n", meta->msg_bytes_left);
+#endif
+                    sqe = io_uring_get_sqe(&ring);
+                    io_uring_prep_write(sqe, g_p9_socket_fds[meta->channel_to_write][1],
+                                        meta->buffer + meta->writer_cursor, meta->msg_bytes_left, 0);
                 } else {
-                    bytes_to_write = meta->buf->reader_cursor - meta->buf->writer_cursor;
-                }
-
-                bytes_to_write = min(meta->buf->msg_bytes_left, bytes_to_write);
-
-                if (bytes_to_write > 0) {
+#ifdef URING_TRACE
+                    fprintf(stderr, "Wrote whole buffer\n");
+#endif
+                    meta->link = 0;
+                    meta->reader_cursor = 0;
+                    meta->channel_to_write = -1;
+                    meta->packet_size = -1;
 
                     sqe = io_uring_get_sqe(&ring);
-                    io_uring_prep_write(sqe, g_p9_socket_fds[meta->buf->channel][1],
-                                        meta->buf->buffer + meta->buf->writer_cursor, bytes_to_write, 0);
-                } else {
-                    fprintf(stderr, "wrote whole buffer, hoping, that read event will schedule another write");
-                    // TODO: if there are for example 3 messages in the buffer, and reader
-                    // finished it's job, writer will send only first out of three,
-                    // implement here writing the rest
+
+                    io_uring_prep_read(sqe, g_p9_fd, meta->buffer, MAX_PACKET_SIZE, 0);
+                    io_uring_sqe_set_data(sqe, meta);
                 }
             }
         }
@@ -583,7 +579,7 @@ uint32_t do_mount_p9(const char* tag, char* path) {
         goto error;
     }
 
-    TRY_OR_GOTO(snprintf(mount_cmd, CMD_SIZE, "trans=fd,rfdno=%d,wfdno=%d,debug=0xff,version=9p2000.L,msize=32765",
+    TRY_OR_GOTO(snprintf(mount_cmd, CMD_SIZE, "trans=fd,rfdno=%d,wfdno=%d,debug=0xff,version=9p2000.L,msize=65536",
                          mount_socket_fd, mount_socket_fd),
                 error);
 

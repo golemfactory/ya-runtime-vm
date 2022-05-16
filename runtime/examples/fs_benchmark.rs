@@ -230,7 +230,7 @@ async fn test_parallel_write_big_chunk(
                 "if=/dev/zero",
                 "of=/mnt/mnt1/tag0/big_file",
                 "bs=1048576",
-                "count=10",
+                "count=2000",
             ],
         )
         .await
@@ -251,7 +251,7 @@ async fn test_parallel_write_big_chunk(
         let notifications = notifications.clone();
 
         // let cmd = format!("A=\"A\"; for i in {{1..24}}; do A=\"${{A}}${{A}}\"; done; echo -ne $A >> {path}/big_chunk");
-        let cmd = format!("cp /mnt/mnt1/tag0/big_file  {path}/big_chunk;");
+        let cmd = format!("cat /mnt/mnt1/tag0/big_file >  {path}/big_chunk;");
         // let cmd = format!("cp /mnt/mnt1/tag0/big_file  /{path}/big_chunk");
 
         let name = name.clone();
