@@ -32,8 +32,8 @@
 
 #define USE_URING 1
 #define MAX_P9_VOLUMES (16)
-#define MAX_PACKET_SIZE (65536 + 3)
-// #define MAX_PACKET_SIZE (16384)
+#define HEADER_SIZE (3)
+#define MAX_PACKET_SIZE (65536 + HEADER_SIZE)
 
 int g_p9_fd = -1;
 static int g_p9_current_channel = 0;
@@ -139,7 +139,6 @@ static void enqueue_socket_event(char* buffer, struct io_uring* ring, struct met
 }
 
 // #define URING_TRACE
-#define HEADER_SIZE 3
 
 static void* poll_9p_messages(void* data) {
     (void)data;
@@ -217,6 +216,15 @@ static void* poll_9p_messages(void* data) {
 
                 // TODO: handle short read - get data from 9p message?
                 ((uint16_t*)(meta->buffer + 1))[0] = cqe->res;
+
+                int p9_size = ((int*)(meta->buffer + HEADER_SIZE))[0];
+
+                int16_t tag = ((uint16_t*)(meta->buffer + HEADER_SIZE + 4 + 1))[0];
+
+                if (cqe->res != p9_size) {
+                    fprintf(stderr, "SHORT READ from socket pair read %d 9p size %d tag %d\n", cqe->res, p9_size, tag);
+                    goto error;
+                }
 
                 meta->link++;
 
@@ -306,6 +314,7 @@ static void* poll_9p_messages(void* data) {
                 }
 
             } else if (meta->link == 1) {
+
                 // write
                 meta->msg_bytes_left -= cqe->res;
                 meta->writer_cursor += cqe->res;
@@ -403,6 +412,11 @@ static void handle_data_on_sock(char* buffer, uint32_t buffer_size) {
 
     // fprintf(stderr, "data on sock for channel %d\n", (int32_t)channel);
 
+    if (channel > MAX_P9_VOLUMES) {
+        fprintf(stderr, "invalid channel! %d\n", (int32_t)channel);
+        goto error;
+    }
+
     if (bytes_read == 0) {
         // fprintf(stderr, "No data on g_p9_fd\n");
         goto error;
@@ -416,6 +430,11 @@ static void handle_data_on_sock(char* buffer, uint32_t buffer_size) {
     uint16_t packet_size = 0;
     bytes_read = read_exact(g_p9_fd, &packet_size, sizeof(packet_size));
 
+    if (packet_size == 0) {
+        fprintf(stderr, "Got 0 bytes as packet size from header!\n");
+        goto error;
+    }
+
     if (bytes_read != sizeof(packet_size)) {
         fprintf(stderr, "Error during read from g_p9_fd: bytes_read != sizeof(packet_size)\n");
         goto error;
@@ -425,6 +444,8 @@ static void handle_data_on_sock(char* buffer, uint32_t buffer_size) {
         fprintf(stderr, "Error: Maximum packet size exceeded: packet_size > buffer_size\n");
         goto error;
     }
+
+    // fprintf(stderr, "reading %d bytes..\n", packet_size);
 
     bytes_read = read_exact(g_p9_fd, buffer, packet_size);
     if (bytes_read != packet_size) {
@@ -440,6 +461,7 @@ static void handle_data_on_sock(char* buffer, uint32_t buffer_size) {
         goto error;
     }
 
+    // fprintf(stderr, "writing %d bytes to %d channel\n", bytes_read, channel);
     if (write_exact(g_p9_socket_fds[channel][1], buffer, bytes_read) == -1) {
         fprintf(stderr, "Error writing to g_p9_socket_fds\n");
         goto error;
