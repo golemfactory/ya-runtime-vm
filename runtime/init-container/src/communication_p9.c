@@ -30,7 +30,11 @@
 
 #include "common.h"
 
-#define USE_URING 1
+#define URING 1
+#define EPOLL 2
+#define THREAD 3
+
+#define USE EPOLL
 #define MAX_P9_VOLUMES (16)
 #define HEADER_SIZE (3)
 #define MAX_PACKET_SIZE (65536 + HEADER_SIZE)
@@ -39,9 +43,11 @@ int g_p9_fd = -1;
 static int g_p9_current_channel = 0;
 static int g_p9_socket_fds[MAX_P9_VOLUMES][2];
 
+#if USE != THREAD
 static pthread_t g_p9_tunnel_thread_sender;
+#endif
 
-#if USE_URING == 1
+#if USE == URING
 
 // TODO: idea of using chains for copy fds, that's what exactly happens here
 // https://blogs.oracle.com/linux/post/an-introduction-to-the-io-uring-asynchronous-io-framework
@@ -207,6 +213,9 @@ static void* poll_9p_messages(void* data) {
         int new_event = 0;
 
         if (meta->channel < MAX_P9_VOLUMES) {
+
+            fprintf(stderr, "CHANNEL: %d\n", meta->channel);
+
             // got data from socketpair
             if (meta->link == 0) {
 #ifdef URING_TRACE
@@ -245,9 +254,9 @@ static void* poll_9p_messages(void* data) {
                     // requeue this event
                     enqueue_channel_event(meta->channel, meta->buffer, &ring, meta);
                 } else {
-#ifdef URING_TRACE
+                    // #ifdef URING_TRACE
                     fprintf(stderr, "SHORT WRITE TO SOCKET: Scheduling another %d bytes\n", meta->msg_bytes_left);
-#endif
+                    // #endif
                     sqe = io_uring_get_sqe(&ring);
                     io_uring_prep_write(sqe, g_p9_fd, meta->buffer + meta->writer_cursor, meta->msg_bytes_left, 0);
                     io_uring_sqe_set_data(sqe, meta);
@@ -359,8 +368,9 @@ error:
     free(buffer);
     return NULL;
 }
+#endif
 
-#else
+#if USE == EPOLL
 
 static int write_exact(int fd, const void* buf, size_t size) {
     int bytes_written = 0;
@@ -568,9 +578,248 @@ error:
     return NULL;
 }
 
-#endif  // USE_URING
+#endif
 
-// TODO: create Twrite request that exceeds hardcoded packet size
+#if USE == THREAD
+pthread_mutex_t g_p9_tunnel_mutex_sender;
+pthread_t g_p9_tunnel_thread_receiver;
+pthread_t g_p9_tunnel_thread_sender[MAX_P9_VOLUMES];
+
+static int read_exact(int fd, void* buf, size_t size) {
+    int bytes_read = 0;
+    while (size) {
+        ssize_t ret = read(fd, buf, size);
+        if (ret == 0) {
+            return 0;
+        }
+        if (ret < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            /* `errno` should be set. */
+            return ret;
+        }
+        bytes_read += ret;
+        buf = (char*)buf + ret;
+        size -= ret;
+    }
+    return bytes_read;
+}
+
+static int write_exact(int fd, const void* buf, size_t size) {
+    int bytes_written = 0;
+    while (size) {
+        ssize_t ret = write(fd, buf, size);
+        if (ret == 0) {
+            puts("written: WAITING FOR HOST (2) ...");
+            sleep(1);
+            continue;
+        }
+        if (ret < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            /* `errno` should be set. */
+            return -1;
+        }
+        bytes_written += ret;
+        buf = (char*)buf + ret;
+        size -= ret;
+    }
+    return bytes_written;
+}
+
+static void* tunnel_from_p9_virtio_to_sock(void *data) {
+    const int bufferSize = MAX_PACKET_SIZE;
+    char* buffer = malloc(bufferSize);
+
+    if (data != NULL) {
+        fprintf(stderr, "tunnel_from_p9_virtio_to_sock: data != NULL\n");
+        return NULL;
+    }
+
+    while (true) {
+        ssize_t bytes_read = 0;
+
+        uint8_t channel = 0;
+        bytes_read = read_exact(g_p9_fd, &channel, sizeof(channel));
+        if (bytes_read == 0) {
+            goto success;
+        }
+
+        if (bytes_read != sizeof(channel)) {
+            fprintf(stderr, "Error during read from g_p9_fd: bytes_read != sizeof(channel)\n");
+            goto error;
+        }
+
+        uint16_t packet_size = 0;
+        bytes_read = read_exact(g_p9_fd, &packet_size, sizeof(packet_size));
+        if (bytes_read != sizeof(packet_size)) {
+            fprintf(stderr, "Error during read from g_p9_fd: bytes_read != sizeof(packet_size)\n");
+            goto error;
+        }
+
+        if (packet_size > MAX_PACKET_SIZE) {
+            fprintf(stderr, "Error: Maximum packet size exceeded: packet_size > MAX_PACKET_SIZE\n");
+            goto error;
+        }
+
+        bytes_read = read_exact(g_p9_fd, buffer, packet_size);
+        if (bytes_read != packet_size) {
+            fprintf(stderr, "Error during read from g_p9_fd: bytes_read != packet_size\n");
+            goto error;
+        }
+
+#if WIN_P9_EXTRA_DEBUG_INFO
+        fprintf(stderr, "RECEIVE MESSAGE %ld\n", bytes_read);
+#endif
+        if (bytes_read == -1) {
+            fprintf(stderr, "Error during read from g_p9_fd: bytes_read == -1\n");
+            goto error;
+        }
+        if (write_exact(g_p9_socket_fds[channel][1], buffer, bytes_read) == -1) {
+            fprintf(stderr, "Error writing to g_p9_socket_fds\n");
+            goto error;
+        }
+    }
+success:
+    free(buffer);
+    return (void*)0;
+error:
+    free(buffer);
+    return (void*)-1;
+}
+
+
+static void* tunnel_from_p9_sock_to_virtio(void *data) {
+    intptr_t channel_wide_int = (intptr_t)data;
+    uint8_t channel = channel_wide_int;
+    assert(channel_wide_int < MAX_P9_VOLUMES);
+    assert(channel == channel_wide_int);
+
+#if WIN_P9_EXTRA_DEBUG_INFO
+    fprintf(stderr, "P9 sender thread started channel: %d\n", channel);
+#endif
+
+    const int bufferSize = MAX_PACKET_SIZE;
+    char* buffer = malloc(bufferSize);
+
+    while (true) {
+        ssize_t bytes_read = recv(g_p9_socket_fds[channel][1], buffer, bufferSize, 0);
+        // fprintf(stderr, "tunnel_from_p9_sock_to_virtio: bytes read %d channel %d errno %m\n", bytes_read, channel);
+
+        if (bytes_read == 0) {
+            free(buffer);
+            return NULL;
+        }
+
+        if (bytes_read == -1) {
+            free(buffer);
+            return (void*)(int64_t)errno;
+        }
+
+        if (pthread_mutex_lock(&g_p9_tunnel_mutex_sender)) {
+            fprintf(stderr, "pthread_mutex_lock failed\n");
+            return (void*)(int64_t)errno;
+        }
+#if WIN_P9_EXTRA_DEBUG_INFO
+        fprintf(stderr, "send message to channel %d, length: %ld\n", channel, bytes_read);
+#endif
+
+        bool write_succeeded = true;
+
+        if (write_exact(g_p9_fd, &channel, 1) == -1) {
+            fprintf(stderr, "Failed write g_p9_fd 1\n");
+            write_succeeded = false;
+            goto mutex_unlock;
+        }
+        uint16_t bytes_read_to_send = (uint16_t)bytes_read;
+        assert(sizeof(bytes_read_to_send) == 2);
+        if (write_exact(g_p9_fd, &bytes_read_to_send, sizeof(bytes_read_to_send)) == -1) {
+            fprintf(stderr, "Failed write g_p9_fd 2\n");
+            write_succeeded = false;
+            goto mutex_unlock;
+        }
+        if (write_exact(g_p9_fd, buffer, bytes_read) == -1) {
+            fprintf(stderr, "Failed write g_p9_fd 3\n");
+            write_succeeded = false;
+            goto mutex_unlock;
+        }
+
+mutex_unlock:
+        if (pthread_mutex_unlock(&g_p9_tunnel_mutex_sender)) {
+            fprintf(stderr, "pthread_mutex_unlock failed\n");
+            return (void*)(int64_t)errno;
+        }
+        if (!write_succeeded) {
+            fprintf(stderr, "tunnel_from_p9_sock_to_virtio: write_succeeded failed channel %d errno %m\n",channel);
+            return (void*)(int64_t)errno;
+        }
+    }
+}
+
+int initialize_p9_communication() {
+    for (int i = 0; i < MAX_P9_VOLUMES; i++) {
+        g_p9_socket_fds[i][0] = -1;
+        g_p9_socket_fds[i][1] = -1;
+    }
+
+    if (pthread_mutex_init(&g_p9_tunnel_mutex_sender, NULL) == -1) {
+        fprintf(stderr, "Error: pthread_mutex_init error\n");
+        return -1;
+    }
+	if (pthread_create(&g_p9_tunnel_thread_receiver, NULL, &tunnel_from_p9_virtio_to_sock, NULL) == -1) {
+        fprintf(stderr, "Error: pthread_create failed pthread_create(&g_p9_tunnel_thread_receiver...\n");
+        return -1;
+	}
+
+    return 0;
+}
+
+uint32_t do_mount_p9(const char* tag, char* path) {
+    uint8_t channel = g_p9_current_channel++;
+
+    if (channel >= MAX_P9_VOLUMES) {
+        fprintf(stderr, "ERROR: channel >= MAX_P9_VOLUMES\n");
+        return -1;
+    }
+    if (g_p9_socket_fds[channel][0] != -1 || g_p9_socket_fds[channel][1] != -1) {
+        fprintf(stderr, "Error: Looks like do mount called twice with the same channel\n");
+        return -1;
+    }
+
+    if (socketpair(AF_LOCAL, SOCK_STREAM, 0, g_p9_socket_fds[channel]) == -1) {
+        return errno;
+    }
+
+    // TODO: there could be one thread with poll
+    //for every socket pair we need one reader
+    uintptr_t channel_wide_int = channel;
+    if (pthread_create(&g_p9_tunnel_thread_sender[channel], NULL, &tunnel_from_p9_sock_to_virtio, (void*) channel_wide_int) == -1) {
+        fprintf(stderr, "Error: pthread_create failed\n");
+        return -1;
+    }
+
+    tag = tag;
+    char* mount_cmd = NULL;
+    int mount_socked_fd = g_p9_socket_fds[channel][0];
+    // TODO: snprintf
+    int buf_size = asprintf(&mount_cmd, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L,msize=65536", mount_socked_fd, mount_socked_fd);
+    if (buf_size < 0) {
+        free(mount_cmd);
+        return errno;
+    }
+    fprintf(stderr, "Starting mount: tag: %s, path: %s\n", tag, path);
+    if (mount(tag, path, "9p", 0, mount_cmd) < 0) {
+        fprintf(stderr, "Mount finished with error: %d\n", errno);
+        return errno;
+    }
+
+    fprintf(stderr, "Mount finished.\n");
+    free(mount_cmd);
+    return 0;
+}
+#else
 // TODO: do highly concurrent write requests from rust side to see congestion in this part of code
 int initialize_p9_communication() {
     for (int i = 0; i < MAX_P9_VOLUMES; i++) {
@@ -613,3 +862,6 @@ error:
     fprintf(stderr, "Mount failed.\n");
     return -1;
 }
+
+#endif
+

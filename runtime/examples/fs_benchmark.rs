@@ -289,7 +289,7 @@ async fn main() -> io::Result<()> {
     let temp_path = temp_dir.path();
     let notifications = Arc::new(Notifications::new());
 
-    const MOUNTS: usize = 1;
+    const MOUNTS: usize = 2;
 
     let mut mount_args = vec![];
 
