@@ -118,7 +118,7 @@ fn spawn_vm() -> (Child, VM) {
 
     println!("CMD: {cmd:?}");
 
-    cmd.stdin(Stdio::null());
+    cmd.stdin(Stdio::piped());
 
     cmd.current_dir(runtime_dir);
     (cmd.spawn().expect("failed to spawn VM"), vm)

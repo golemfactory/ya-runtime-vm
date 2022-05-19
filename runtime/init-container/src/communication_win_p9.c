@@ -104,17 +104,19 @@ static void* tunnel_from_p9_virtio_to_sock(void *data) {
             goto error;
         }
 
-        uint16_t packet_size = 0;
+        uint32_t packet_size = 0;
         bytes_read = read_exact(g_p9_fd, &packet_size, sizeof(packet_size));
         if (bytes_read != sizeof(packet_size)) {
             fprintf(stderr, "Error during read from g_p9_fd: bytes_read != sizeof(packet_size)\n");
             goto error;
         }
 
+
         if (packet_size > MAX_PACKET_SIZE) {
             fprintf(stderr, "Error: Maximum packet size exceeded: packet_size > MAX_PACKET_SIZE\n");
             goto error;
         }
+
 
         bytes_read = read_exact(g_p9_fd, buffer, packet_size);
         if (bytes_read != packet_size) {
@@ -184,8 +186,8 @@ static void* tunnel_from_p9_sock_to_virtio(void *data) {
             write_succeeded = false;
             goto mutex_unlock;
         }
-        uint16_t bytes_read_to_send = (uint16_t)bytes_read;
-        assert(sizeof(bytes_read_to_send) == 2);
+        uint32_t bytes_read_to_send = (uint32_t)bytes_read;
+        assert(sizeof(bytes_read_to_send) == 4);
         if (write_exact(g_p9_fd, &bytes_read_to_send, sizeof(bytes_read_to_send)) == -1) {
             fprintf(stderr, "Failed write g_p9_fd 2\n");
             write_succeeded = false;
@@ -252,7 +254,7 @@ uint32_t do_mount_win_p9(const char* tag, uint8_t channel, char* path) {
     char* mount_cmd = NULL;
     int mount_socked_fd = g_p9_socket_fds[channel][0];
     // TODO: snprintf
-    int buf_size = asprintf(&mount_cmd, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L", mount_socked_fd, mount_socked_fd);
+    int buf_size = asprintf(&mount_cmd, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L,msize=65535", mount_socked_fd, mount_socked_fd);
     if (buf_size < 0) {
         free(mount_cmd);
         return errno;

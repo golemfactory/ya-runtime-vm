@@ -165,10 +165,7 @@ fn spawn_vm() -> (Child, VM) {
 
     log::info!("CMD: {cmd:?}");
 
-    cmd.stdin(Stdio::null());
-
-    // cmd.stderr(Stdio::null());
-    // cmd.stdout(Stdio::null());
+    cmd.stdin(Stdio::piped());
 
     cmd.current_dir(runtime_dir);
     (cmd.spawn().expect("failed to spawn VM"), vm)
@@ -283,12 +280,10 @@ async fn main() -> io::Result<()> {
     log::info!("hai!");
     let (mut child, vm) = spawn_vm();
 
-    log::info!("hai!");
-    let temp_dir = tempdir::TempDir::new("ya-vm-direct").expect("Failed to create temp dir");
-    let temp_path = temp_dir.path();
+    let temp_path = Path::new("./tmp");
     let notifications = Arc::new(Notifications::new());
 
-    const MOUNTS: usize = 1;
+    const MOUNTS: usize = 2;
 
     let mut mount_args = vec![];
 
@@ -310,7 +305,10 @@ async fn main() -> io::Result<()> {
 
     let mount_args = Arc::new(mount_args);
 
+
+
     let (_p9streams, _muxer_handle) = vm.start_9p_service(&temp_path, &mount_args).await.unwrap();
+
 
 
     let ns = notifications.clone();
@@ -319,9 +317,6 @@ async fn main() -> io::Result<()> {
         async move { notifications.clone().handle(n).await }.boxed()
     })
     .await?;
-
-    //tokio::time::sleep(Duration::from_secs(100000000)).await;
-
 
     {
         let mut ga = ga_mutex.lock().await;
@@ -352,7 +347,8 @@ async fn main() -> io::Result<()> {
     {
         let mut ga = ga_mutex.lock().await;
 
-        run_process_with_output(&mut ga, &notifications, "/bin/ps", &["ps", "auxjf"]).await?;
+        //run_process_with_output(&mut ga, &notifications, "/bin/ps", &["ps", "aux"]).await?;
+        run_process_with_output(&mut ga, &notifications, "/bin/busybox", &["top", "-b", "-n", "1"]).await?;
 
         let id = ga
             .run_entrypoint("/bin/sleep", &["sleep", "60"], None, 0, 0, &NO_REDIR, None)

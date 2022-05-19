@@ -266,7 +266,7 @@ async fn start(
     );
 
     let mut runtime = cmd
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)

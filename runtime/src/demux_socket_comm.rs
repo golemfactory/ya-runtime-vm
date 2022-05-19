@@ -6,7 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-const MAX_PACKET_SIZE: usize = 16384;
+pub const MAX_PACKET_SIZE: usize = 0x40000; //262144
 
 pub struct DemuxSocketHandle {
     abort_handle_reader: AbortHandle,
@@ -25,6 +25,7 @@ pub async fn stop_demux_communication(dsh: DemuxSocketHandle) {
         let _res = join_handle_writer.await;
     }
 }
+
 
 pub fn start_demux_communication(
     vm_stream: tokio::net::TcpStream,
@@ -53,8 +54,8 @@ pub fn start_demux_communication(
         let reader_future = Abortable::new(
             async move {
                 loop {
-                    let mut header_buffer = [0; 3];
-                    let mut message_buffer = [0; MAX_PACKET_SIZE];
+                    let mut header_buffer = [0; 5];
+                    let mut message_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE];
 
                     if let Err(err) = vm_read_part.read_exact(&mut header_buffer).await {
                         log::error!("unable to read dmux data: {}", err);
@@ -70,7 +71,7 @@ pub fn start_demux_communication(
                     }
 
                     let packet_size =
-                        u16::from_le_bytes(packet_size_bytes.try_into().unwrap()) as usize;
+                        u32::from_le_bytes(packet_size_bytes.try_into().unwrap()) as usize;
 
                     if packet_size > message_buffer.len() {
                         log::error!("packet_size > message_buffer.len(), packet_size: {}, message_buffer.len: {}", packet_size, message_buffer.len());
@@ -118,7 +119,7 @@ pub fn start_demux_communication(
         let p9_to_vm_merger = tokio::spawn(async move {
             let writer_future = Abortable::new(
                 async move {
-                    let mut message_buffer = [0; MAX_PACKET_SIZE];
+                    let mut message_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE];
 
                     loop {
                         let bytes_read = match p9_reader.read(&mut message_buffer).await {
@@ -143,8 +144,8 @@ pub fn start_demux_communication(
                                 break;
                             }
 
-                            let bytes_read_u16 = bytes_read as u16;
-                            let mut packet_size_bytes = bytes_read_u16.to_le_bytes();
+                            let bytes_read_u32 = bytes_read as u32;
+                            let mut packet_size_bytes = bytes_read_u32.to_le_bytes();
 
                             if let Err(err) = vm_write_guard
                                 .borrow_mut()
