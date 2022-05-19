@@ -34,7 +34,8 @@
 #define EPOLL 2
 #define THREAD 3
 
-#define USE EPOLL
+#define USE URING
+
 #define MAX_P9_VOLUMES (16)
 #define HEADER_SIZE (3)
 #define MAX_PACKET_SIZE (65536 + HEADER_SIZE)
@@ -144,7 +145,7 @@ static void enqueue_socket_event(char* buffer, struct io_uring* ring, struct met
     io_uring_sqe_set_data(sqe, meta);
 }
 
-// #define URING_TRACE
+#define URING_TRACE
 
 static void* poll_9p_messages(void* data) {
     (void)data;
@@ -159,8 +160,11 @@ static void* poll_9p_messages(void* data) {
     const int FDS_SIZE = MAX_P9_VOLUMES + 1;
     TRY_OR_GOTO(io_uring_queue_init(QUEUE_DEPTH, &ring, 0), error);
 
-    // Alloc buffer for each fd
-    buffer = malloc(MAX_PACKET_SIZE * FDS_SIZE);
+    // Alloc buffer for each fd + buffer for socket,
+    // that in worst case can hold full messages for all channels
+
+    // TODO: assumption, at most one message in buffer per channel
+    buffer = malloc(MAX_PACKET_SIZE * MAX_P9_VOLUMES + MAX_PACKET_SIZE * MAX_P9_VOLUMES);
 
     if (buffer == NULL) {
         fprintf(stderr, "Failed to allocate the message buffer\n");
@@ -191,6 +195,12 @@ static void* poll_9p_messages(void* data) {
 
     /////////////////////
 
+    struct metadata* write_queue[MAX_P9_VOLUMES + 1];
+    // memset(write_queue, 0, sizeof(struct metadata) * MAX_P9_VOLUMES);
+    int write_queue_end = 0;
+    int write_queue_start = 0;
+
+    bool write_in_progress = false;
     while (1) {
         sqe = NULL;
         // TODO: consider: unsigned io_uring_peek_batch_cqe
@@ -214,13 +224,10 @@ static void* poll_9p_messages(void* data) {
 
         if (meta->channel < MAX_P9_VOLUMES) {
 
-            fprintf(stderr, "CHANNEL: %d\n", meta->channel);
+            // fprintf(stderr, "CHANNEL: %d\n", meta->channel);
 
             // got data from socketpair
             if (meta->link == 0) {
-#ifdef URING_TRACE
-                fprintf(stderr, "read %d bytes\n", cqe->res);
-#endif
                 meta->buffer[0] = meta->channel;
 
                 // TODO: handle short read - get data from 9p message?
@@ -230,21 +237,22 @@ static void* poll_9p_messages(void* data) {
 
                 int16_t tag = ((uint16_t*)(meta->buffer + HEADER_SIZE + 4 + 1))[0];
 
+                // TODO: handle short read here
                 if (cqe->res != p9_size) {
-                    fprintf(stderr, "SHORT READ from socket pair read %d 9p size %d tag %d\n", cqe->res, p9_size, tag);
+                    fprintf(stderr, "SHORT READ from socket pair %d read %d 9p size %d tag %d\n", meta->channel,
+                            cqe->res, p9_size, tag);
+                    fflush(stderr);
                     goto error;
                 }
 
+                // switch to write
                 meta->link++;
 
                 meta->msg_bytes_left = cqe->res + HEADER_SIZE;
                 meta->writer_cursor = 0;
 
-                // write preppended header
-                sqe = io_uring_get_sqe(&ring);
-
-                io_uring_prep_write(sqe, g_p9_fd, meta->buffer, meta->msg_bytes_left, 0);
-                io_uring_sqe_set_data(sqe, meta);
+                write_queue[write_queue_end] = meta;
+                write_queue_end = (write_queue_end + 1) % MAX_P9_VOLUMES;
 
             } else if (meta->link == 1) {
                 meta->msg_bytes_left -= cqe->res;
@@ -253,10 +261,15 @@ static void* poll_9p_messages(void* data) {
                 if (meta->msg_bytes_left == 0) {
                     // requeue this event
                     enqueue_channel_event(meta->channel, meta->buffer, &ring, meta);
+
+                    write_queue[write_queue_start] = NULL;
+
+                    write_queue_start = (write_queue_start + 1) % MAX_P9_VOLUMES;
+                    write_in_progress = false;
                 } else {
-                    // #ifdef URING_TRACE
+#ifdef URING_TRACE
                     fprintf(stderr, "SHORT WRITE TO SOCKET: Scheduling another %d bytes\n", meta->msg_bytes_left);
-                    // #endif
+#endif
                     sqe = io_uring_get_sqe(&ring);
                     io_uring_prep_write(sqe, g_p9_fd, meta->buffer + meta->writer_cursor, meta->msg_bytes_left, 0);
                     io_uring_sqe_set_data(sqe, meta);
@@ -264,8 +277,8 @@ static void* poll_9p_messages(void* data) {
             }
         } else {
             // assumption:
-            // there can be at most one message in the buffer (kernel will not send another req)
-            // without previous reply
+            // there can be at most one message in the buffer per channel (kernel will not send another req
+            // without previous reply)
 
             if (meta->link == 0) {
                 // Reading message phase
@@ -277,10 +290,26 @@ static void* poll_9p_messages(void* data) {
                     // Able to parse header
                     meta->channel_to_write = meta->buffer[0];
                     meta->packet_size = ((uint16_t*)(meta->buffer + 1))[0];
+
+                    if (meta->channel_to_write > MAX_P9_VOLUMES || meta->packet_size == 0) {
+                        fprintf(stderr, "Invalid header! Channel %d, packet size %d\n", meta->channel_to_write,
+                                meta->packet_size);
+                        fflush(stderr);
+                        goto error;
+                    }
 #ifdef URING_TRACE
                     fprintf(stderr, "Parsed header: channel %d, packet_size %d\n", meta->channel_to_write,
                             meta->packet_size);
 #endif
+
+                    int p9_size = ((int*)(meta->buffer + HEADER_SIZE))[0];
+
+                    if (cqe->res - HEADER_SIZE > meta->packet_size || meta->packet_size != p9_size) {
+                        // We read more than header states there is
+                        fprintf(stderr, "Read more: %d, than header says: %d p9 header: %d\n", cqe->res, meta->packet_size, p9_size);
+                        // goto error;
+                    }
+
                     if (meta->reader_cursor == meta->packet_size + HEADER_SIZE) {
                         // Read full message
                         // Switch to writing phase
@@ -294,17 +323,20 @@ static void* poll_9p_messages(void* data) {
                         io_uring_prep_write(sqe, g_p9_socket_fds[meta->channel_to_write][1],
                                             meta->buffer + meta->writer_cursor, meta->msg_bytes_left, 0);
                         io_uring_sqe_set_data(sqe, meta);
-                    } else {
+                    } else if (meta->reader_cursor < meta->packet_size + HEADER_SIZE) {
                         // Schedule another read
                         int buffer_free_space = MAX_PACKET_SIZE - meta->reader_cursor;
 #ifdef URING_TRACE
-                        fprintf(stderr, "SHORT READ! Scheduling to read %d bytes, reader_cursor %d\n",
+                        fprintf(stderr, "SHORT READ! From socket Scheduling to read %d bytes, reader_cursor %d\n",
                                 buffer_free_space, meta->reader_cursor);
 #endif
                         sqe = io_uring_get_sqe(&ring);
 
                         io_uring_prep_read(sqe, g_p9_fd, meta->buffer + meta->reader_cursor, buffer_free_space, 0);
                         io_uring_sqe_set_data(sqe, meta);
+                    } else {
+                        fprintf(stderr, "read whole message, and part of another!\n");
+                        goto error;
                     }
                 } else {
                     // TODO: read less than header, handle that later
@@ -312,7 +344,7 @@ static void* poll_9p_messages(void* data) {
                     // Schedule another read
                     int buffer_free_space = MAX_PACKET_SIZE - meta->reader_cursor;
 #ifdef URING_TRACE
-                    fprintf(stderr, "SHORT READ! Scheduling to read %d bytes, reader_cursor %d\n", buffer_free_space,
+                    fprintf(stderr, "SHORT READ! The header Scheduling to read %d bytes, reader_cursor %d\n", buffer_free_space,
                             meta->reader_cursor);
 #endif
                     sqe = io_uring_get_sqe(&ring);
@@ -353,6 +385,26 @@ static void* poll_9p_messages(void* data) {
         }
 
         io_uring_cqe_seen(&ring, cqe);
+
+        // fprintf(stderr, "queue start %d, queue end %d write in progress %d\n", write_queue_start, write_queue_end,
+        //         write_in_progress);
+        // fflush(stderr);
+
+        if (write_queue_start != write_queue_end && write_in_progress == false) {
+            // write preppended header
+            sqe = io_uring_get_sqe(&ring);
+
+            meta = write_queue[write_queue_start];
+
+            if (!meta) {
+                fprintf(stderr, "Got null meta\n");
+                goto error;
+            }
+
+            io_uring_prep_write(sqe, g_p9_fd, meta->buffer, meta->msg_bytes_left, 0);
+            io_uring_sqe_set_data(sqe, meta);
+            write_in_progress = true;
+        }
 
         // Some event(s) were put on a queue
         if (sqe) {
@@ -629,7 +681,7 @@ static int write_exact(int fd, const void* buf, size_t size) {
     return bytes_written;
 }
 
-static void* tunnel_from_p9_virtio_to_sock(void *data) {
+static void* tunnel_from_p9_virtio_to_sock(void* data) {
     const int bufferSize = MAX_PACKET_SIZE;
     char* buffer = malloc(bufferSize);
 
@@ -690,8 +742,7 @@ error:
     return (void*)-1;
 }
 
-
-static void* tunnel_from_p9_sock_to_virtio(void *data) {
+static void* tunnel_from_p9_sock_to_virtio(void* data) {
     intptr_t channel_wide_int = (intptr_t)data;
     uint8_t channel = channel_wide_int;
     assert(channel_wide_int < MAX_P9_VOLUMES);
@@ -746,13 +797,13 @@ static void* tunnel_from_p9_sock_to_virtio(void *data) {
             goto mutex_unlock;
         }
 
-mutex_unlock:
+    mutex_unlock:
         if (pthread_mutex_unlock(&g_p9_tunnel_mutex_sender)) {
             fprintf(stderr, "pthread_mutex_unlock failed\n");
             return (void*)(int64_t)errno;
         }
         if (!write_succeeded) {
-            fprintf(stderr, "tunnel_from_p9_sock_to_virtio: write_succeeded failed channel %d errno %m\n",channel);
+            fprintf(stderr, "tunnel_from_p9_sock_to_virtio: write_succeeded failed channel %d errno %m\n", channel);
             return (void*)(int64_t)errno;
         }
     }
@@ -768,10 +819,10 @@ int initialize_p9_communication() {
         fprintf(stderr, "Error: pthread_mutex_init error\n");
         return -1;
     }
-	if (pthread_create(&g_p9_tunnel_thread_receiver, NULL, &tunnel_from_p9_virtio_to_sock, NULL) == -1) {
+    if (pthread_create(&g_p9_tunnel_thread_receiver, NULL, &tunnel_from_p9_virtio_to_sock, NULL) == -1) {
         fprintf(stderr, "Error: pthread_create failed pthread_create(&g_p9_tunnel_thread_receiver...\n");
         return -1;
-	}
+    }
 
     return 0;
 }
@@ -793,9 +844,10 @@ uint32_t do_mount_p9(const char* tag, char* path) {
     }
 
     // TODO: there could be one thread with poll
-    //for every socket pair we need one reader
+    // for every socket pair we need one reader
     uintptr_t channel_wide_int = channel;
-    if (pthread_create(&g_p9_tunnel_thread_sender[channel], NULL, &tunnel_from_p9_sock_to_virtio, (void*) channel_wide_int) == -1) {
+    if (pthread_create(&g_p9_tunnel_thread_sender[channel], NULL, &tunnel_from_p9_sock_to_virtio,
+                       (void*)channel_wide_int) == -1) {
         fprintf(stderr, "Error: pthread_create failed\n");
         return -1;
     }
@@ -804,7 +856,8 @@ uint32_t do_mount_p9(const char* tag, char* path) {
     char* mount_cmd = NULL;
     int mount_socked_fd = g_p9_socket_fds[channel][0];
     // TODO: snprintf
-    int buf_size = asprintf(&mount_cmd, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L,msize=65536", mount_socked_fd, mount_socked_fd);
+    int buf_size = asprintf(&mount_cmd, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L,msize=65536", mount_socked_fd,
+                            mount_socked_fd);
     if (buf_size < 0) {
         free(mount_cmd);
         return errno;
@@ -850,7 +903,7 @@ uint32_t do_mount_p9(const char* tag, char* path) {
         goto error;
     }
 
-    TRY_OR_GOTO(snprintf(mount_cmd, CMD_SIZE, "trans=fd,rfdno=%d,wfdno=%d,debug=0xff,version=9p2000.L,msize=65536",
+    TRY_OR_GOTO(snprintf(mount_cmd, CMD_SIZE, "trans=fd,rfdno=%d,wfdno=%d,debug=0xff,version=9p2000.L,msize=32000",
                          mount_socket_fd, mount_socket_fd),
                 error);
 
@@ -864,4 +917,3 @@ error:
 }
 
 #endif
-

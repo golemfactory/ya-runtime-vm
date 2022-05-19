@@ -1403,10 +1403,10 @@ static noreturn void main_loop(void) {
             die();
         }
 
-        if (event.events & EPOLLNVAL) {
-            fprintf(stderr, "epoll error event: 0x%04hx\n", event.events);
-            die();
-        }
+        // if (event.events & EPOLLNVAL) {
+        //     fprintf(stderr, "epoll error event: 0x%04hx\n", event.events);
+        //     die();
+        // }
 
         if ((event.events & EPOLLERR) && epoll_fd_desc->type != EPOLL_FD_OUT) {
             fprintf(stderr, "Got EPOLLERR on fd: %d, type: %d\n", epoll_fd_desc->fd, epoll_fd_desc->type);
