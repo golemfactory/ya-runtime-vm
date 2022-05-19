@@ -82,7 +82,7 @@ static int write_exact(int fd, const void* buf, size_t size) {
 }
 
 static void* tunnel_from_p9_virtio_to_sock(void *data) {
-    const int bufferSize = MAX_PACKET_SIZE;
+    const int bufferSize = MAX_DEMUX_P9_MESSAGE_SIZE;
     char* buffer = malloc(bufferSize);
 
     if (data != NULL) {
@@ -112,7 +112,7 @@ static void* tunnel_from_p9_virtio_to_sock(void *data) {
         }
 
 
-        if (packet_size > MAX_PACKET_SIZE) {
+        if (packet_size > MAX_DEMUX_P9_MESSAGE_SIZE) {
             fprintf(stderr, "Error: Maximum packet size exceeded: packet_size > MAX_PACKET_SIZE\n");
             goto error;
         }
@@ -155,7 +155,7 @@ static void* tunnel_from_p9_sock_to_virtio(void *data) {
     fprintf(stderr, "P9 sender thread started channel: %d\n", channel);
 #endif
 
-    const int bufferSize = MAX_PACKET_SIZE;
+    const int bufferSize = MAX_DEMUX_P9_MESSAGE_SIZE;
     char* buffer = malloc(bufferSize);
 
     while (true) {
