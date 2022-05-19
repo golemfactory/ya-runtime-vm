@@ -85,6 +85,18 @@ static void* tunnel_from_p9_virtio_to_sock(void *data) {
     const int bufferSize = MAX_DEMUX_P9_MESSAGE_SIZE;
     char* buffer = malloc(bufferSize);
 
+    //experimental - set thread affinity to get better performance on Windows?
+    {
+        pthread_t thread;
+        thread = pthread_self();
+        pthread_attr_t attr;
+        cpu_set_t cpus;
+        pthread_attr_init(&attr);
+        CPU_ZERO(&cpus);
+        CPU_SET(1, &cpus);
+        pthread_setaffinity_np(thread, sizeof(cpus), &cpus);
+    }
+
     if (data != NULL) {
         fprintf(stderr, "tunnel_from_p9_virtio_to_sock: data != NULL\n");
         return NULL;
@@ -157,6 +169,18 @@ static void* tunnel_from_p9_sock_to_virtio(void *data) {
 
     const int bufferSize = MAX_DEMUX_P9_MESSAGE_SIZE;
     char* buffer = malloc(bufferSize);
+
+    //experimental - set thread affinity to get better performance on Windows?
+    {
+        pthread_t thread;
+        thread = pthread_self();
+        pthread_attr_t attr;
+        cpu_set_t cpus;
+        pthread_attr_init(&attr);
+        CPU_ZERO(&cpus);
+        CPU_SET(1, &cpus);
+        pthread_setaffinity_np(thread, sizeof(cpus), &cpus);
+    }
 
     while (true) {
         ssize_t bytes_read = recv(g_p9_socket_fds[channel][1], buffer, bufferSize, 0);

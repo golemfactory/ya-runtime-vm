@@ -1617,6 +1617,17 @@ int main(void) {
     block_signals();
     setup_sigfd();
 
+    //experimental - set thread affinity to get better performance on Windows?
+    {
+        pthread_t thread;
+        thread = pthread_self();
+        pthread_attr_t attr;
+        cpu_set_t cpus;
+        pthread_attr_init(&attr);
+        CPU_ZERO(&cpus);
+        CPU_SET(1, &cpus);
+        CHECK(pthread_setaffinity_np(thread, sizeof(cpus), &cpus));
+    }
     //make sure to create threads after blocking signals, not before. Otherwise signals are blocked.
     CHECK(initialize_p9_socket_descriptors());
 

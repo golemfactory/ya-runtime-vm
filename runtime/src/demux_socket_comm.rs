@@ -6,7 +6,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-pub const MAX_PACKET_SIZE: usize = 0x40000; //262144
+pub const MAX_P9_PACKET_SIZE: usize = 0x4000-5; //262144
+pub const MAX_DEMUX_PACKET_SIZE: usize = 0x8000; //262144
 
 pub struct DemuxSocketHandle {
     abort_handle_reader: AbortHandle,
@@ -55,7 +56,7 @@ pub fn start_demux_communication(
             async move {
                 loop {
                     let mut header_buffer = [0; 5];
-                    let mut message_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE];
+                    let mut message_buffer: Vec<u8> = vec![0; MAX_DEMUX_PACKET_SIZE];
 
                     if let Err(err) = vm_read_part.read_exact(&mut header_buffer).await {
                         log::error!("unable to read dmux data: {}", err);
@@ -119,7 +120,7 @@ pub fn start_demux_communication(
         let p9_to_vm_merger = tokio::spawn(async move {
             let writer_future = Abortable::new(
                 async move {
-                    let mut message_buffer: Vec<u8> = vec![0; MAX_PACKET_SIZE];
+                    let mut message_buffer: Vec<u8> = vec![0; MAX_DEMUX_PACKET_SIZE];
 
                     loop {
                         let bytes_read = match p9_reader.read(&mut message_buffer).await {
