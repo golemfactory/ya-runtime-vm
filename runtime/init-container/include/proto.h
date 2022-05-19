@@ -111,6 +111,8 @@ enum SUB_MSG_MOUNT_VOLUME_TYPE {
     SUB_MSG_MOUNT_VOLUME_END = 0,
     /* Mount tag. (BYTES) */
     SUB_MSG_MOUNT_VOLUME_TAG,
+    /* Mount message size. (BYTES) */
+    SUB_MSG_MOUNT_VOLUME_MAX_P9_MESSAGE_SIZE,
     /* Path to mount at. (BYTES) */
     SUB_MSG_MOUNT_VOLUME_PATH,
 };

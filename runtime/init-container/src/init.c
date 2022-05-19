@@ -986,12 +986,15 @@ static void handle_mount(msg_id_t msg_id) {
     bool done = false;
     uint32_t ret = 0;
     char* tag = NULL;
+    uint32_t max_p9_message_size = 0;
     char* path = NULL;
 
     while (!done) {
         uint8_t subtype = 0;
 
         CHECK(recv_u8(g_cmds_fd, &subtype));
+                fprintf(stderr, "Unknown MSG_MOUNT_VOLUME subtype: %hhu\n",
+                        subtype);
 
         switch (subtype) {
             case SUB_MSG_MOUNT_VOLUME_END:
@@ -999,6 +1002,9 @@ static void handle_mount(msg_id_t msg_id) {
                 break;
             case SUB_MSG_MOUNT_VOLUME_TAG:
                 CHECK(recv_bytes(g_cmds_fd, &tag, NULL, /*is_cstring=*/true));
+                break;
+            case SUB_MSG_MOUNT_VOLUME_MAX_P9_MESSAGE_SIZE:
+                CHECK(recv_u32(g_cmds_fd, &max_p9_message_size));
                 break;
             case SUB_MSG_MOUNT_VOLUME_PATH:
                 CHECK(recv_bytes(g_cmds_fd, &path, NULL, /*is_cstring=*/true));
@@ -1019,7 +1025,7 @@ static void handle_mount(msg_id_t msg_id) {
         ret = errno;
         goto out;
     }
-    ret = do_mount_win_p9(tag, g_p9_current_channel, path);
+    ret = do_mount_win_p9(tag, g_p9_current_channel, max_p9_message_size, path);
     g_p9_current_channel += 1;
 
 out:

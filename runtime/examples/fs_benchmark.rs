@@ -14,6 +14,8 @@ use tokio::{process::Child, sync};
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
 use ya_runtime_vm::vm::{VMBuilder, VM};
+use std::convert::TryFrom;
+use ya_runtime_vm::demux_socket_comm::MAX_PACKET_SIZE;
 
 struct Notifications {
     process_died: Mutex<HashMap<u64, Arc<sync::Notify>>>,
@@ -322,7 +324,9 @@ async fn main() -> io::Result<()> {
         let mut ga = ga_mutex.lock().await;
 
         for ContainerVolume { name, path } in mount_args.iter() {
-            if let Err(e) = ga.mount(name, path).await? {
+            let max_p9_packet_size = u32::try_from(MAX_PACKET_SIZE).unwrap();
+
+            if let Err(e) = ga.mount(name, max_p9_packet_size, path).await? {
                 log::error!("Mount failed at {name}, {path}, {e}")
             }
         }

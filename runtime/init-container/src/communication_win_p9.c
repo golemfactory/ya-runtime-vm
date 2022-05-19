@@ -228,7 +228,7 @@ int initialize_p9_socket_descriptors() {
     return 0;
 }
 
-uint32_t do_mount_win_p9(const char* tag, uint8_t channel, char* path) {
+uint32_t do_mount_win_p9(const char* tag, uint8_t channel, uint32_t max_p9_message_size, char* path) {
     if (channel >= MAX_P9_VOLUMES) {
         fprintf(stderr, "ERROR: channel >= MAX_P9_VOLUMES\n");
         return -1;
@@ -254,12 +254,13 @@ uint32_t do_mount_win_p9(const char* tag, uint8_t channel, char* path) {
     char* mount_cmd = NULL;
     int mount_socked_fd = g_p9_socket_fds[channel][0];
     // TODO: snprintf
-    int buf_size = asprintf(&mount_cmd, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L,msize=65535", mount_socked_fd, mount_socked_fd);
+    int buf_size = asprintf(&mount_cmd, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L,msize=%d", mount_socked_fd, mount_socked_fd, max_p9_message_size);
     if (buf_size < 0) {
         free(mount_cmd);
         return errno;
     }
     fprintf(stderr, "Starting mount: tag: %s, path: %s\n", tag, path);
+    fprintf(stderr, "Mount command: %s\n", mount_cmd);
     if (mount(tag, path, "9p", 0, mount_cmd) < 0) {
         fprintf(stderr, "Mount finished with error: %d\n", errno);
         return errno;

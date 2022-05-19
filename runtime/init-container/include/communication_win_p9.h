@@ -7,7 +7,7 @@
 
 
 int initialize_p9_socket_descriptors();
-uint32_t do_mount_win_p9(const char* tag, uint8_t channel, char* path);
+uint32_t do_mount_win_p9(const char* tag, uint8_t channel, uint32_t max_p9_message_size, char* path);
 
 #define MAX_P9_VOLUMES (100)
 #define MAX_PACKET_SIZE (0x40000) //262144

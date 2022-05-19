@@ -12,7 +12,6 @@ use tokio::{
     io::{split, AsyncWriteExt, ReadHalf, WriteHalf},
     spawn, time,
 };
-
 pub use crate::response_parser::Notification;
 use crate::response_parser::{parse_one_response, GuestAgentMessage, Response, ResponseWithId};
 
@@ -57,6 +56,7 @@ enum SubMsgKillProcessType {
 enum SubMsgMountVolumeType<'a> {
     SubMsgEnd,
     SubMsgMountVolumeTag(&'a [u8]),
+    SubMsgMountVolumeMaxP9MessageSize(u32),
     SubMsgMountVolumePath(&'a [u8]),
 }
 
@@ -288,8 +288,12 @@ impl EncodeInto for SubMsgMountVolumeType<'_> {
                 1u8.encode_into(buf);
                 tag.encode_into(buf);
             }
-            SubMsgMountVolumeType::SubMsgMountVolumePath(path) => {
+            SubMsgMountVolumeType::SubMsgMountVolumeMaxP9MessageSize(tag) => {
                 2u8.encode_into(buf);
+                tag.encode_into(buf);
+            }
+            SubMsgMountVolumeType::SubMsgMountVolumePath(path) => {
+                3u8.encode_into(buf);
                 path.encode_into(buf);
             }
         }
@@ -663,13 +667,15 @@ impl GuestAgent {
         self.get_ok_response(msg_id).await
     }
 
-    pub async fn mount(&mut self, tag: &str, path: &str) -> io::Result<RemoteCommandResult<()>> {
+    pub async fn mount(&mut self, tag: &str, p9_max_msg_size: u32, path: &str) -> io::Result<RemoteCommandResult<()>> {
         let mut msg = Message::default();
         let msg_id = self.get_new_msg_id();
 
         msg.create_header(msg_id);
 
         msg.append_submsg(&SubMsgMountVolumeType::SubMsgMountVolumeTag(tag.as_bytes()));
+
+        msg.append_submsg(&SubMsgMountVolumeType::SubMsgMountVolumeMaxP9MessageSize(p9_max_msg_size));
 
         msg.append_submsg(&SubMsgMountVolumeType::SubMsgMountVolumePath(
             path.as_bytes(),
