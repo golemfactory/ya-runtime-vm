@@ -108,7 +108,7 @@ static void enqueue_channel_event(uint8_t channel, char* buffer, struct io_uring
     meta->writer_cursor = 0;
     meta->msg_bytes_left = 0;
     meta->channel_to_write = -1;
-    meta->io.iov_base = buffer;
+    meta->io.iov_base = buffer + 3;
     meta->io.iov_len = MAX_PACKET_SIZE;
 
     // read from channel
@@ -269,7 +269,7 @@ struct socket_framing {
 struct socket_framing* sf_new(char* buffer, int size) {
     struct socket_framing* res = malloc(sizeof(struct socket_framing));
 
-    res->cb = cb_new(buffer, MAX_PACKET_SIZE);
+    res->cb = cb_new(buffer, size);
     res->state = parsing_header;
     res->meta = malloc(sizeof(struct metadata));
     res->meta->buffer = malloc(MAX_PACKET_SIZE);
@@ -277,7 +277,7 @@ struct socket_framing* sf_new(char* buffer, int size) {
     return res;
 }
 
-void sf_free(struct socket_framing* sf) {
+void sf_free(struct socket_framing *sf) {
     free(sf->meta->buffer);
     free(sf->meta);
     free(sf);
@@ -326,76 +326,7 @@ struct metadata* sf_pop_message(struct socket_framing* ctx) {
     return NULL;
 }
 
-struct metadata* sf_pop_request_message(struct socket_framing* ctx, uint8_t channel) {
-// P9 header is bigger than that, but we are interested only in size of the packet field
-#define P9_HEADER_SIZE 4
-    if (ctx->state == parsing_header) {
-        if (cb_read_exact(ctx->cb, ctx->meta->buffer + HEADER_SIZE, P9_HEADER_SIZE)) {
-            ctx->meta->buffer[0] = channel;
-
-            int size = ((int*)(ctx->meta->buffer + HEADER_SIZE))[0];
-
-            // TODO: change muxer header to contain 4 bytes size
-            ((uint16_t*)(ctx->meta->buffer + 1))[0] = (uint16_t)size;
-
-            ctx->meta->packet_size = size + HEADER_SIZE;
-            ctx->meta->link = 1;
-            ctx->meta->channel = channel;
-            ctx->meta->msg_bytes_left = ctx->meta->packet_size;
-            ctx->meta->reader_cursor = 0;
-            ctx->meta->writer_cursor = 0;
-
-            // #ifdef URING_TRACE
-            fprintf(stderr, "Encoded header for channel %d, packet size %d, p9 size %d\n", channel, ctx->meta->packet_size, size);
-            // #endif
-            ctx->state = reading_payload;
-        }
-    }
-
-    if (ctx->state == reading_payload) {
-        fprintf(stderr, "Reading payload channel %d, packet size %d, to read %d\n", ctx->meta->channel, ctx->meta->packet_size,
-        ctx->meta->packet_size - HEADER_SIZE - P9_HEADER_SIZE);
-
-        if (cb_read_exact(ctx->cb, ctx->meta->buffer + HEADER_SIZE + P9_HEADER_SIZE,
-                          ctx->meta->packet_size - HEADER_SIZE - P9_HEADER_SIZE)) {
-            ctx->state = message_ready;
-        }
-    }
-
-    if (ctx->state == message_ready) {
-        fprintf(stderr, "Message ready! for channel %d, packet size %d\n", ctx->meta->channel, ctx->meta->packet_size);
-
-        ctx->state = parsing_header;
-
-        struct metadata* ready = ctx->meta;
-
-        // TODO: Oh god
-        ctx->meta = malloc(sizeof(struct metadata));
-        ctx->meta->buffer = malloc(MAX_PACKET_SIZE);
-
-        return ready;
-    }
-
-    return NULL;
-    // encoding
-    // meta->buffer[0] = meta->channel;
-
-    // // TODO: handle short read - get data from 9p message?
-    // ((uint16_t*)(meta->buffer + 1))[0] = cqe->res;
-
-    // int p9_size = ((int*)(meta->buffer + HEADER_SIZE))[0];
-
-    // int16_t tag = ((uint16_t*)(meta->buffer + HEADER_SIZE + 4 + 1))[0];
-
-    //     if (cqe->res != p9_size) {
-    //     fprintf(stderr, "SHORT READ from socket pair %d read %d 9p size %d tag %d\n", meta->channel,
-    //             cqe->res, p9_size, tag);
-    //     fflush(stderr);
-    //     goto error;
-    // }
-}
-
-#define URING_TRACE
+// #define URING_TRACE
 
 static void* poll_9p_messages(void* data) {
     (void)data;
@@ -424,15 +355,13 @@ static void* poll_9p_messages(void* data) {
     struct io_uring_sqe* sqe;
     struct io_uring_cqe* cqe;
 
-    struct socket_framing* request_framer[MAX_P9_VOLUMES];
     //////////////////
     for (int i = 0; i < MAX_P9_VOLUMES; i++) {
         fprintf(stderr, "register for %d\n", i);
 
+        // No event for that fd
         struct metadata* meta = malloc(sizeof(struct metadata));
         enqueue_channel_event(i, buffer + i * MAX_PACKET_SIZE, &ring, meta);
-
-        request_framer[i] = sf_new(buffer + i * MAX_PACKET_SIZE, MAX_PACKET_SIZE);
     }
 
     // read from gp9 -> write to sock
@@ -487,41 +416,32 @@ static void* poll_9p_messages(void* data) {
 
             // got data from socketpair
             if (meta->link == 0) {
+                meta->buffer[0] = meta->channel;
 
-                struct socket_framing* req_sf = request_framer[meta->channel];
+                // TODO: handle short read - get data from 9p message?
+                ((uint16_t*)(meta->buffer + 1))[0] = cqe->res;
 
-                cb_advance_writer(req_sf->cb, cqe->res);
+                int p9_size = ((int*)(meta->buffer + HEADER_SIZE))[0];
 
-                struct metadata* write_message = NULL;
+                int16_t tag = ((uint16_t*)(meta->buffer + HEADER_SIZE + 4 + 1))[0];
 
-                while ((write_message = sf_pop_request_message(req_sf, meta->channel))) {
-#ifdef URING_TRACE
-                    fprintf(stderr, "enqueue write request for channel %d, size %d\n", write_message->channel,
-                            write_message->packet_size);
-#endif
-                    // TODO: add a queue struct
-                    write_queue[write_queue_end] = write_message;
-                    write_queue_end = (write_queue_end + 1) % MAX_P9_VOLUMES;
+                // TODO: handle short read here
+                if (cqe->res != p9_size) {
+                    fprintf(stderr, "SHORT READ from socket pair %d read %d 9p size %d tag %d ignored...\n", meta->channel,
+                            cqe->res, p9_size, tag);
+                    fflush(stderr);
+                    // goto error;
                 }
 
-                int avaliable = cb_write_space(req_sf->cb);
-#ifdef URING_TRACE
-                fprintf(stderr, "avaliable for request %d\n", avaliable);
-#endif
+                // switch to write
+                meta->link++;
 
-                // Re-queue read from socket pair
-                meta->buffer = req_sf->cb->buffer + req_sf->cb->writer_cursor;
-                meta->msg_bytes_left = avaliable;
+                meta->msg_bytes_left = cqe->res + HEADER_SIZE;
+                meta->writer_cursor = 0;
 
-                sqe = io_uring_get_sqe(&ring);
+                write_queue[write_queue_end] = meta;
+                write_queue_end = (write_queue_end + 1) % MAX_P9_VOLUMES;
 
-                if (!sqe) {
-                    fprintf(stderr, "req: sqe == null!\n");
-                    goto error;
-                }
-
-                io_uring_prep_read(sqe, g_p9_socket_fds[meta->channel][1], meta->buffer, meta->msg_bytes_left, 0);
-                io_uring_sqe_set_data(sqe, meta);
             } else if (meta->link == 1) {
                 meta->msg_bytes_left -= cqe->res;
                 meta->writer_cursor += cqe->res;
@@ -645,11 +565,7 @@ error:
     io_uring_unregister_files(&ring);
     io_uring_queue_exit(&ring);
     free(buffer);
-
     sf_free(response_framer);
-    for (int i = 0; i < MAX_P9_VOLUMES; i++) {
-        sf_free(request_framer[i]);
-    }
 
     return NULL;
 }
