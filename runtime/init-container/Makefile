@@ -78,9 +78,9 @@ $(SRC_DIR)/forward.o: $(SRC_DIR)/forward.c
 %.o: %.c
 	$(QUIET_CC)$(CC) $(CFLAGS) -o $@ -c $^
 
-init: $(UNPACKED_HEADERS) liburing $(OBJECTS) $(OBJECTS_EXT)
-	@echo "Compile params for init:" $(CC) $(CFLAGS)
-	$(QUIET_CC)$(CC) $(CFLAGS) -static -o $@ $(wordlist 3, $(words $^), $^) "$(CURDIR)/$(LIBURING_DIR)/src/liburing.a"
+init: liburing $(OBJECTS) $(OBJECTS_EXT)
+	@echo "Compile params for init:" $(CC) $(CFLAGS) $(OBJECTS)
+	$(QUIET_CC)$(CC) $(CFLAGS) -static -o $@ $(wordlist 2, $(words $^), $^) $(LDFLAGS) "$(CURDIR)/$(LIBURING_DIR)/src/liburing.a"
 	@# default musl libs on some distros have debug symbols, lets strip them (and everything else)
 	strip $@
 
