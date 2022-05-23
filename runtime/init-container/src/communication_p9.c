@@ -60,24 +60,6 @@ static pthread_t g_p9_tunnel_thread_sender;
 // TODO: idea of using chains for copy fds, that's what exactly happens here
 // https://blogs.oracle.com/linux/post/an-introduction-to-the-io-uring-asynchronous-io-framework
 
-// TODO: reorder fields
-struct read_metadata {
-    // TODO: used only in socket pairs
-    uint8_t channel;
-
-    char* buffer;
-    int32_t reader_cursor;
-    struct iovec io;
-};
-
-struct write_metadata {
-    uint8_t channel;
-    uint16_t packet_size;
-    char* buffer;
-    int32_t writer_cursor;
-    uint16_t msg_bytes_left;
-};
-
 struct metadata_base;
 
 typedef int cb_func_t(struct io_uring *ring, struct metadata_base *state, int res);
@@ -85,6 +67,7 @@ typedef int cb_func_t(struct io_uring *ring, struct metadata_base *state, int re
 struct metadata_base {
   cb_func_t *cb;
   int link;
+  int cmds;
 };
 
 struct metadata_write_s {
@@ -96,263 +79,32 @@ struct metadata_write_s {
 };
 
 
-struct metadata {
-    int (*cb)(struct io_uring *ring, struct metadata *state, int res);
-    int fd;
-    int32_t reader_cursor;
-    int32_t writer_cursor;
-    uint8_t channel;
-
-    uint8_t channel_to_write;
-
-    // TODO: used in socketpair
-    int link;
-
-    char* buffer;
-    int msg_bytes_left;
-
-
-    union {
-        // writer
-        struct {
-            uint16_t packet_size;
-        };
-
-        // reader
-        struct {
-            // TODO: used only in socket pairs
-            struct iovec io;
-        };
-        // struct write_metadata;
-        // struct read_metadata;
-    };
-};
-
-static void enqueue_channel_event(uint8_t channel, char* buffer, struct io_uring* ring, struct metadata* meta) {
-    meta->channel = channel;
-    meta->link = 0;
-    meta->buffer = buffer;
-    meta->reader_cursor = 0;
-    meta->writer_cursor = 0;
-    meta->msg_bytes_left = 0;
-    meta->channel_to_write = -1;
-    meta->io.iov_base = buffer + HEADER_SIZE;
-    meta->io.iov_len = MAX_PACKET_SIZE;
-
-    // read from channel
+static void io_read(struct io_uring *ring, struct metadata_base *state, int fd, char *buf, size_t len) {
+    if (state->cmds++!= 0) {
+      fprintf(stderr, "FATAL: on read task locked: %d\n", state->cmds);
+    }
+    if (len == 0) {
+      fprintf(stderr, "FATAL: empty read\n");
+    }
     struct io_uring_sqe* sqe = io_uring_get_sqe(ring);
-
-    io_uring_prep_readv(sqe, g_p9_socket_fds[channel][1], &meta->io, 1, 0);
-
-    io_uring_sqe_set_data(sqe, meta);
+    io_uring_prep_read(sqe, fd, buf, len, 0);
+    io_uring_sqe_set_data(sqe, state);
+    sqe->flags |= IOSQE_ASYNC;
 }
 
-static void enqueue_socket_event(char* buffer, struct io_uring* ring, struct metadata* meta) {
-    meta->channel = MAX_P9_VOLUMES;
-    meta->link = 0;
-    meta->buffer = buffer;
-    meta->channel_to_write = -1;
-
-    meta->reader_cursor = 0;
-    meta->writer_cursor = 0;
-    meta->msg_bytes_left = 0;
-
-    meta->io.iov_base = buffer;
-    meta->io.iov_len = MAX_PACKET_SIZE * MAX_P9_VOLUMES;
-
-    // read from channel
-    struct io_uring_sqe* sqe = io_uring_get_sqe(ring);
-    io_uring_prep_readv(sqe, g_p9_fd, &meta->io, 1, 0);
-
-    // sqe->user_data = ((unsigned long long)0xc0fe0) << 32 | i;
-    io_uring_sqe_set_data(sqe, meta);
-}
-
-int min(int a, int b) {
-    return a < b ? a : b;
-}
-
-struct c_buffer {
-    char* buffer;
-    int size;
-    int occupied;
-
-    int reader_cursor;
-    int writer_cursor;
-};
-
-struct c_buffer* cb_new(char* buffer, int size) {
-    struct c_buffer* res = malloc(sizeof(struct c_buffer));
-
-    res->buffer = buffer;
-    res->size = size;
-    res->occupied = 0;
-    res->reader_cursor = 0;
-    res->writer_cursor = 0;
-
-    return res;
-}
-
-// returns number of contigious bytes free to write
-int cb_write_space(struct c_buffer* cb) {
-    if (cb->writer_cursor == cb->reader_cursor) {
-        assert(cb->occupied == cb->size || cb->occupied == 0);
-        if (cb->occupied == cb->size) {
-            return 0;
-        } else {
-            return cb->size - cb->writer_cursor;
-        }
-    } else if (cb->writer_cursor > cb->reader_cursor) {
-        return cb->size - cb->writer_cursor;
-    } else {
-        return cb->reader_cursor - cb->writer_cursor;
+static void io_write(struct io_uring *ring, struct metadata_base *state, int fd, char *buf, size_t len) {
+    if (state->cmds++ != 0) {
+      fprintf(stderr, "FATAL: on write task locked: %d\n", state->cmds);
     }
-}
-
-// returns number of contigious bytes free to read
-int cb_read_space(struct c_buffer* cb) {
-    if (cb->reader_cursor == cb->writer_cursor) {
-        assert(cb->occupied == cb->size || cb->occupied == 0);
-        if (cb->occupied == cb->size) {
-            return cb->size - cb->reader_cursor;
-        } else {
-            return 0;
-        }
-
-    } else if (cb->reader_cursor < cb->writer_cursor) {
-        return cb->writer_cursor - cb->reader_cursor;
-    } else {
-        return cb->size - cb->reader_cursor;
+    if (len == 0) {
+      fprintf(stderr, "FATAL: empty write\n");
     }
+      struct io_uring_sqe* sqe = io_uring_get_sqe(ring);
+    io_uring_prep_write(sqe, fd, buf, len, 0);
+    io_uring_sqe_set_data(sqe, state);
+    sqe->flags |= IOSQE_ASYNC;
 }
 
-// get number of stored bytes
-int cb_len(struct c_buffer* cb) {
-    return cb->occupied;
-}
-
-// returns total number of avaliable bytes to write
-int cb_avaliable(struct c_buffer* cb) {
-    return cb->size - cb->occupied;
-}
-
-void cb_advance_reader(struct c_buffer* cb, int size) {
-    cb->reader_cursor = (cb->reader_cursor + size) % cb->size;
-    cb->occupied -= size;
-}
-
-void cb_advance_writer(struct c_buffer* cb, int size) {
-    cb->writer_cursor = (cb->writer_cursor + size) % cb->size;
-    cb->occupied += size;
-}
-
-// reads exact amount of bytes from buffer, returns -1 if there is no enough
-// data or requested read is <= 0 bytes
-bool cb_read_exact(struct c_buffer* cb, char* dst, int dst_size) {
-    if (cb_len(cb) < dst_size || dst_size <= 0) {
-        return false;
-    }
-
-    int read = 0;
-    int dst_offset = 0;
-    while (read < dst_size) {
-        int chunk = min(dst_size, cb_read_space(cb));
-        memcpy(dst + dst_offset, cb->buffer + cb->reader_cursor, chunk);
-        cb_advance_reader(cb, chunk);
-        read += chunk;
-        dst_offset += chunk;
-    }
-
-    return true;
-}
-
-// write exact src_size bytes to buffer, returns false otherwise
-bool cb_write_exact(struct c_buffer* cb, const char* src, int src_size) {
-    if (cb_avaliable(cb) < src_size) {
-        return false;
-    }
-
-    int written = 0;
-    int src_offset = 0;
-
-    while (written < src_size) {
-        int chunk = min(src_size, cb_write_space(cb));
-        memcpy(cb->buffer + cb->writer_cursor, src + src_offset, chunk);
-        cb_advance_writer(cb, chunk);
-        written += chunk;
-        src_offset += chunk;
-    }
-
-    return true;
-}
-
-enum framing_state { parsing_header, reading_payload, message_ready };
-struct socket_framing {
-    struct c_buffer* cb;
-
-    struct metadata* meta;
-    enum framing_state state;
-};
-
-struct socket_framing* sf_new(char* buffer, int size) {
-    struct socket_framing* res = malloc(sizeof(struct socket_framing));
-
-    res->cb = cb_new(buffer, size);
-    res->state = parsing_header;
-    res->meta = malloc(sizeof(struct metadata));
-    res->meta->buffer = malloc(MAX_PACKET_SIZE);
-
-    return res;
-}
-
-void sf_free(struct socket_framing *sf) {
-    free(sf->meta->buffer);
-    free(sf->meta);
-    free(sf);
-}
-
-// Returns meta struct if there is avaliable message to write
-struct metadata* sf_pop_message(struct socket_framing* ctx) {
-    if (ctx->state == parsing_header) {
-        if (cb_read_exact(ctx->cb, ctx->meta->buffer, HEADER_SIZE)) {
-            // successfully read the header
-            ctx->meta->channel_to_write = ctx->meta->buffer[0];
-            ctx->meta->packet_size = ((uint16_t*)(ctx->meta->buffer + 1))[0];
-            ctx->meta->msg_bytes_left = ctx->meta->packet_size;
-            ctx->meta->channel = MAX_P9_VOLUMES;
-            ctx->meta->link = 1;
-            ctx->meta->reader_cursor = 0;
-            ctx->meta->writer_cursor = HEADER_SIZE;
-
-#ifdef URING_TRACE
-            fprintf(stderr, "read the header channel %d, packet size %d\n", ctx->meta->channel_to_write,
-                    ctx->meta->packet_size);
-#endif
-            ctx->state = reading_payload;
-        }  // TODO: else
-    }
-
-    if (ctx->state == reading_payload) {
-        if (cb_read_exact(ctx->cb, ctx->meta->buffer + HEADER_SIZE, ctx->meta->packet_size)) {
-            // whole message is in meta buffer
-            ctx->state = message_ready;
-        }
-    }
-
-    if (ctx->state == message_ready) {
-        ctx->state = parsing_header;
-
-        struct metadata* ready = ctx->meta;
-
-        // TODO: Oh god
-        ctx->meta = malloc(sizeof(struct metadata));
-        ctx->meta->buffer = malloc(MAX_PACKET_SIZE);
-
-        return ready;
-    }
-
-    return NULL;
-}
 
 // #define URING_TRACE
 // 
@@ -403,35 +155,24 @@ static int task_read_n(struct io_uring *ring, struct metadata_read_n *state, int
     switch(state->base.link) {
     
       case 0: {
-        struct io_uring_sqe* sqe = io_uring_get_sqe(ring);
-        io_uring_prep_read(sqe, state->fd, state->buffer+HEADER_SIZE, MAX_PACKET_SIZE-HEADER_SIZE, 0);
-        io_uring_sqe_set_data(sqe, state);
+        io_read(ring, &state->base, state->fd, state->buffer+HEADER_SIZE, MAX_PACKET_SIZE-HEADER_SIZE);
         state->base.link = 1;
         return 0;
       }
       case 1:
         state->reader_cursor+=res;
-        if (state->reader_cursor < 4) {
-        struct io_uring_sqe* sqe = io_uring_get_sqe(ring);
-          io_uring_prep_read(sqe, 
-            state->fd, 
-            state->buffer + HEADER_SIZE + state->reader_cursor, 
-            MAX_PACKET_SIZE-HEADER_SIZE - state->reader_cursor, 
-            0
-          );
-          io_uring_sqe_set_data(sqe, state);
-          return  0;
+        if (state->reader_cursor >= 4) {
+          p9_size = ((uint32_t*)(state->buffer + HEADER_SIZE))[0];
         }
-        p9_size = ((uint32_t*)(state->buffer + HEADER_SIZE))[0];
-        if (state->reader_cursor < p9_size) {
-          struct io_uring_sqe* sqe = io_uring_get_sqe(ring);
-          io_uring_prep_read(sqe, 
-              state->fd, 
+        else {
+          p9_size = 0;
+        }
+
+        if (state->reader_cursor < 4 || state->reader_cursor < p9_size) {
+          io_read(ring, &state->base, state->fd, 
               state->buffer + HEADER_SIZE + state->reader_cursor, 
-              MAX_PACKET_SIZE-HEADER_SIZE - state->reader_cursor, 
-              0
+              MAX_PACKET_SIZE - HEADER_SIZE - state->reader_cursor 
           );
-          io_uring_sqe_set_data(sqe, state);
           return  0;
         }
         state->buffer[0] = state->channel;
@@ -482,14 +223,9 @@ static int task_write_s(struct io_uring *ring, struct metadata_write_s *state, i
         io_uring_prep_writev(sqe, state->fd, state->bv, state->to_write_tasks, 0);
         io_uring_sqe_set_data(sqe, state);
         */
-        struct io_uring_sqe* sqe = io_uring_get_sqe(ring);
-        size_t wbytes = min_int(1024, state->bv[0].iov_len); 
-        if (wbytes == 0) {
-          abort();
-        }
-        io_uring_prep_write(sqe, state->fd, state->bv[0].iov_base, wbytes, 0);
-        io_uring_sqe_set_data(sqe, state);
 
+        size_t wbytes = state->bv[0].iov_len;
+        io_write(ring, &state->base, state->fd, state->bv[0].iov_base, wbytes);
         state->base.link = 1;
         return 0;
       case 1:
@@ -537,6 +273,14 @@ struct metadata_read_s {
   int fd;
 };
 
+static int sync_read_s(struct io_uring *ring, struct metadata_read_s *state) {
+  fprintf(stderr, "start sync\n");
+  int res = read(state->fd, state->buf + state->read_pos, sizeof(state->buf) - state->read_pos);
+  fprintf(stderr, "end sync %d\n", res);
+  state->read_pos+=res;
+  return 0;
+}
+
 static int task_read_s(struct io_uring *ring, struct metadata_read_s *state, int res) {
   uint16_t packet_size;
   uint8_t channel;
@@ -545,32 +289,24 @@ static int task_read_s(struct io_uring *ring, struct metadata_read_s *state, int
 
   for(;;) { switch(state->base.link) {
     case 0:
-        sqe = io_uring_get_sqe(ring);
-        io_uring_prep_read(sqe, state->fd, state->buf, min_int(sizeof(state->buf), 1024), 0);
-        io_uring_sqe_set_data(sqe, state);
+      io_read(ring, &state->base, state->fd, state->buf + state->read_pos, sizeof(state->buf) - state->read_pos);
         state->base.link = 1;
         return 0;
     case 1: {
          state->read_pos += res;
          int in_buffer = state->read_pos - state->write_pos;
          if (in_buffer < HEADER_SIZE) {
-            struct io_uring_sqe* sqe = io_uring_get_sqe(ring);
-            io_uring_prep_read(sqe, state->fd, state->buf + state->read_pos, min_int(sizeof(state->buf) - state->read_pos, 1024), 0);
-            io_uring_sqe_set_data(sqe, state);
+            io_read(ring, &state->base, state->fd, state->buf + state->read_pos, sizeof(state->buf) - state->read_pos);
             return 0;
          }
          channel = *((uint8_t *)state->buf);
          packet_size = *(uint16_t *)(state->buf+1);
          if (in_buffer < packet_size) {
-            struct io_uring_sqe* sqe = io_uring_get_sqe(ring);
-            io_uring_prep_read(sqe, state->fd, state->buf + state->read_pos, min_int(sizeof(state->buf) - state->read_pos, 1024), 0);
-            io_uring_sqe_set_data(sqe, state);
+            io_read(ring, &state->base, state->fd, state->buf + state->read_pos, sizeof(state->buf) - state->read_pos);
             return 0;
         }
-        struct io_uring_sqe* sqe = io_uring_get_sqe(ring);
         state->write_pos = HEADER_SIZE;
-        io_uring_prep_write(sqe, g_p9_socket_fds[channel][1], state->buf + state->write_pos, packet_size, 0);
-        io_uring_sqe_set_data(sqe, state);
+        io_write(ring, &state->base, g_p9_socket_fds[channel][1], state->buf + state->write_pos, packet_size);
         state->base.link = 3;
         return 0;
       }
@@ -581,12 +317,12 @@ static int task_read_s(struct io_uring *ring, struct metadata_read_s *state, int
         LOG_DEBUG("task_read_s channel=%d packet_size=%d write_pos=%d\n", channel, packet_size, state->write_pos);
 
         if (state->write_pos < packet_size + HEADER_SIZE) {
-          struct io_uring_sqe* sqe = io_uring_get_sqe(ring);
-          io_uring_prep_write(sqe, g_p9_socket_fds[channel][1], state->buf + state->write_pos, packet_size - state->write_pos + HEADER_SIZE, 0);
-          io_uring_sqe_set_data(sqe, state);
+          io_write(ring, &state->base, g_p9_socket_fds[channel][1], state->buf + state->write_pos, packet_size - state->write_pos + HEADER_SIZE);
           return 0;
         }
-        memmove(state->buf, state->buf+packet_size+HEADER_SIZE, state->read_pos - state->write_pos);
+        if (state->write_pos < state->read_pos) {
+          memmove(state->buf, state->buf+packet_size+HEADER_SIZE, state->read_pos - state->write_pos);
+        }
         state->read_pos -= state->write_pos;
         state->write_pos = 0;
         state->base.link = 0;
@@ -652,7 +388,7 @@ static void* poll_9p_messages(void* data) {
     task_read_s(&ring, read_s, 0);
 
     int n_submit = io_uring_submit(&ring);
-    LOG_DEBUG(stderr, "submit: %d\n", n_submit);
+    LOG_DEBUG("submit: %d\n", n_submit);
 
     while (1) {
         sqe = NULL;
@@ -663,6 +399,20 @@ static void* poll_9p_messages(void* data) {
             fprintf(stderr, "timeout write_s(%d/%d) read_s(%d/%d)\n", 
                 write_s->base.link, write_s->to_write_tasks,
                 read_s->base.link, read_s->read_pos);
+            if (read_s->read_pos >3) {
+              int channel = *((uint8_t *)read_s->buf);
+              int packet_size = *(uint16_t *)(read_s->buf+1);
+              fprintf(stderr, "in buf channel=%d, packet=%d\n\n", channel, packet_size);
+            }
+
+            for (int i=0; i<20&& i<read_s->read_pos; ++i) {
+              fprintf(stderr, "%02x ", (uint8_t)read_s->buf[i]);
+            }
+            fprintf(stderr, "\n");
+            if (read_s->read_pos == 0 && read_s->base.link == 1) {
+              read_s->buf[read_s->read_pos] = 0;
+            }
+            //task_read_s(&ring, read_s, 0);
             continue;
         }
         if (uwret < 0) {
@@ -670,9 +420,11 @@ static void* poll_9p_messages(void* data) {
         }
         if (cqe->res < 0) {
             fprintf(stderr, "POLL: P9 cqe with data 0x%llX, returned error %d!\n", cqe->user_data, cqe->res);
+            goto error;
         }
 
-        struct metadata* meta = io_uring_cqe_get_data(cqe);
+        struct metadata_base* meta = io_uring_cqe_get_data(cqe);
+        --meta->cmds;
         if ((meta->cb)(&ring, meta, cqe->res) != 0) {
           fprintf(stderr, "POLL: P9 cqe with data 0x%llX, callback failed\n", cqe->user_data);
           goto error;

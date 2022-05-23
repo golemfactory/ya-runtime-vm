@@ -183,7 +183,6 @@ impl VMBuilder {
             net_sock: net_sock.display().to_string(),
             p9_sock: p9_sock.display().to_string(),
             // p9_sock: p9_sock.to_string(),
-
             args,
         };
     }

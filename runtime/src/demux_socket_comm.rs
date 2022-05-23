@@ -2,13 +2,12 @@ use futures::future::{AbortHandle, Abortable};
 use std::borrow::BorrowMut;
 use std::convert::TryInto;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 // const MAX_PACKET_SIZE: usize = 16384;
 const MAX_PACKET_SIZE: usize = 65536;
-
 
 pub struct DemuxSocketHandle {
     abort_handle_reader: AbortHandle,
@@ -33,7 +32,7 @@ pub fn start_demux_communication<T>(
     p9_streams: Vec<DuplexStream>,
 ) -> anyhow::Result<DemuxSocketHandle>
 where
-// TODO: static lifetime on the type?
+    // TODO: static lifetime on the type?
     T: AsyncRead + AsyncWrite + Send + 'static,
 {
     log::debug!("start_demux_communication - start");

@@ -236,9 +236,14 @@ async fn test_parallel_write_big_chunk(
         .await
         .unwrap();
 
-        run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-lh", &"/mnt/mnt1/tag0/"])
-            .await
-            .unwrap();
+        run_process_with_output(
+            &mut ga,
+            &notifications,
+            "/bin/ls",
+            &["ls", "-lh", &"/mnt/mnt1/tag0/"],
+        )
+        .await
+        .unwrap();
         // run_process_with_output(&mut ga, &notifications, "/bin/df", &["df","-h"])
         //     .await
         //     .unwrap();
