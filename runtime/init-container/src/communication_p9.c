@@ -48,6 +48,13 @@ static int g_p9_socket_fds[MAX_P9_VOLUMES][2];
 static pthread_t g_p9_tunnel_thread_sender;
 #endif
 
+#ifndef NDEBUG
+#define LOG_DEBUG(args...) fprinf(stderr, args)
+#else 
+#define LOG_DEBUG(args...) do { } while(0)
+#endif
+
+
 #if USE == URING
 
 // TODO: idea of using chains for copy fds, that's what exactly happens here
@@ -356,7 +363,7 @@ struct metadata* sf_pop_message(struct socket_framing* ctx) {
 //
 //
 static int send_to_write(struct io_uring *ring, struct metadata_write_s *write_s, char * buf, size_t len, struct metadata_base *waiter) {
-    fprintf(stderr, "write_s=%p, buf=%p, size=%lu\n", write_s, buf, len);
+    LOG_DEBUG(stderr, "write_s=%p, buf=%p, size=%lu\n", write_s, buf, len);
     int idx = write_s->to_write_tasks++;
     write_s->bv[idx].iov_base = buf;
     write_s->bv[idx].iov_len = len;
@@ -392,7 +399,7 @@ static int task_read_n(struct io_uring *ring, struct metadata_read_n *state, int
   uint32_t p9_size;
 
   for(;;) {
-    fprintf(stderr, "task_read_n %d link=%d\n", res, state->base.link);
+    LOG_DEBUG(stderr, "task_read_n %d link=%d\n", res, state->base.link);
     switch(state->base.link) {
     
       case 0: {
@@ -431,7 +438,7 @@ static int task_read_n(struct io_uring *ring, struct metadata_read_n *state, int
         ((uint16_t*)(state->buffer + 1))[0] = p9_size;      
         state->base.link = 2;
         if (p9_size > 0) {
-          fprintf(stderr, "sending %d bytes\n", p9_size);
+          LOG_DEBUG(stderr, "sending %d bytes\n", p9_size);
           return send_to_write(ring, state->write_s, state->buffer, p9_size+HEADER_SIZE, &state->base);
         }
     
@@ -454,27 +461,40 @@ static int task_read_n(struct io_uring *ring, struct metadata_read_n *state, int
   }
 }
 
+static inline int min_int(int a, int b) {
+  return a<b ? a : b;
+}
+
 static int task_write_s(struct io_uring *ring, struct metadata_write_s *state, int res) {
   int i;
 
    for(;;) {
-    fprintf(stderr, "task_write_s res=%d link=%d\n", res, state->base.link);
+    LOG_DEBUG(stderr, "task_write_s res=%d link=%d\n", res, state->base.link);
     switch(state->base.link) {
       case 0:
         if (state->to_write_tasks == 0) {
-          fprintf(stderr, "write buf is empty\n");
+          LOG_DEBUG(stderr, "write buf is empty\n");
 
           return 0;
         }
 
-        struct io_uring_sqe* sqe = io_uring_get_sqe(ring);
+        /*struct io_uring_sqe* sqe = io_uring_get_sqe(ring);
         io_uring_prep_writev(sqe, state->fd, state->bv, state->to_write_tasks, 0);
         io_uring_sqe_set_data(sqe, state);
+        */
+        struct io_uring_sqe* sqe = io_uring_get_sqe(ring);
+        size_t wbytes = min_int(1024, state->bv[0].iov_len); 
+        if (wbytes == 0) {
+          abort();
+        }
+        io_uring_prep_write(sqe, state->fd, state->bv[0].iov_base, wbytes, 0);
+        io_uring_sqe_set_data(sqe, state);
+
         state->base.link = 1;
         return 0;
       case 1:
         i = 0;
-        fprintf(stderr, "write tasks=%d res=%d\n", state->to_write_tasks, res);
+        LOG_DEBUG(stderr, "write tasks=%d res=%d\n", state->to_write_tasks, res);
         for (; i<state->to_write_tasks; ++i) {
           if (state->bv[i].iov_len <= res) {
             res -= state->bv[i].iov_len; 
@@ -485,7 +505,7 @@ static int task_write_s(struct io_uring *ring, struct metadata_write_s *state, i
             break;
           }
         }
-        fprintf(stderr, "write closed jobs=%d\n", i);
+        LOG_DEBUG(stderr, "write closed jobs=%d\n", i);
         // i = ostatni do końca niezapisany bufor.
         for (int j=0; j<i; j++) {
           (state->waiters[j]->cb)(ring, state->waiters[j], 0);
@@ -521,12 +541,12 @@ static int task_read_s(struct io_uring *ring, struct metadata_read_s *state, int
   uint16_t packet_size;
   uint8_t channel;
   struct io_uring_sqe* sqe;
-  fprintf(stderr, "task_read_s %d %p link=%d\n", res, state, state->base.link);
+  LOG_DEBUG("task_read_s %d %p link=%d\n", res, state, state->base.link);
 
   for(;;) { switch(state->base.link) {
     case 0:
         sqe = io_uring_get_sqe(ring);
-        io_uring_prep_read(sqe, state->fd, state->buf, sizeof(state->buf), 0);
+        io_uring_prep_read(sqe, state->fd, state->buf, min_int(sizeof(state->buf), 1024), 0);
         io_uring_sqe_set_data(sqe, state);
         state->base.link = 1;
         return 0;
@@ -535,7 +555,7 @@ static int task_read_s(struct io_uring *ring, struct metadata_read_s *state, int
          int in_buffer = state->read_pos - state->write_pos;
          if (in_buffer < HEADER_SIZE) {
             struct io_uring_sqe* sqe = io_uring_get_sqe(ring);
-            io_uring_prep_read(sqe, state->fd, state->buf + state->read_pos, sizeof(state->buf) - state->read_pos, 0);
+            io_uring_prep_read(sqe, state->fd, state->buf + state->read_pos, min_int(sizeof(state->buf) - state->read_pos, 1024), 0);
             io_uring_sqe_set_data(sqe, state);
             return 0;
          }
@@ -543,7 +563,7 @@ static int task_read_s(struct io_uring *ring, struct metadata_read_s *state, int
          packet_size = *(uint16_t *)(state->buf+1);
          if (in_buffer < packet_size) {
             struct io_uring_sqe* sqe = io_uring_get_sqe(ring);
-            io_uring_prep_read(sqe, state->fd, state->buf + state->read_pos, sizeof(state->buf) - state->read_pos, 0);
+            io_uring_prep_read(sqe, state->fd, state->buf + state->read_pos, min_int(sizeof(state->buf) - state->read_pos, 1024), 0);
             io_uring_sqe_set_data(sqe, state);
             return 0;
         }
@@ -558,7 +578,7 @@ static int task_read_s(struct io_uring *ring, struct metadata_read_s *state, int
         channel = *((uint8_t *)state->buf);
         packet_size = *(uint16_t *)(state->buf+1);
         state->write_pos += res;
-        fprintf(stderr, "task_read_s channel=%d packet_size=%d write_pos=%d\n", channel, packet_size, state->write_pos);
+        LOG_DEBUG("task_read_s channel=%d packet_size=%d write_pos=%d\n", channel, packet_size, state->write_pos);
 
         if (state->write_pos < packet_size + HEADER_SIZE) {
           struct io_uring_sqe* sqe = io_uring_get_sqe(ring);
@@ -570,7 +590,7 @@ static int task_read_s(struct io_uring *ring, struct metadata_read_s *state, int
         state->read_pos -= state->write_pos;
         state->write_pos = 0;
         state->base.link = 0;
-        fprintf(stderr, "task_read_s write done!!!\n");
+        LOG_DEBUG("task_read_s write done!!!\n");
         continue;
     }
   } }
@@ -622,35 +642,45 @@ static void* poll_9p_messages(void* data) {
     //////////////////
     for (int i = 0; i < MAX_P9_VOLUMES; i++) {
         struct metadata_read_n *reader = new_task_read_n(g_p9_socket_fds[i][1], i, write_s, buffer + i*MAX_PACKET_SIZE);
-        fprintf(stderr, "new task %d %p\n", i, reader);
+        LOG_DEBUG("new task %d %p\n", i, reader);
         task_read_n(&ring, reader, 0);
-        fprintf(stderr, "new task %d started\n", i);
+        LOG_DEBUG("new task %d started\n", i);
     }
     task_write_s(&ring, write_s, 0);
 
     struct metadata_read_s *read_s = new_task_read_s(g_p9_fd);
     task_read_s(&ring, read_s, 0);
 
-    fprintf(stderr, "submit\n");
-    io_uring_submit(&ring);
+    int n_submit = io_uring_submit(&ring);
+    LOG_DEBUG(stderr, "submit: %d\n", n_submit);
 
     while (1) {
         sqe = NULL;
+        struct __kernel_timespec tv = { .tv_sec = 10, .tv_nsec = 0 };
 
-        TRY_OR_GOTO(io_uring_wait_cqe(&ring, &cqe), error);
+        int uwret = io_uring_wait_cqe_timeout(&ring, &cqe, &tv);
+        if (uwret == -62) {
+            fprintf(stderr, "timeout write_s(%d/%d) read_s(%d/%d)\n", 
+                write_s->base.link, write_s->to_write_tasks,
+                read_s->base.link, read_s->read_pos);
+            continue;
+        }
+        if (uwret < 0) {
+          goto error;
+        }
         if (cqe->res < 0) {
             fprintf(stderr, "POLL: P9 cqe with data 0x%llX, returned error %d!\n", cqe->user_data, cqe->res);
         }
 
         struct metadata* meta = io_uring_cqe_get_data(cqe);
-        io_uring_cqe_seen(&ring, cqe);
         if ((meta->cb)(&ring, meta, cqe->res) != 0) {
           fprintf(stderr, "POLL: P9 cqe with data 0x%llX, callback failed\n", cqe->user_data);
           goto error;
         }
+        io_uring_cqe_seen(&ring, cqe);
 
-        int ret = io_uring_submit(&ring);
-        fprintf(stderr, "submited=%d %x\n", ret, ring.flags);
+        //int ret = io_uring_submit(&ring);
+        //LOG_DEBUG("submited=%d %x\n", ret, ring.flags);
     }
 
 error:
@@ -1098,7 +1128,7 @@ uint32_t do_mount_p9(const char* tag, char* path) {
     char* mount_cmd = NULL;
     int mount_socked_fd = g_p9_socket_fds[channel][0];
     // TODO: snprintf
-    int buf_size = asprintf(&mount_cmd, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L", mount_socked_fd,
+    int buf_size = asprintf(&mount_cmd, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L,debug=1", mount_socked_fd,
                             mount_socked_fd);
     if (buf_size < 0) {
         free(mount_cmd);
@@ -1145,7 +1175,7 @@ uint32_t do_mount_p9(const char* tag, char* path) {
         goto error;
     }
 
-    TRY_OR_GOTO(snprintf(mount_cmd, CMD_SIZE, "trans=fd,rfdno=%d,wfdno=%d,debug=0xff,version=9p2000.L",
+    TRY_OR_GOTO(snprintf(mount_cmd, CMD_SIZE, "trans=fd,rfdno=%d,wfdno=%d,debug=1,version=9p2000.L",
                          mount_socket_fd, mount_socket_fd),
                 error);
 

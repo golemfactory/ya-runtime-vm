@@ -2634,7 +2634,6 @@ dependencies = [
 [[package]]
 name = "ya-vm-file-server"
 version = "0.1.1"
-source = "git+https://github.com/golemfactory/ya-vm-file-server#0c9fb4e11b87582f52e5a1514c5b8a4095fba0b9"
 dependencies = [
  "anyhow",
  "async-trait",

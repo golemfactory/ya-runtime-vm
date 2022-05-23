@@ -165,7 +165,7 @@ fn spawn_vm() -> (Child, VM) {
 
     log::info!("CMD: {cmd:?}");
 
-    cmd.stdin(Stdio::null());
+    //cmd.stdin(Stdio::null());
 
     // cmd.stderr(Stdio::null());
     // cmd.stdout(Stdio::null());
