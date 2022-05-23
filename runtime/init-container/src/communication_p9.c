@@ -2,6 +2,7 @@
 
 #include "communication_p9.h"
 
+#include <sys/mount.h>
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -17,7 +18,6 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/mman.h>
-#include <sys/mount.h>
 #include <sys/reboot.h>
 #include <sys/signalfd.h>
 #include <sys/socket.h>
@@ -108,8 +108,8 @@ static void enqueue_channel_event(uint8_t channel, char* buffer, struct io_uring
     meta->writer_cursor = 0;
     meta->msg_bytes_left = 0;
     meta->channel_to_write = -1;
-    meta->io.iov_base = buffer + 3;
-    meta->io.iov_len = MAX_PACKET_SIZE;
+    meta->io.iov_base = buffer + HEADER_SIZE;
+    meta->io.iov_len = MAX_PACKET_SIZE - HEADER_SIZE;
 
     // read from channel
     struct io_uring_sqe* sqe = io_uring_get_sqe(ring);
@@ -424,6 +424,8 @@ static void* poll_9p_messages(void* data) {
                 int p9_size = ((int*)(meta->buffer + HEADER_SIZE))[0];
 
                 int16_t tag = ((uint16_t*)(meta->buffer + HEADER_SIZE + 4 + 1))[0];
+
+                fprintf(stderr, "p9_size %d\n", p9_size);
 
                 // TODO: handle short read here
                 if (cqe->res != p9_size) {
