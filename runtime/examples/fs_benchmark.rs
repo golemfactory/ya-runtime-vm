@@ -14,7 +14,7 @@ use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
 use ya_runtime_vm::vm::{VMBuilder, VM};
 use std::convert::TryFrom;
-use ya_runtime_vm::demux_socket_comm::{MAX_DEMUX_PACKET_SIZE, MAX_P9_PACKET_SIZE};
+use ya_runtime_vm::demux_socket_comm::{MAX_P9_PACKET_SIZE};
 use structopt::StructOpt;
 
 struct Notifications {

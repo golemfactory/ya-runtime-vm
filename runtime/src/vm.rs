@@ -9,7 +9,7 @@ use tokio::{net::TcpStream, process::Command, time::sleep};
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 use ya_vm_file_server::InprocServer;
 
-use crate::demux_socket_comm::{start_demux_communication, DemuxSocketHandle, MAX_DEMUX_PACKET_SIZE, MAX_P9_PACKET_SIZE};
+use crate::demux_socket_comm::{start_demux_communication, DemuxSocketHandle, MAX_P9_PACKET_SIZE};
 
 const FILE_VMLINUZ: &str = "vmlinuz-virt";
 const FILE_INITRAMFS: &str = "initramfs.cpio.gz";

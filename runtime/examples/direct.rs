@@ -8,7 +8,7 @@ use std::{
 };
 use tokio::{process::Child, sync};
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
-use ya_runtime_vm::demux_socket_comm::MAX_PACKET_SIZE;
+use ya_runtime_vm::demux_socket_comm::{MAX_P9_PACKET_SIZE};
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
 use ya_runtime_vm::vm::{VMBuilder, VM};
 use std::convert::TryFrom;
@@ -161,7 +161,7 @@ async fn main() -> io::Result<()> {
     let mut ga = ga_mutex.lock().await;
 
     for ContainerVolume { name, path } in mount_args.iter() {
-        let max_p9_packet_size = u32::try_from(MAX_PACKET_SIZE).unwrap();
+        let max_p9_packet_size = u32::try_from(MAX_P9_PACKET_SIZE).unwrap();
         ga.mount(name, max_p9_packet_size, path).await?.expect("Mount failed");
     }
 
