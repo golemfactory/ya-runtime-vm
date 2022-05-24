@@ -110,10 +110,6 @@ fn get_project_dir() -> PathBuf {
         .unwrap()
 }
 
-fn get_root_dir() -> PathBuf {
-    get_project_dir().join("..").canonicalize().unwrap()
-}
-
 fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
     dunce::simplified(
         path.as_ref()
@@ -132,7 +128,6 @@ fn spawn_vm() -> (Child, VM) {
     #[cfg(unix)]
     let vm_executable = "vmrt";
 
-    let root_dir = get_root_dir();
     let project_dir = get_project_dir();
     let runtime_dir = project_dir.join("poc").join("runtime");
     let image_dir = project_dir.join("poc").join("squashfs");
@@ -147,7 +142,7 @@ fn spawn_vm() -> (Child, VM) {
 
     println!("CMD: {cmd:?}");
 
-    cmd.stdin(Stdio::null());
+    cmd.stdin(Stdio::piped());
     cmd.current_dir(runtime_dir);
     (cmd.spawn().expect("failed to spawn VM"), vm)
 }

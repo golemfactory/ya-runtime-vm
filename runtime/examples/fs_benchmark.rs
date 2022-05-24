@@ -1,5 +1,4 @@
 use ::futures::{future, lock::Mutex, FutureExt};
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -14,6 +13,9 @@ use tokio::{process::Child, sync};
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
 use ya_runtime_vm::vm::{VMBuilder, VM};
+use std::convert::TryFrom;
+use ya_runtime_vm::demux_socket_comm::{MAX_P9_PACKET_SIZE};
+use structopt::StructOpt;
 
 struct Notifications {
     process_died: Mutex<HashMap<u64, Arc<sync::Notify>>>,
@@ -51,6 +53,7 @@ impl Notifications {
     }
 
     async fn handle(&self, notification: Notification) {
+        log::info!("GOT NOTIFICATION {notification:?}");
 
         match notification {
             Notification::OutputAvailable { id, fd } => {
@@ -144,7 +147,7 @@ fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
     .to_string()
 }
 
-fn spawn_vm() -> (Child, VM) {
+fn spawn_vm(cpu_cores: usize, mem_mib: usize) -> (Child, VM) {
     #[cfg(windows)]
     let vm_executable = "vmrt.exe";
     #[cfg(unix)]
@@ -155,7 +158,7 @@ fn spawn_vm() -> (Child, VM) {
     let image_dir = project_dir.join("poc").join("squashfs");
     let init_dir = project_dir.join("init-container");
 
-    let vm = VMBuilder::new(1, 256, &image_dir.join("ubuntu.gvmi"))
+    let vm = VMBuilder::new(cpu_cores, mem_mib, &image_dir.join("ubuntu.gvmi"))
         .with_kernel_path(join_as_string(&init_dir, "vmlinuz-virt"))
         .with_ramfs_path(join_as_string(&init_dir, "initramfs.cpio.gz"))
         .build();
@@ -164,16 +167,14 @@ fn spawn_vm() -> (Child, VM) {
 
     log::info!("CMD: {cmd:?}");
 
-    //cmd.stdin(Stdio::null());
-
-    // cmd.stderr(Stdio::null());
-    // cmd.stdout(Stdio::null());
+    cmd.stdin(Stdio::piped());
 
     cmd.current_dir(runtime_dir);
     (cmd.spawn().expect("failed to spawn VM"), vm)
 }
 
 /// Write for one byte to the file, create as many tasks as there are mount points
+#[allow(dead_code)]
 async fn test_parallel_write_small_chunks(
     mount_args: Arc<Vec<ContainerVolume>>,
     ga_mutex: Arc<Mutex<GuestAgent>>,
@@ -211,17 +212,19 @@ async fn test_parallel_write_small_chunks(
 }
 
 async fn test_parallel_write_big_chunk(
+    test_file_size: u64,
     mount_args: Arc<Vec<ContainerVolume>>,
     ga_mutex: Arc<Mutex<GuestAgent>>,
     notifications: Arc<Notifications>,
 ) {
     // prepare chunk
+
+
     {
         let mut ga = ga_mutex.lock().await;
-
         let start = Instant::now();
-
         // List files
+        let block_size = 1000000;
         run_process_with_output(
             &mut ga,
             &notifications,
@@ -230,24 +233,22 @@ async fn test_parallel_write_big_chunk(
                 "dd",
                 // TODO: /dev/random causes problems?
                 "if=/dev/zero",
+
                 "of=/mnt/mnt1/tag0/big_file",
-                "bs=1048576",
-                "count=2000",
+                std::format!("bs={}", block_size).as_str(),
+                std::format!("count={}", test_file_size / block_size).as_str(),
             ],
         )
         .await
         .unwrap();
 
-        log::info!("Creating big file took: {}s", start.elapsed().as_secs());
+        let test_file_size = test_file_size / block_size * block_size;
 
-        run_process_with_output(
-            &mut ga,
-            &notifications,
-            "/bin/ls",
-            &["ls", "-lh", &"/mnt/mnt1/tag0/"],
-        )
-        .await
-        .unwrap();
+        let duration = start.elapsed();
+        let time_in_secs = duration.as_secs_f64();
+        let speed_mbs = test_file_size as f64 / time_in_secs / 1000.0 / 1000.0;
+        log::info!("File generated in {:.3}s. {:.3}MB/s", time_in_secs, speed_mbs);
+
         // run_process_with_output(&mut ga, &notifications, "/bin/df", &["df","-h"])
         //     .await
         //     .unwrap();
@@ -260,23 +261,21 @@ async fn test_parallel_write_big_chunk(
         let notifications = notifications.clone();
 
         // let cmd = format!("A=\"A\"; for i in {{1..24}}; do A=\"${{A}}${{A}}\"; done; echo -ne $A >> {path}/big_chunk");
-        let cmd = format!("cat /mnt/mnt1/tag0/big_file >  {path}/big_chunk;");
+        let cmd = format!("cat /mnt/mnt1/tag0/big_file > {path}/big_chunk;");
         // let cmd = format!("cp /mnt/mnt1/tag0/big_file  /{path}/big_chunk");
+
 
         let name = name.clone();
         let path = path.clone();
         let join = tokio::spawn(async move {
             log::info!("Spawning task for {name}");
             let ga = ga_mutex.clone();
-
-            let start = Instant::now();
             test_write(ga_mutex, &notifications, &cmd).await.unwrap();
 
-            log::info!("Copy big chunk for {name} took {}s", start.elapsed().as_secs());
             {
                 let mut ga = ga.lock().await;
                 // List files
-                run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-l", &path])
+                run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-lh", &path])
                     .await
                     .unwrap();
             }
@@ -289,19 +288,41 @@ async fn test_parallel_write_big_chunk(
     future::join_all(tasks).await;
 }
 
+#[derive(Debug, StructOpt)]
+#[structopt(name = "options", about = "Options for performance benchmark")]
+pub struct Opt {
+    /// Number of logical CPU cores
+    #[structopt(long, default_value = "1")]
+    cpu_cores: usize,
+    /// Amount of RAM [GiB]
+    #[structopt(long, default_value = "0.25")]
+    mem_gib: f64,
+    /// Amount of disk storage [GiB]
+    #[allow(unused)]
+    #[structopt(long, default_value = "0.25")]
+    storage_gib: f64,
+    /// Number of mounts
+    #[allow(unused)]
+    #[structopt(long, default_value = "3")]
+    mount_count: u32,
+    /// File size to test in bytes [bytes]
+    #[allow(unused)]
+    #[structopt(long, default_value = "100000000")]
+    file_test_size: u64,
+}
+
 #[tokio::main]
 async fn main() -> io::Result<()> {
+    let opt : Opt = Opt::from_args();
     env_logger::init();
 
     log::info!("hai!");
-    let (mut child, vm) = spawn_vm();
+    let (mut child, vm) = spawn_vm(opt.cpu_cores, (opt.mem_gib * 1024.0) as usize);
 
-    log::info!("hai!");
-    let temp_dir = tempdir::TempDir::new("ya-vm-direct").expect("Failed to create temp dir");
-    let temp_path = temp_dir.path();
+    let temp_path = Path::new("./tmp");
     let notifications = Arc::new(Notifications::new());
 
-    const MOUNTS: usize = 1;
+    const MOUNTS: usize = 2;
 
     let mut mount_args = vec![];
 
@@ -323,7 +344,9 @@ async fn main() -> io::Result<()> {
 
     let mount_args = Arc::new(mount_args);
 
+
     let (_p9streams, _muxer_handle) = vm.start_9p_service(&temp_path, &mount_args).await.unwrap();
+
 
     let ns = notifications.clone();
     let ga_mutex = GuestAgent::connected(vm.get_manager_sock(), 10, move |n, _g| {
@@ -336,7 +359,9 @@ async fn main() -> io::Result<()> {
         let mut ga = ga_mutex.lock().await;
 
         for ContainerVolume { name, path } in mount_args.iter() {
-            if let Err(e) = ga.mount(name, path).await? {
+            let max_p9_packet_size = u32::try_from(MAX_P9_PACKET_SIZE).unwrap();
+
+            if let Err(e) = ga.mount(name, max_p9_packet_size, path).await? {
                 log::error!("Mount failed at {name}, {path}, {e}")
             }
         }
@@ -350,17 +375,19 @@ async fn main() -> io::Result<()> {
         .await?;
     }
 
+
     // test_parallel_write_small_chunks(mount_args.clone(), ga_mutex.clone(), notifications.clone())
     //     .await;
 
-    test_parallel_write_big_chunk(mount_args.clone(), ga_mutex.clone(), notifications.clone())
+    test_parallel_write_big_chunk(opt.file_test_size, mount_args.clone(), ga_mutex.clone(), notifications.clone())
         .await;
 
-    let e = timeout(Duration::from_secs(5), child.wait()).await;
+    log::info!("test_parallel_write_big_chunk finished");
     {
         let mut ga = ga_mutex.lock().await;
 
-        run_process_with_output(&mut ga, &notifications, "/bin/ps", &["ps", "auxjf"]).await?;
+        //run_process_with_output(&mut ga, &notifications, "/bin/ps", &["ps", "aux"]).await?;
+        run_process_with_output(&mut ga, &notifications, "/bin/busybox", &["top", "-b", "-n", "1"]).await?;
 
         let id = ga
             .run_entrypoint("/bin/sleep", &["sleep", "60"], None, 0, 0, &NO_REDIR, None)
@@ -374,9 +401,11 @@ async fn main() -> io::Result<()> {
             .await;
     }
 
+
     /* VM should quit now. */
     let e = timeout(Duration::from_secs(5), child.wait()).await;
     log::info!("{:?}", e);
+
 
     Ok(())
 }
@@ -407,15 +436,13 @@ async fn test_write(
 
     log::info!("Spawned process with id: {}, for {}", id, cmd);
 
-    log::debug!("waiting on died for {id}");
+    log::info!("waiting on died for {id}");
     let notif = notifications.get_process_died_notification(id).await;
     let fut = notif.notified();
 
-    // if let Err(_) = timeout(Duration::from_secs(60), fut).await {
-    //     log::error!("Got timeout on died notification for process {id}");
-    // }
-
-    fut.await;
+    if let Err(_) = timeout(Duration::from_secs(60), fut).await {
+        log::error!("Got timeout on died notification for process {id}");
+    }
 
     // log::info!("waiting on output for {id}");
     // notifications

@@ -9,8 +9,10 @@ use std::{
 };
 use tokio::{process::Child, sync};
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
+use ya_runtime_vm::demux_socket_comm::{MAX_P9_PACKET_SIZE};
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
 use ya_runtime_vm::vm::{VMBuilder, VM};
+use std::convert::TryFrom;
 
 struct Notifications {
     process_died: sync::Notify,
@@ -119,7 +121,7 @@ fn spawn_vm() -> (Child, VM) {
 
     println!("CMD: {cmd:?}");
 
-    cmd.stdin(Stdio::null());
+    cmd.stdin(Stdio::piped());
 
     cmd.current_dir(runtime_dir);
     (cmd.spawn().expect("failed to spawn VM"), vm)
@@ -160,7 +162,8 @@ async fn main() -> io::Result<()> {
     let mut ga = ga_mutex.lock().await;
 
     for ContainerVolume { name, path } in mount_args.iter() {
-        ga.mount(name, path).await?.expect("Mount failed");
+        let max_p9_packet_size = u32::try_from(MAX_P9_PACKET_SIZE).unwrap();
+        ga.mount(name, max_p9_packet_size, path).await?.expect("Mount failed");
     }
 
     run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-al", "/mnt"]).await?;

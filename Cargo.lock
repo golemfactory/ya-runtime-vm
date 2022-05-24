@@ -2607,7 +2607,7 @@ dependencies = [
 
 [[package]]
 name = "ya-runtime-vm"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "anyhow",
  "bollard-stubs",
@@ -2633,8 +2633,8 @@ dependencies = [
 
 [[package]]
 name = "ya-vm-file-server"
-version = "0.1.1"
-source = "git+https://github.com/golemfactory/ya-vm-file-server?rev=v0.1.1#0c9fb4e11b87582f52e5a1514c5b8a4095fba0b9"
+version = "0.2.0"
+source = "git+https://github.com/golemfactory/ya-vm-file-server#23827cd379aa9ce2eda082dc7241d7af0d9101c2"
 dependencies = [
  "anyhow",
  "async-trait",

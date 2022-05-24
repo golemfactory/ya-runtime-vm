@@ -6,14 +6,14 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    net::{TcpStream, UnixStream},
+    net::{TcpStream},
     process::Command,
     time::sleep,
 };
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 use ya_vm_file_server::InprocServer;
 
-use crate::demux_socket_comm::{start_demux_communication, DemuxSocketHandle};
+use crate::demux_socket_comm::{start_demux_communication, DemuxSocketHandle, MAX_P9_PACKET_SIZE};
 
 const FILE_VMLINUZ: &str = "vmlinuz-virt";
 const FILE_INITRAMFS: &str = "initramfs.cpio.gz";
@@ -282,11 +282,11 @@ impl VM {
 
         // #[cfg(windows)]
         {
-            // vmp9stream = self.connect_to_9p_endpoint(10).await?;
+             vmp9stream = self.connect_to_9p_endpoint(10).await?;
         }
         // #[cfg(unix)]
         {
-            vmp9stream = self.connect_to_9p_socket_endpoint(10).await?;
+           // vmp9stream = self.connect_to_9p_socket_endpoint(10).await?;
         }
 
         log::debug!("Spawn 9P inproc servers...");
@@ -311,7 +311,7 @@ impl VM {
         let mut p9streams = vec![];
 
         for server in &runtime_9ps {
-            let client_stream = server.attach_client();
+            let client_stream = server.attach_client(MAX_P9_PACKET_SIZE);
             p9streams.push(client_stream);
         }
 

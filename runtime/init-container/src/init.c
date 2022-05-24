@@ -932,6 +932,9 @@ out:
 // }
 
 static void handle_mount(msg_id_t msg_id) {
+
+    uint32_t max_p9_message_size = 0;
+
     bool     done = false;
     uint32_t ret  = 0;
     char*    tag  = NULL;
@@ -941,6 +944,8 @@ static void handle_mount(msg_id_t msg_id) {
         uint8_t subtype = 0;
 
         CHECK(recv_u8(g_cmds_fd, &subtype));
+                fprintf(stderr, "Unknown MSG_MOUNT_VOLUME subtype: %hhu\n",
+                        subtype);
 
         switch (subtype) {
             case SUB_MSG_MOUNT_VOLUME_END:
@@ -948,6 +953,9 @@ static void handle_mount(msg_id_t msg_id) {
                 break;
             case SUB_MSG_MOUNT_VOLUME_TAG:
                 CHECK(recv_bytes(g_cmds_fd, &tag, NULL, /*is_cstring=*/true));
+                break;
+            case SUB_MSG_MOUNT_VOLUME_MAX_P9_MESSAGE_SIZE:
+                CHECK(recv_u32(g_cmds_fd, &max_p9_message_size));
                 break;
             case SUB_MSG_MOUNT_VOLUME_PATH:
                 CHECK(recv_bytes(g_cmds_fd, &path, NULL, /*is_cstring=*/true));
@@ -967,8 +975,7 @@ static void handle_mount(msg_id_t msg_id) {
         ret = errno;
         goto out;
     }
-
-    ret = do_mount_p9(tag, path);
+    ret = do_mount_p9(tag, max_p9_message_size, path);
     // ret = do_mount(tag, path);
     // TODO: rm path, if mount fails?
 
@@ -1529,6 +1536,21 @@ int main(void) {
     block_signals();
     setup_sigfd();
 
+    //make sure to create threads after blocking signals, not before. Otherwise signals are blocked.
+    //CHECK(initialize_p9_socket_descriptors());
+    //experimental - set thread affinity to get better performance on Windows?
+    /*{
+        pthread_t thread;
+        thread = pthread_self();
+        pthread_attr_t attr;
+        cpu_set_t cpus;
+        pthread_attr_init(&attr);
+        CPU_ZERO(&cpus);
+        CPU_SET(1, &cpus);
+        CHECK(pthread_setaffinity_np(thread, sizeof(cpus), &cpus));
+    }*/
+    //make sure to create threads after blocking signals, not before. Otherwise signals are blocked.
+    //CHECK(initialize_p9_socket_descriptors());
     // make sure to create threads after blocking signals, not before. Otherwise signals are blocked.
    CHECK(initialize_p9_communication());
 

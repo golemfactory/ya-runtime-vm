@@ -176,7 +176,7 @@ static int task_read_n(struct io_uring *ring, struct metadata_read_n *state, int
           return  0;
         }
         state->buffer[0] = state->channel;
-        ((uint16_t*)(state->buffer + 1))[0] = p9_size;      
+        ((uint32_t*)(state->buffer + 1))[0] = p9_size;      
         state->base.link = 2;
         if (p9_size > 0) {
           LOG_DEBUG(stderr, "sending %d bytes\n", p9_size);
@@ -282,7 +282,7 @@ static int sync_read_s(struct io_uring *ring, struct metadata_read_s *state) {
 }
 
 static int task_read_s(struct io_uring *ring, struct metadata_read_s *state, int res) {
-  uint16_t packet_size;
+  uint32_t packet_size;
   uint8_t channel;
   struct io_uring_sqe* sqe;
   LOG_DEBUG("task_read_s %d %p link=%d\n", res, state, state->base.link);
@@ -300,7 +300,7 @@ static int task_read_s(struct io_uring *ring, struct metadata_read_s *state, int
             return 0;
          }
          channel = *((uint8_t *)state->buf);
-         packet_size = *(uint16_t *)(state->buf+1);
+         packet_size = *(uint32_t *)(state->buf+1);
          if (in_buffer < packet_size) {
             io_read(ring, &state->base, state->fd, state->buf + state->read_pos, sizeof(state->buf) - state->read_pos);
             return 0;
@@ -312,7 +312,7 @@ static int task_read_s(struct io_uring *ring, struct metadata_read_s *state, int
       }
     case 3: {
         channel = *((uint8_t *)state->buf);
-        packet_size = *(uint16_t *)(state->buf+1);
+        packet_size = *(uint32_t *)(state->buf+1);
         state->write_pos += res;
         LOG_DEBUG("task_read_s channel=%d packet_size=%d write_pos=%d\n", channel, packet_size, state->write_pos);
 
@@ -401,7 +401,7 @@ static void* poll_9p_messages(void* data) {
                 read_s->base.link, read_s->read_pos);
             if (read_s->read_pos >3) {
               int channel = *((uint8_t *)read_s->buf);
-              int packet_size = *(uint16_t *)(read_s->buf+1);
+              int packet_size = *(uint32_t *)(read_s->buf+1);
               fprintf(stderr, "in buf channel=%d, packet=%d\n\n", channel, packet_size);
             }
 
@@ -513,7 +513,7 @@ static void handle_data_on_sock(char* buffer, uint32_t buffer_size) {
         goto error;
     }
 
-    uint16_t packet_size = 0;
+    uint32_t packet_size = 0;
     bytes_read = read_exact(g_p9_fd, &packet_size, sizeof(packet_size));
 
     if (packet_size == 0) {
@@ -572,8 +572,8 @@ void handle_data_on_channel(int channel, char* buffer, uint32_t buffer_size) {
 
     TRY_OR_GOTO(write_exact(g_p9_fd, &channel, 1), error);
 
-    uint16_t bytes_read_to_send = (uint16_t)bytes_read;
-    assert(sizeof(bytes_read_to_send) == 2);
+    uint32_t bytes_read_to_send = (uint32_t)bytes_read;
+    assert(sizeof(bytes_read_to_send) == 4);
 
     TRY_OR_GOTO(write_exact(g_p9_fd, &bytes_read_to_send, sizeof(bytes_read_to_send)), error);
     TRY_OR_GOTO(write_exact(g_p9_fd, buffer, bytes_read), error);
@@ -728,7 +728,7 @@ static void* tunnel_from_p9_virtio_to_sock(void* data) {
             goto error;
         }
 
-        uint16_t packet_size = 0;
+        uint32_t packet_size = 0;
         bytes_read = read_exact(g_p9_fd, &packet_size, sizeof(packet_size));
         if (bytes_read != sizeof(packet_size)) {
             fprintf(stderr, "Error during read from g_p9_fd: bytes_read != sizeof(packet_size)\n");
@@ -808,8 +808,8 @@ static void* tunnel_from_p9_sock_to_virtio(void* data) {
             write_succeeded = false;
             goto mutex_unlock;
         }
-        uint16_t bytes_read_to_send = (uint16_t)bytes_read;
-        assert(sizeof(bytes_read_to_send) == 2);
+        uint32_t bytes_read_to_send = (uint32_t)bytes_read;
+        assert(sizeof(bytes_read_to_send) == 4);
         if (write_exact(g_p9_fd, &bytes_read_to_send, sizeof(bytes_read_to_send)) == -1) {
             fprintf(stderr, "Failed write g_p9_fd 2\n");
             write_succeeded = false;
@@ -851,9 +851,9 @@ int initialize_p9_communication() {
     return 0;
 }
 
-uint32_t do_mount_p9(const char* tag, char* path) {
-    uint8_t channel = g_p9_current_channel++;
 
+uint32_t do_mount_p9(const char* tag, uint32_t max_p9_message_size, char* path) {
+    uint8_t channel = g_p9_current_channel++;
     if (channel >= MAX_P9_VOLUMES) {
         fprintf(stderr, "ERROR: channel >= MAX_P9_VOLUMES\n");
         return -1;
@@ -880,13 +880,13 @@ uint32_t do_mount_p9(const char* tag, char* path) {
     char* mount_cmd = NULL;
     int mount_socked_fd = g_p9_socket_fds[channel][0];
     // TODO: snprintf
-    int buf_size = asprintf(&mount_cmd, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L,debug=1", mount_socked_fd,
-                            mount_socked_fd);
+    int buf_size = asprintf(&mount_cmd, "trans=fd,rfdno=%d,wfdno=%d,version=9p2000.L,msize=%d", mount_socked_fd, mount_socked_fd, max_p9_message_size);
     if (buf_size < 0) {
         free(mount_cmd);
         return errno;
     }
     fprintf(stderr, "Starting mount: tag: %s, path: %s\n", tag, path);
+    fprintf(stderr, "Mount command: %s\n", mount_cmd);
     if (mount(tag, path, "9p", 0, mount_cmd) < 0) {
         fprintf(stderr, "Mount finished with error: %d\n", errno);
         return errno;
@@ -913,7 +913,7 @@ error:
     return -1;
 }
 
-uint32_t do_mount_p9(const char* tag, char* path) {
+uint32_t do_mount_p9(const char* tag, uint32_t max_p9_message_size, char* path) {
     int channel = g_p9_current_channel++;
 
     fprintf(stderr, "Starting mount: tag: %s, path: %s, channel %d\n", tag, path, channel);
