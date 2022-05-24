@@ -2,7 +2,7 @@ use ::futures::{future, lock::Mutex, FutureExt};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{
     env,
     io::{self, prelude::*},
@@ -51,7 +51,6 @@ impl Notifications {
     }
 
     async fn handle(&self, notification: Notification) {
-        log::info!("GOT NOTIFICATION {notification:?}");
 
         match notification {
             Notification::OutputAvailable { id, fd } => {
@@ -219,6 +218,9 @@ async fn test_parallel_write_big_chunk(
     // prepare chunk
     {
         let mut ga = ga_mutex.lock().await;
+
+        let start = Instant::now();
+
         // List files
         run_process_with_output(
             &mut ga,
@@ -235,6 +237,8 @@ async fn test_parallel_write_big_chunk(
         )
         .await
         .unwrap();
+
+        log::info!("Creating big file took: {}s", start.elapsed().as_secs());
 
         run_process_with_output(
             &mut ga,
@@ -264,8 +268,11 @@ async fn test_parallel_write_big_chunk(
         let join = tokio::spawn(async move {
             log::info!("Spawning task for {name}");
             let ga = ga_mutex.clone();
+
+            let start = Instant::now();
             test_write(ga_mutex, &notifications, &cmd).await.unwrap();
 
+            log::info!("Copy big chunk for {name} took {}s", start.elapsed().as_secs());
             {
                 let mut ga = ga.lock().await;
                 // List files
@@ -400,7 +407,7 @@ async fn test_write(
 
     log::info!("Spawned process with id: {}, for {}", id, cmd);
 
-    log::info!("waiting on died for {id}");
+    log::debug!("waiting on died for {id}");
     let notif = notifications.get_process_died_notification(id).await;
     let fut = notif.notified();
 
