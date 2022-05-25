@@ -993,8 +993,6 @@ static void handle_mount(msg_id_t msg_id) {
         uint8_t subtype = 0;
 
         CHECK(recv_u8(g_cmds_fd, &subtype));
-                fprintf(stderr, "Unknown MSG_MOUNT_VOLUME subtype: %hhu\n",
-                        subtype);
 
         switch (subtype) {
             case SUB_MSG_MOUNT_VOLUME_END:
