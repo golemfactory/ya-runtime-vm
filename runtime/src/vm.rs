@@ -6,10 +6,13 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    net::{TcpStream, UnixStream},
+    net::{TcpStream},
     process::Command,
     time::sleep,
 };
+#[cfg(unix)]
+use tokio::net::UnixStream;
+
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 use ya_vm_file_server::InprocServer;
 
@@ -223,7 +226,7 @@ impl VM {
         cmd
     }
 
-    // #[cfg(windows)]
+    #[cfg(windows)]
     async fn connect_to_9p_endpoint(&self, tries: usize) -> anyhow::Result<TcpStream> {
         log::debug!("Connect to the 9P VM endpoint...");
 
@@ -280,11 +283,11 @@ impl VM {
 
         let vmp9stream;
 
-        // #[cfg(windows)]
+        #[cfg(windows)]
         {
-            // vmp9stream = self.connect_to_9p_endpoint(10).await?;
+            vmp9stream = self.connect_to_9p_endpoint(10).await?;
         }
-        // #[cfg(unix)]
+        #[cfg(unix)]
         {
             vmp9stream = self.connect_to_9p_socket_endpoint(10).await?;
         }
