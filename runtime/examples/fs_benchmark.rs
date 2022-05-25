@@ -51,7 +51,6 @@ impl Notifications {
     }
 
     async fn handle(&self, notification: Notification) {
-
         match notification {
             Notification::OutputAvailable { id, fd } => {
                 log::debug!("Process {} has output available on fd {}", id, fd);
@@ -272,7 +271,10 @@ async fn test_parallel_write_big_chunk(
             let start = Instant::now();
             test_write(ga_mutex, &notifications, &cmd).await.unwrap();
 
-            log::info!("Copy big chunk for {name} took {}s", start.elapsed().as_secs());
+            log::info!(
+                "Copy big chunk for {name} took {}s",
+                start.elapsed().as_secs()
+            );
             {
                 let mut ga = ga.lock().await;
                 // List files
@@ -289,6 +291,40 @@ async fn test_parallel_write_big_chunk(
     future::join_all(tasks).await;
 }
 
+async fn test_fio(
+    mount_args: Arc<Vec<ContainerVolume>>,
+    ga_mutex: Arc<Mutex<GuestAgent>>,
+    notifications: Arc<Notifications>,
+) {
+        for ContainerVolume {_name, path} in mount_args.iter() {
+            let mut ga = ga_mutex.lock().await;
+
+            // TODO: this is serialized
+            run_process_with_output(
+                &mut ga,
+                &notifications,
+                "/usr/bin/fio",
+                &[
+                    "fio",
+                    "--randrepeat=1",
+                    "--ioengine=libaio",
+                    "--direct=1",
+                    "--gtod_reduce=1",
+                    "--name=test",
+                    "--bs=4k",
+                    "--iodepth=64",
+                    "--readwrite=randrw",
+                    "--rwmixread=75",
+                    "--size=100M",
+                    "--max-jobs=4",
+                    "--numjobs=4",
+                    &format!("--filename={path}/test_fio"),
+                ],
+            )
+            .await
+            .unwrap();
+        }
+}
 #[tokio::main]
 async fn main() -> io::Result<()> {
     env_logger::init();
@@ -353,8 +389,10 @@ async fn main() -> io::Result<()> {
     // test_parallel_write_small_chunks(mount_args.clone(), ga_mutex.clone(), notifications.clone())
     //     .await;
 
-    test_parallel_write_big_chunk(mount_args.clone(), ga_mutex.clone(), notifications.clone())
-        .await;
+    // test_parallel_write_big_chunk(mount_args.clone(), ga_mutex.clone(), notifications.clone())
+    //     .await;
+
+    test_fio(mount_args.clone(), ga_mutex.clone(), notifications.clone()).await;
 
     let e = timeout(Duration::from_secs(5), child.wait()).await;
     {
