@@ -1,3 +1,5 @@
+pub use crate::response_parser::Notification;
+use crate::response_parser::{parse_one_response, GuestAgentMessage, Response, ResponseWithId};
 use futures::channel::mpsc;
 use futures::future::{BoxFuture, FutureExt};
 use futures::lock::Mutex;
@@ -12,8 +14,6 @@ use tokio::{
     io::{split, AsyncWriteExt, ReadHalf, WriteHalf},
     spawn, time,
 };
-pub use crate::response_parser::Notification;
-use crate::response_parser::{parse_one_response, GuestAgentMessage, Response, ResponseWithId};
 
 #[repr(u8)]
 enum MsgType {
@@ -667,7 +667,12 @@ impl GuestAgent {
         self.get_ok_response(msg_id).await
     }
 
-    pub async fn mount(&mut self, tag: &str, p9_max_msg_size: u32, path: &str) -> io::Result<RemoteCommandResult<()>> {
+    pub async fn mount(
+        &mut self,
+        tag: &str,
+        p9_max_msg_size: u32,
+        path: &str,
+    ) -> io::Result<RemoteCommandResult<()>> {
         let mut msg = Message::default();
         let msg_id = self.get_new_msg_id();
 
@@ -675,7 +680,9 @@ impl GuestAgent {
 
         msg.append_submsg(&SubMsgMountVolumeType::SubMsgMountVolumeTag(tag.as_bytes()));
 
-        msg.append_submsg(&SubMsgMountVolumeType::SubMsgMountVolumeMaxP9MessageSize(p9_max_msg_size));
+        msg.append_submsg(&SubMsgMountVolumeType::SubMsgMountVolumeMaxP9MessageSize(
+            p9_max_msg_size,
+        ));
 
         msg.append_submsg(&SubMsgMountVolumeType::SubMsgMountVolumePath(
             path.as_bytes(),

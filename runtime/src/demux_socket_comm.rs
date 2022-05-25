@@ -6,7 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-pub const MAX_P9_PACKET_SIZE: usize = 0x4000-5; //262144
+pub const MAX_P9_PACKET_SIZE: usize = 0x4000 - 5; //262144
 pub const MAX_DEMUX_PACKET_SIZE: usize = 0x8000; //262144
 
 pub struct DemuxSocketHandle {
@@ -26,7 +26,6 @@ pub async fn stop_demux_communication(dsh: DemuxSocketHandle) {
         let _res = join_handle_writer.await;
     }
 }
-
 
 pub fn start_demux_communication(
     vm_stream: tokio::net::TcpStream,

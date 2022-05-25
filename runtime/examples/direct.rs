@@ -1,4 +1,5 @@
 use futures::FutureExt;
+use std::convert::TryFrom;
 use std::path::{Path, PathBuf};
 use std::{
     env,
@@ -8,10 +9,9 @@ use std::{
 };
 use tokio::{process::Child, sync};
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
-use ya_runtime_vm::demux_socket_comm::{MAX_P9_PACKET_SIZE};
+use ya_runtime_vm::demux_socket_comm::MAX_P9_PACKET_SIZE;
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
 use ya_runtime_vm::vm::{VMBuilder, VM};
-use std::convert::TryFrom;
 
 struct Notifications {
     process_died: sync::Notify,
@@ -162,7 +162,9 @@ async fn main() -> io::Result<()> {
 
     for ContainerVolume { name, path } in mount_args.iter() {
         let max_p9_packet_size = u32::try_from(MAX_P9_PACKET_SIZE).unwrap();
-        ga.mount(name, max_p9_packet_size, path).await?.expect("Mount failed");
+        ga.mount(name, max_p9_packet_size, path)
+            .await?
+            .expect("Mount failed");
     }
 
     run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-al", "/mnt"]).await?;

@@ -6,13 +6,15 @@ use log::LevelFilter;
 use log4rs::append::file::FileAppender;
 use log4rs::config::{Appender, Config, Root};
 use log4rs::encode::pattern::PatternEncoder;
+use std::convert::TryFrom;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use structopt::StructOpt;
-use ya_runtime_vm::demux_socket_comm::{stop_demux_communication, DemuxSocketHandle, MAX_P9_PACKET_SIZE};
+use ya_runtime_vm::demux_socket_comm::{
+    stop_demux_communication, DemuxSocketHandle, MAX_P9_PACKET_SIZE,
+};
 use ya_runtime_vm::vm::VMBuilder;
-use std::convert::TryFrom;
 
 use tokio::{
     fs,
@@ -296,9 +298,13 @@ async fn start(
         let mut ga = ga.lock().await;
         for (idx, volume) in deployment.volumes.iter().enumerate() {
             let max_p9_packet_size = u32::try_from(MAX_P9_PACKET_SIZE).unwrap();
-            ga.mount(format!("mnt{}", idx).as_str(), max_p9_packet_size, volume.path.as_str())
-                .await?
-                .expect("Mount failed");
+            ga.mount(
+                format!("mnt{}", idx).as_str(),
+                max_p9_packet_size,
+                volume.path.as_str(),
+            )
+            .await?
+            .expect("Mount failed");
         }
     }
 

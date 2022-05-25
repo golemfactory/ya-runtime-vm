@@ -10,12 +10,14 @@ use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 use ya_vm_file_server::InprocServer;
 
 use crate::demux_socket_comm::{start_demux_communication, DemuxSocketHandle, MAX_P9_PACKET_SIZE};
+use crate::arg_builder::ArgsBuilder;
 
 const FILE_VMLINUZ: &str = "vmlinuz-virt";
 const FILE_INITRAMFS: &str = "initramfs.cpio.gz";
 
 #[derive(Default)]
 pub struct VMBuilder {
+    rw_drive: String,
     task_package: String,
     cpu_cores: usize,
     mem_mib: usize,
@@ -23,9 +25,16 @@ pub struct VMBuilder {
     ramfs_path: Option<String>,
 }
 
+
 impl VMBuilder {
-    pub fn new(cpu_cores: usize, mem_mib: usize, task_package: &PathBuf) -> Self {
+    pub fn new(
+        cpu_cores: usize,
+        mem_mib: usize,
+        task_package: &PathBuf,
+        rw_drive: &PathBuf,
+    ) -> Self {
         Self {
+            rw_drive: rw_drive.as_os_str().to_str().unwrap().into(),
             task_package: task_package.as_os_str().to_str().unwrap().into(),
             cpu_cores,
             mem_mib,
@@ -87,68 +96,42 @@ impl VMBuilder {
                 n
             )
         };
-        let tmp0 = format!("{}M", self.mem_mib);
-        let tmp1 = format!(
-            "file={},cache=unsafe,readonly=on,format=raw,if=virtio",
-            self.task_package
-        );
-        let chardev1 = chardev("manager_cdev", &manager_sock);
-        let chardev2 = chardev("net_cdev", &net_sock);
-        let chardev3 = chardev_9p("p9_cdev", &p9_sock);
-
-        let cpu_string = format!("{}", self.cpu_cores);
 
         let acceleration = if cfg!(windows) { "whpx" } else { "kvm" };
 
         let kernel_path = self.kernel_path.unwrap_or(FILE_VMLINUZ.to_string());
         let ramfs_path = self.ramfs_path.unwrap_or(FILE_INITRAMFS.to_string());
 
-        let args = vec![
-            "-m",
-            tmp0.as_str(),
-            "-nographic",
-            "-vga",
-            "none",
-            "-kernel",
-            kernel_path.as_str(),
-            "-initrd",
-            ramfs_path.as_str(),
-            "-net",
-            "none",
-            /*   "-enable-kvm",*/
-            /*  "-cpu",
-              "host",*/
-            "-smp",
-            cpu_string.as_str(),
-            "-append",
-            "\"console=ttyS0 panic=1\"",
-            "-device",
-            "virtio-serial",
-            /* "-device",
-            "virtio-rng-pci",*/
-            "-chardev",
-            chardev1.as_str(),
-            "-chardev",
-            chardev2.as_str(),
-            "-chardev",
-            chardev3.as_str(),
-            "-device",
-            "virtserialport,chardev=manager_cdev,name=manager_port",
-            "-device",
-            "virtserialport,chardev=net_cdev,name=net_port",
-            "-device",
-            "virtserialport,chardev=p9_cdev,name=p9_port",
-            "-drive",
-            tmp1.as_str(),
-            "-no-reboot",
-            "-accel",
-            acceleration,
-            "-nodefaults",
-            "--serial",
-            "stdio",
-        ];
+        #[rustfmt::skip]
+        let ab = {
+            let mut ab = ArgsBuilder::new();
+            ab.add_2("-m", &format!("{}M", self.mem_mib));
+            ab.add_1("-nographic");
+            ab.add_2("-vga", "none");
+            ab.add_2("-kernel", &kernel_path);
+            ab.add_2("-initrd", &ramfs_path);
+            ab.add_2("-net", "none");
+            ab.add_2("-smp", &format!("{}", self.cpu_cores));
+            ab.add_2("-append", r#""console=ttyS0 panic=1""#);
+            ab.add_2("-device", "virtio-serial");
+            ab.add_2("-chardev", &chardev("manager_cdev", &manager_sock));
+            ab.add_2("-chardev", &chardev("net_cdev", &net_sock));
+            ab.add_2("-chardev", &chardev_9p("p9_cdev", &p9_sock));
+            ab.add_2("-device", "virtserialport,chardev=manager_cdev,name=manager_port" );
+            ab.add_2("-device", "virtserialport,chardev=net_cdev,name=net_port");
+            ab.add_2("-device", "virtserialport,chardev=p9_cdev,name=p9_port");
+            ab.add_2("-drive", &format!("file={},cache=unsafe,readonly=on,format=raw,if=virtio", self.task_package));
+            ab.add_1("-no-reboot");
+            ab.add_2("-accel", acceleration);
+            ab.add_1("-nodefaults");
+            ab.add_2("--serial", "stdio");
+            ab
+        };
 
-        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let args = ab.get_args_vector();
+        log::debug!("Arguments for VM array: {:?}", args);
+        log::info!("VM runtime command line: {}", ab.get_args_string());
+
 
         #[cfg(windows)]
         return VM {
