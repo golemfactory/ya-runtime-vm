@@ -17,115 +17,11 @@ use ya_runtime_vm::demux_socket_comm::MAX_P9_PACKET_SIZE;
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
 use ya_runtime_vm::vm::{VMBuilder, VM};
 
-struct Notifications {
-    process_died: Mutex<HashMap<u64, Arc<sync::Notify>>>,
-    output_available: Mutex<HashMap<u64, Arc<sync::Notify>>>,
-}
+mod common;
+use common::run_process_with_output;
+use common::spawn_vm;
+use common::Notifications;
 
-impl Notifications {
-    fn new() -> Self {
-        Notifications {
-            process_died: Mutex::new(HashMap::new()),
-            output_available: Mutex::new(HashMap::new()),
-        }
-    }
-
-    async fn get_process_died_notification(&self, id: u64) -> Arc<sync::Notify> {
-        let notif = {
-            let mut lock = self.process_died.lock().await;
-            lock.entry(id)
-                .or_insert(Arc::new(sync::Notify::new()))
-                .clone()
-        };
-
-        notif
-    }
-
-    async fn get_output_available_notification(&self, id: u64) -> Arc<sync::Notify> {
-        let notif = {
-            let mut lock = self.output_available.lock().await;
-            lock.entry(id)
-                .or_insert(Arc::new(sync::Notify::new()))
-                .clone()
-        };
-
-        notif
-    }
-
-    async fn handle(&self, notification: Notification) {
-        log::info!("GOT NOTIFICATION {notification:?}");
-
-        match notification {
-            Notification::OutputAvailable { id, fd } => {
-                log::debug!("Process {} has output available on fd {}", id, fd);
-
-                self.get_output_available_notification(id)
-                    .await
-                    .notify_one();
-            }
-            Notification::ProcessDied { id, reason } => {
-                log::debug!("Process {} died with {:?}", id, reason);
-                self.get_process_died_notification(id).await.notify_one();
-            }
-        }
-    }
-}
-
-async fn run_process_with_output(
-    ga: &mut GuestAgent,
-    notifications: &Notifications,
-    bin: &str,
-    argv: &[&str],
-) -> io::Result<()> {
-    let id = ga
-        .run_process(
-            bin,
-            argv,
-            None,
-            0,
-            0,
-            &[
-                None,
-                Some(RedirectFdType::RedirectFdPipeBlocking(0x10000)),
-                Some(RedirectFdType::RedirectFdPipeBlocking(0x10000)),
-            ],
-            None,
-        )
-        .await?
-        .expect("Run process failed");
-
-    log::info!("Spawned process with id: {}", id);
-    notifications
-        .get_process_died_notification(id)
-        .await
-        .notified()
-        .await;
-    timeout(Duration::from_secs(1), notifications
-        .get_output_available_notification(id)
-        .await
-        .notified()).await;
-
-
-    log::error!("dupa4");
-
-    match ga.query_output(id, 1, 0, u64::MAX).await? {
-        Ok(out) => {
-            log::info!("STDOUT Output {argv:?}:");
-            io::stdout().write_all(&out)?;
-        }
-        Err(code) => log::info!("{argv:?} no data on STDOUT, reason {code}"),
-    }
-    log::error!("dupa6");
-
-    match ga.query_output(id, 2, 0, u64::MAX).await? {
-        Ok(out) => {
-            log::error!("STDERR Output {argv:?}:");
-            io::stdout().write_all(&out)?;
-        }
-        Err(code) => log::info!("{argv:?} no data on STDERR, reason {code}"),
-    }
-    Ok(())
-}
 
 fn get_project_dir() -> PathBuf {
     PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
@@ -150,44 +46,7 @@ fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
     .to_string()
 }
 
-fn spawn_vm(tmp_path: &Path, cpu_cores: usize, mem_mib: usize) -> (Child, VM) {
-    #[cfg(windows)]
-    let vm_executable = "vmrt.exe";
-    #[cfg(unix)]
-    let vm_executable = "vmrt";
 
-    let project_dir = get_project_dir();
-    let runtime_dir = project_dir.join("poc").join("runtime");
-    let image_dir = project_dir.join("poc").join("squashfs");
-    let init_dir = project_dir.join("init-container");
-    let source_qcow2_file = project_dir
-        .join("poc")
-        .join("qcow2")
-        .join("empty_10GB.qcow2");
-    let qcow2_file = tmp_path.join("rw_drive.qcow2");
-    fs::copy(&source_qcow2_file, &qcow2_file).unwrap();
-    let qcow2_file = qcow2_file.canonicalize().unwrap();
-
-    let vm = VMBuilder::new(
-        cpu_cores,
-        mem_mib,
-        &image_dir.join("ubuntu.gvmi"),
-        &qcow2_file,
-    )
-    .with_kernel_path(join_as_string(&init_dir, "vmlinuz-virt"))
-    .with_ramfs_path(join_as_string(&init_dir, "initramfs.cpio.gz"))
-    .build();
-
-    let mut cmd = vm.create_cmd(&runtime_dir.join(vm_executable));
-//    let mut cmd = vm.create_cmd(r#"C:\Program Files\qemu\qemu-system-x86_64.exe"#);
-
-    log::info!("CMD: {cmd:?}");
-
-    cmd.stdin(Stdio::piped());
-
-    cmd.current_dir(runtime_dir);
-    (cmd.spawn().expect("failed to spawn VM"), vm)
-}
 
 /// Write for one byte to the file, create as many tasks as there are mount points
 #[allow(dead_code)]
@@ -277,7 +136,7 @@ async fn test_parallel_write_big_chunk(
         let notifications = notifications.clone();
 
         // let cmd = format!("A=\"A\"; for i in {{1..24}}; do A=\"${{A}}${{A}}\"; done; echo -ne $A >> {path}/big_chunk");
-        let cmd = format!("cat /mnt/mnt1/tag0/big_file > {path}/big_chunk;");
+        let cmd = format!("cat /mnt/mnt1/tag0/big_file >  {path}/big_chunk;");
         // let cmd = format!("cp /mnt/mnt1/tag0/big_file  /{path}/big_chunk");
 
         let name = name.clone();
@@ -285,12 +144,18 @@ async fn test_parallel_write_big_chunk(
         let join = tokio::spawn(async move {
             log::info!("Spawning task for {name}");
             let ga = ga_mutex.clone();
+
+            let start = Instant::now();
             test_write(ga_mutex, &notifications, &cmd).await.unwrap();
 
+            log::info!(
+                "Copy big chunk for {name} took {}s",
+                start.elapsed().as_secs()
+            );
             {
                 let mut ga = ga.lock().await;
                 // List files
-                run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-lh", &path])
+                run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-l", &path])
                     .await
                     .unwrap();
             }
@@ -302,6 +167,42 @@ async fn test_parallel_write_big_chunk(
     log::info!("Joining...");
     future::join_all(tasks).await;
 }
+
+async fn test_fio(
+    mount_args: Arc<Vec<ContainerVolume>>,
+    ga_mutex: Arc<Mutex<GuestAgent>>,
+    notifications: Arc<Notifications>,
+) {
+    for ContainerVolume { name : _, path } in mount_args.iter() {
+        let mut ga = ga_mutex.lock().await;
+
+        // TODO: this is serialized
+        run_process_with_output(
+            &mut ga,
+            &notifications,
+            "/usr/bin/fio",
+            &[
+                "fio",
+                "--randrepeat=1",
+                "--ioengine=libaio",
+                "--direct=1",
+                "--gtod_reduce=1",
+                "--name=test",
+                "--bs=4k",
+                "--iodepth=64",
+                "--readwrite=randrw",
+                "--rwmixread=75",
+                "--size=100M",
+                "--max-jobs=4",
+                "--numjobs=4",
+                &format!("--filename={path}/test_fio"),
+            ],
+        )
+        .await
+        .unwrap();
+    }
+}
+
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "options", about = "Options for performance benchmark")]
