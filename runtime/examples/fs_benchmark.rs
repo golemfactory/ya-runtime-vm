@@ -164,8 +164,9 @@ fn spawn_vm(tmp_path: &Path, cpu_cores: usize, mem_mib: usize) -> (Child, VM) {
         .join("poc")
         .join("qcow2")
         .join("empty_10GB.qcow2");
-    let qcow2_file = tmp_path.join("rw_drive.qcow2").canonicalize().unwrap();
+    let qcow2_file = tmp_path.join("rw_drive.qcow2");
     fs::copy(&source_qcow2_file, &qcow2_file).unwrap();
+    let qcow2_file = qcow2_file.canonicalize().unwrap();
 
     let vm = VMBuilder::new(
         cpu_cores,
@@ -331,8 +332,12 @@ async fn main() -> io::Result<()> {
     env_logger::init();
 
     log::info!("hai!");
-    let temp_path = Path::new("./tmp");
-    let (mut child, vm) = spawn_vm(temp_path, opt.cpu_cores, (opt.mem_gib * 1024.0) as usize);
+    let temp_path = get_project_dir().join(Path::new("tmp"));
+    if temp_path.exists() {
+        fs::remove_dir_all(&temp_path)?;
+    }
+    fs::create_dir_all(&temp_path)?;
+    let (mut child, vm) = spawn_vm(&temp_path, opt.cpu_cores, (opt.mem_gib * 1024.0) as usize);
 
     let notifications = Arc::new(Notifications::new());
 
