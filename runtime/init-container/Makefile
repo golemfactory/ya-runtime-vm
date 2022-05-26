@@ -108,6 +108,12 @@ initramfs.cpio.gz: init $(UNPACKED_KERNEL)
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/drivers/block/virtio_blk.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/drivers/net/tun.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/9p/9p.ko initramfs
+	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/ext4/ext4.ko initramfs
+	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/mbcache.ko initramfs
+	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/jbd2/jbd2.ko initramfs
+	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/lib/crc16.ko initramfs
+	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/crypto/crc32c_generic.ko initramfs
+	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/lib/libcrc32c.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/squashfs/squashfs.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/overlayfs/overlay.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/fscache/fscache.ko initramfs
@@ -115,7 +121,7 @@ initramfs.cpio.gz: init $(UNPACKED_KERNEL)
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/9p/9pnet_virtio.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/ipv6/ipv6.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/packet/af_packet.ko initramfs
-	cd initramfs && find . | cpio --quiet -o -H newc -R 0:0 | gzip -9 > ../$@
+	cd initramfs && find . | cpio -v -o -H newc -R 0:0 | gzip -9 > ../$@
 	$(RM) -rf initramfs
 
 TESTS_NAMES := cyclic_buffer

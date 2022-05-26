@@ -9,8 +9,8 @@ use tokio::{net::TcpStream, process::Command, time::sleep};
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 use ya_vm_file_server::InprocServer;
 
-use crate::demux_socket_comm::{start_demux_communication, DemuxSocketHandle, MAX_P9_PACKET_SIZE};
 use crate::arg_builder::ArgsBuilder;
+use crate::demux_socket_comm::{start_demux_communication, DemuxSocketHandle, MAX_P9_PACKET_SIZE};
 
 const FILE_VMLINUZ: &str = "vmlinuz-virt";
 const FILE_INITRAMFS: &str = "initramfs.cpio.gz";
@@ -24,7 +24,6 @@ pub struct VMBuilder {
     kernel_path: Option<String>,
     ramfs_path: Option<String>,
 }
-
 
 impl VMBuilder {
     pub fn new(
@@ -64,7 +63,7 @@ impl VMBuilder {
         #[cfg(unix)]
         {
             chardev =
-                |n, p: &PathBuf| format!("socket,path={},server,nowait,id={}", p.display(), n);
+                |n, p: &PathBuf| format!("socket,path={},server=on,wait=off,id={}", p.display(), n);
 
             let uid = uuid::Uuid::new_v4().to_simple().to_string();
             manager_sock = std::env::temp_dir().join(format!("{}.sock", uid));
@@ -76,7 +75,7 @@ impl VMBuilder {
             chardev = |n, p: &str| {
                 let addr: SocketAddr = p.parse().unwrap();
                 format!(
-                    "socket,host={},port={},server,nowait,id={}",
+                    "socket,host={},port={},server=on,wait=off,id={}",
                     addr.ip(),
                     addr.port(),
                     n
@@ -102,6 +101,8 @@ impl VMBuilder {
         let kernel_path = self.kernel_path.unwrap_or(FILE_VMLINUZ.to_string());
         let ramfs_path = self.ramfs_path.unwrap_or(FILE_INITRAMFS.to_string());
 
+        let use_rw_drive = true;
+
         #[rustfmt::skip]
         let ab = {
             let mut ab = ArgsBuilder::new();
@@ -121,6 +122,7 @@ impl VMBuilder {
             ab.add_2("-device", "virtserialport,chardev=net_cdev,name=net_port");
             ab.add_2("-device", "virtserialport,chardev=p9_cdev,name=p9_port");
             ab.add_2("-drive", &format!("file={},cache=unsafe,readonly=on,format=raw,if=virtio", self.task_package));
+            if use_rw_drive { ab.add_2("-drive", &format!("file={},format=qcow2,if=virtio", self.rw_drive)) }
             ab.add_1("-no-reboot");
             ab.add_2("-accel", acceleration);
             ab.add_1("-nodefaults");
@@ -131,7 +133,6 @@ impl VMBuilder {
         let args = ab.get_args_vector();
         log::debug!("Arguments for VM array: {:?}", args);
         log::info!("VM runtime command line: {}", ab.get_args_string());
-
 
         #[cfg(windows)]
         return VM {

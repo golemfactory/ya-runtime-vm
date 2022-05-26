@@ -86,8 +86,8 @@ async fn run_process_with_output(
             0,
             &[
                 None,
-                Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
-                Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
+                Some(RedirectFdType::RedirectFdPipeBlocking(0x10000)),
+                Some(RedirectFdType::RedirectFdPipeBlocking(0x10000)),
             ],
             None,
         )
@@ -100,11 +100,13 @@ async fn run_process_with_output(
         .await
         .notified()
         .await;
-    notifications
+    timeout(Duration::from_secs(1), notifications
         .get_output_available_notification(id)
         .await
-        .notified()
-        .await;
+        .notified()).await;
+
+
+    log::error!("dupa4");
 
     match ga.query_output(id, 1, 0, u64::MAX).await? {
         Ok(out) => {
@@ -113,6 +115,7 @@ async fn run_process_with_output(
         }
         Err(code) => log::info!("{argv:?} no data on STDOUT, reason {code}"),
     }
+    log::error!("dupa6");
 
     match ga.query_output(id, 2, 0, u64::MAX).await? {
         Ok(out) => {
@@ -175,6 +178,7 @@ fn spawn_vm(tmp_path: &Path, cpu_cores: usize, mem_mib: usize) -> (Child, VM) {
     .build();
 
     let mut cmd = vm.create_cmd(&runtime_dir.join(vm_executable));
+//    let mut cmd = vm.create_cmd(r#"C:\Program Files\qemu\qemu-system-x86_64.exe"#);
 
     log::info!("CMD: {cmd:?}");
 
@@ -262,9 +266,7 @@ async fn test_parallel_write_big_chunk(
             speed_mbs
         );
 
-        // run_process_with_output(&mut ga, &notifications, "/bin/df", &["df","-h"])
-        //     .await
-        //     .unwrap();
+
     }
 
     let mut tasks = vec![];
@@ -319,7 +321,7 @@ pub struct Opt {
     mount_count: u32,
     /// File size to test in bytes [bytes]
     #[allow(unused)]
-    #[structopt(long, default_value = "100000000")]
+    #[structopt(long, default_value = "10000000")]
     file_test_size: u64,
 }
 
@@ -384,23 +386,23 @@ async fn main() -> io::Result<()> {
         )
         .await?;
     }
-
     {
         let mut ga = ga_mutex.lock().await;
 
-        //run_process_with_output(&mut ga, &notifications, "/bin/ps", &["ps", "aux"]).await?;
-        run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "/dev"]).await?;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        log::error!("dupa_start");
+        run_process_with_output(&mut ga, &notifications, "/bin/mkdir", &["mkdir", "/mnt/here"])
+            .await?;
+        //log::error!("dupa_koniec");
 
-        let id = ga
-            .run_entrypoint("/bin/sleep", &["sleep", "60"], None, 0, 0, &NO_REDIR, None)
-            .await?
-            .expect("Run process failed");
-        log::info!("Spawned process with id: {}", id);
-        notifications
-            .get_process_died_notification(id)
-            .await
-            .notified()
-            .await;
+        run_process_with_output(&mut ga, &notifications,"/bin/ls",&["ls", "-al", "/dev2"])
+            .await?;
+        run_process_with_output(&mut ga, &notifications, "/bin/mount", &["mount", "-t", "ext4", "/dev/vdb", "/mnt/here"])
+            .await?;
+         run_process_with_output(&mut ga, &notifications,"/bin/ls",&["ls", "-al", "/mnt"])
+             .await?;
+        run_process_with_output(&mut ga, &notifications,"/bin/ls",&["ls", "-al", "/mnt/here"])
+            .await?;
     }
 
     // test_parallel_write_small_chunks(mount_args.clone(), ga_mutex.clone(), notifications.clone())
@@ -415,6 +417,16 @@ async fn main() -> io::Result<()> {
     .await;
 
     log::info!("test_parallel_write_big_chunk finished");
+
+
+    {
+        let mut ga = ga_mutex.lock().await;
+
+        //run_process_with_output(&mut ga, &notifications, "/bin/ps", &["ps", "aux"]).await?;
+        run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-la", "/dev"]).await?;
+
+    }
+
     {
         let mut ga = ga_mutex.lock().await;
 
@@ -427,6 +439,7 @@ async fn main() -> io::Result<()> {
         )
         .await?;
 
+        /*
         let id = ga
             .run_entrypoint("/bin/sleep", &["sleep", "60"], None, 0, 0, &NO_REDIR, None)
             .await?
@@ -436,12 +449,13 @@ async fn main() -> io::Result<()> {
             .get_process_died_notification(id)
             .await
             .notified()
-            .await;
+            .await;*/
     }
 
     /* VM should quit now. */
     let e = timeout(Duration::from_secs(5), child.wait()).await;
     log::info!("{:?}", e);
+    child.kill().await.unwrap();
 
     Ok(())
 }

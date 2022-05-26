@@ -114,6 +114,7 @@ static noreturn void die(void) {
 })
 
 static void load_module(const char* path) {
+    fprintf(stderr, "Loading module %s\n", path);
     int fd = CHECK(open(path, O_RDONLY | O_CLOEXEC));
     CHECK(syscall(SYS_finit_module, fd, "", 0));
     CHECK(close(fd));
@@ -1543,6 +1544,13 @@ int main(void) {
     load_module("/9pnet.ko");
     load_module("/9pnet_virtio.ko");
     load_module("/9p.ko");
+    load_module("/crc16.ko");
+    load_module("/crc32c_generic.ko");
+    load_module("/libcrc32c.ko");
+    load_module("/mbcache.ko");
+    load_module("/jbd2.ko");
+    load_module("/ext4.ko");
+
 
     g_cmds_fd = CHECK(open(VPORT_CMD, O_RDWR | O_CLOEXEC));
     g_net_fd = CHECK(open(VPORT_NET, O_RDWR | O_CLOEXEC));
@@ -1550,6 +1558,7 @@ int main(void) {
 
     CHECK(mkdir("/mnt", S_IRWXU));
     CHECK(mkdir("/mnt/image", S_IRWXU));
+
     CHECK(mkdir("/mnt/overlay", S_IRWXU));
     CHECK(mkdir("/mnt/newroot", DEFAULT_DIR_PERMS));
 
@@ -1561,9 +1570,16 @@ int main(void) {
     CHECK(mkdir("/mnt/overlay/upper", S_IRWXU));
     CHECK(mkdir("/mnt/overlay/work", S_IRWXU));
 
-    CHECK(mount("/dev/vda", "/mnt/image", "squashfs", MS_RDONLY, ""));
+
+
+
+    CHECK(mount("/dev/vda", "/mnt/image", "squashfs", MS_RDONLY, NULL));
+
+
     CHECK(mount("overlay", "/mnt/newroot", "overlay", 0,
                 "lowerdir=/mnt/image,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work"));
+
+
 
     CHECK(umount2("/dev", MNT_DETACH));
 
@@ -1573,6 +1589,7 @@ int main(void) {
     CHECK(chdir("/"));
 
     create_dir("/dev", DEFAULT_DIR_PERMS);
+    create_dir("/dev2", DEFAULT_DIR_PERMS);
     create_dir("/tmp", DEFAULT_DIR_PERMS);
 
     CHECK(mount("proc", "/proc", "proc",
@@ -1608,6 +1625,9 @@ int main(void) {
                     MODE_RW_UGO | S_IFCHR,
                     makedev(5, 2)));
     }
+
+    CHECK(mkdir("/mnt/internal", S_IRWXU));
+    CHECK(mount("/dev/vdb", "/mnt/internal", "ext4", 0, NULL));
 
     setup_network();
     setup_agent_directories();

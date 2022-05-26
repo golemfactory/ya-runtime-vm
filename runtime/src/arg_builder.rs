@@ -1,5 +1,3 @@
-
-
 //don't care about performance. It's only one time shot for starting command.
 pub struct ArgsBuilder {
     arg_vec: Vec<String>,
@@ -26,9 +24,9 @@ impl ArgsBuilder {
         self.arg_vec.push(arg2.to_string());
     }
 
-    pub fn append_split(&mut self, split: std::str::Split<&str>) {
-        for arg in split {
-            self.arg_vec.push(arg.to_string())
-        }
-    }
+    //pub fn append_split(&mut self, split: std::str::Split<&str>) {
+    //    for arg in split {
+    //        self.arg_vec.push(arg.to_string())
+    //    }
+    //}
 }
