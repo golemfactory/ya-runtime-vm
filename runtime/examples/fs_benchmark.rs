@@ -1,176 +1,15 @@
 use ::futures::{future, lock::Mutex, FutureExt};
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::{
-    env,
-    io::{self, prelude::*},
-    process::Stdio,
-    sync::Arc,
-};
+use tokio::io;
 use tokio::time::timeout;
-use tokio::{process::Child, sync};
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
-use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
-use ya_runtime_vm::vm::{VMBuilder, VM};
+use ya_runtime_vm::guest_agent_comm::{GuestAgent, RedirectFdType};
 
-struct Notifications {
-    process_died: Mutex<HashMap<u64, Arc<sync::Notify>>>,
-    output_available: Mutex<HashMap<u64, Arc<sync::Notify>>>,
-}
-
-impl Notifications {
-    fn new() -> Self {
-        Notifications {
-            process_died: Mutex::new(HashMap::new()),
-            output_available: Mutex::new(HashMap::new()),
-        }
-    }
-
-    async fn get_process_died_notification(&self, id: u64) -> Arc<sync::Notify> {
-        let notif = {
-            let mut lock = self.process_died.lock().await;
-            lock.entry(id)
-                .or_insert(Arc::new(sync::Notify::new()))
-                .clone()
-        };
-
-        notif
-    }
-
-    async fn get_output_available_notification(&self, id: u64) -> Arc<sync::Notify> {
-        let notif = {
-            let mut lock = self.output_available.lock().await;
-            lock.entry(id)
-                .or_insert(Arc::new(sync::Notify::new()))
-                .clone()
-        };
-
-        notif
-    }
-
-    async fn handle(&self, notification: Notification) {
-        match notification {
-            Notification::OutputAvailable { id, fd } => {
-                log::debug!("Process {} has output available on fd {}", id, fd);
-
-                self.get_output_available_notification(id)
-                    .await
-                    .notify_one();
-            }
-            Notification::ProcessDied { id, reason } => {
-                log::debug!("Process {} died with {:?}", id, reason);
-                self.get_process_died_notification(id).await.notify_one();
-            }
-        }
-    }
-}
-
-async fn run_process_with_output(
-    ga: &mut GuestAgent,
-    notifications: &Notifications,
-    bin: &str,
-    argv: &[&str],
-) -> io::Result<()> {
-    let id = ga
-        .run_process(
-            bin,
-            argv,
-            None,
-            0,
-            0,
-            &[
-                None,
-                Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
-                Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
-            ],
-            None,
-        )
-        .await?
-        .expect("Run process failed");
-
-    log::info!("Spawned process with id: {}", id);
-    notifications
-        .get_process_died_notification(id)
-        .await
-        .notified()
-        .await;
-    notifications
-        .get_output_available_notification(id)
-        .await
-        .notified()
-        .await;
-
-    match ga.query_output(id, 1, 0, u64::MAX).await? {
-        Ok(out) => {
-            log::info!("STDOUT Output {argv:?}:");
-            io::stdout().write_all(&out)?;
-        }
-        Err(code) => log::info!("{argv:?} no data on STDOUT, reason {code}"),
-    }
-
-    match ga.query_output(id, 2, 0, u64::MAX).await? {
-        Ok(out) => {
-            log::error!("STDERR Output {argv:?}:");
-            io::stdout().write_all(&out)?;
-        }
-        Err(code) => log::info!("{argv:?} no data on STDERR, reason {code}"),
-    }
-    Ok(())
-}
-
-fn get_project_dir() -> PathBuf {
-    PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
-        .canonicalize()
-        .expect("invalid manifest dir")
-}
-
-fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
-    let joined = path.as_ref().join(file.to_string());
-
-    // Under windows Paths has UNC prefix that is not parsed correctly by qemu
-    // Wrap Path with simplified method to remove that prefix
-    // It has no effect on Unix
-    dunce::simplified(
-        joined
-            // canonicalize checks existence of the file, it may failed, if does not exist
-            .canonicalize()
-            .expect(&joined.display().to_string())
-            .as_path(),
-    )
-    .display()
-    .to_string()
-}
-
-fn spawn_vm() -> (Child, VM) {
-    #[cfg(windows)]
-    let vm_executable = "vmrt.exe";
-    #[cfg(unix)]
-    let vm_executable = "vmrt";
-
-    let project_dir = get_project_dir();
-    let runtime_dir = project_dir.join("poc").join("runtime");
-    let image_dir = project_dir.join("poc").join("squashfs");
-    let init_dir = project_dir.join("init-container");
-
-    let vm = VMBuilder::new(1, 256, &image_dir.join("ubuntu.gvmi"))
-        .with_kernel_path(join_as_string(&init_dir, "vmlinuz-virt"))
-        .with_ramfs_path(join_as_string(&init_dir, "initramfs.cpio.gz"))
-        .build();
-
-    let mut cmd = vm.create_cmd(&runtime_dir.join(vm_executable));
-
-    log::info!("CMD: {cmd:?}");
-
-    //cmd.stdin(Stdio::null());
-
-    // cmd.stderr(Stdio::null());
-    // cmd.stdout(Stdio::null());
-
-    cmd.current_dir(runtime_dir);
-    (cmd.spawn().expect("failed to spawn VM"), vm)
-}
+mod common;
+use common::run_process_with_output;
+use common::spawn_vm;
+use common::Notifications;
 
 /// Write for one byte to the file, create as many tasks as there are mount points
 async fn test_parallel_write_small_chunks(
@@ -296,43 +135,41 @@ async fn test_fio(
     ga_mutex: Arc<Mutex<GuestAgent>>,
     notifications: Arc<Notifications>,
 ) {
-        for ContainerVolume {_name, path} in mount_args.iter() {
-            let mut ga = ga_mutex.lock().await;
+    for ContainerVolume { name : _, path } in mount_args.iter() {
+        let mut ga = ga_mutex.lock().await;
 
-            // TODO: this is serialized
-            run_process_with_output(
-                &mut ga,
-                &notifications,
-                "/usr/bin/fio",
-                &[
-                    "fio",
-                    "--randrepeat=1",
-                    "--ioengine=libaio",
-                    "--direct=1",
-                    "--gtod_reduce=1",
-                    "--name=test",
-                    "--bs=4k",
-                    "--iodepth=64",
-                    "--readwrite=randrw",
-                    "--rwmixread=75",
-                    "--size=100M",
-                    "--max-jobs=4",
-                    "--numjobs=4",
-                    &format!("--filename={path}/test_fio"),
-                ],
-            )
-            .await
-            .unwrap();
-        }
+        // TODO: this is serialized
+        run_process_with_output(
+            &mut ga,
+            &notifications,
+            "/usr/bin/fio",
+            &[
+                "fio",
+                "--randrepeat=1",
+                "--ioengine=libaio",
+                "--direct=1",
+                "--gtod_reduce=1",
+                "--name=test",
+                "--bs=4k",
+                "--iodepth=64",
+                "--readwrite=randrw",
+                "--rwmixread=75",
+                "--size=100M",
+                "--max-jobs=4",
+                "--numjobs=4",
+                &format!("--filename={path}/test_fio"),
+            ],
+        )
+        .await
+        .unwrap();
+    }
 }
+
 #[tokio::main]
 async fn main() -> io::Result<()> {
     env_logger::init();
 
-    log::info!("hai!");
     let (mut child, vm) = spawn_vm();
-
-    log::info!("hai!");
     let temp_dir = tempdir::TempDir::new("ya-vm-direct").expect("Failed to create temp dir");
     let temp_path = temp_dir.path();
     let notifications = Arc::new(Notifications::new());
@@ -392,16 +229,22 @@ async fn main() -> io::Result<()> {
     // test_parallel_write_big_chunk(mount_args.clone(), ga_mutex.clone(), notifications.clone())
     //     .await;
 
-    test_fio(mount_args.clone(), ga_mutex.clone(), notifications.clone()).await;
-
-    let e = timeout(Duration::from_secs(5), child.wait()).await;
     {
         let mut ga = ga_mutex.lock().await;
 
-        run_process_with_output(&mut ga, &notifications, "/bin/ps", &["ps", "auxjf"]).await?;
+        run_process_with_output(&mut ga, &notifications, "/bin/mkdir", &["mkdir", "/tmp/testo"]).await?;
+
+    }
+
+    test_fio(mount_args.clone(), ga_mutex.clone(), notifications.clone()).await;
+
+    {
+        let mut ga = ga_mutex.lock().await;
+
+        run_process_with_output(&mut ga, &notifications, "/bin/ps", &["ps", "aux"]).await?;
 
         let id = ga
-            .run_entrypoint("/bin/sleep", &["sleep", "60"], None, 0, 0, &NO_REDIR, None)
+            .run_entrypoint("/bin/sleep", &["sleep", "5"], None, 0, 0, &NO_REDIR, None)
             .await?
             .expect("Run process failed");
         log::info!("Spawned process with id: {}", id);
@@ -412,7 +255,7 @@ async fn main() -> io::Result<()> {
             .await;
     }
 
-    /* VM should quit now. */
+    // /* VM should quit now. */
     let e = timeout(Duration::from_secs(5), child.wait()).await;
     log::info!("{:?}", e);
 
