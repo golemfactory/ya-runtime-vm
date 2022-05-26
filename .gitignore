@@ -3,3 +3,4 @@
 *.o
 /.idea/
 /tmp
+/runtime/tmp
