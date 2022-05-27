@@ -1,16 +1,22 @@
+use crate::demux_socket_comm::{start_demux_communication, DemuxSocketHandle, MAX_P9_PACKET_SIZE};
 use crate::vm::VM;
+use anyhow::anyhow;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
+use std::{ffi::OsStr, net::SocketAddr, path::Path};
 use tokio::process::Child;
 use tokio::{
     io::{self, AsyncBufReadExt},
     spawn,
 };
+use tokio::{net::TcpStream, process::Command, time::sleep};
+use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
+use ya_vm_file_server::InprocServer;
 
-#[derive(Default)]
 pub struct VMRunner {
     instance: Option<Child>,
+    vm: VM,
 }
 
 pub enum ReaderOutputType {
@@ -18,66 +24,22 @@ pub enum ReaderOutputType {
     StdError,
 }
 
-async fn reader_to_log<T: io::AsyncRead + Unpin>(reader: T, stream_type: ReaderOutputType) {
-    let mut reader = io::BufReader::new(reader);
-    let mut buf = Vec::new();
-    loop {
-        match reader.read_until(b'\n', &mut buf).await {
-            Ok(0) => {
-                log::warn!("VM: reader.read_until returned 0");
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            Ok(_) => {
-                let bytes = strip_ansi_escapes::strip(&buf).unwrap();
-                match stream_type {
-                    ReaderOutputType::StdOutput => {
-                        log::debug!("VM: {}", String::from_utf8_lossy(&bytes).trim_end());
-                    }
-                    ReaderOutputType::StdError => {
-                        log::debug!(
-                            "VM Error Stream: {}",
-                            String::from_utf8_lossy(&bytes).trim_end()
-                        );
-                    }
-                }
-                buf.clear();
-            }
-            Err(e) => log::error!("VM output error: {}", e),
-        }
-    }
-}
-
-/*
-async fn reader_to_log_error<T: io::AsyncRead + Unpin>(reader: T) {
-    let mut reader = io::BufReader::new(reader);
-    let mut buf = Vec::new();
-    loop {
-        match reader.read_until(b'\n', &mut buf).await {
-            Ok(0) => {
-                log::warn!("VM ERROR: reader.read_until returned 0");
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            Ok(_) => {
-                let bytes = strip_ansi_escapes::strip(&buf).unwrap();
-                log::debug!(
-                    "VM ERROR STREAM: {}",
-                    String::from_utf8_lossy(&bytes).trim_end()
-                );
-                buf.clear();
-            }
-            Err(e) => log::error!("VM stderr error: {}", e),
-        }
-    }
-}*/
-
 impl VMRunner {
-    pub fn run_vm(&mut self, vm: &VM, runtime_dir: PathBuf) {
+    pub fn new(vm:VM) -> Self {
+        return VMRunner{instance: None, vm}
+    }
+
+    pub fn get_vm(&self) -> &VM {
+        return &self.vm;
+    }
+
+    pub fn run_vm(&mut self, runtime_dir: PathBuf) {
         #[cfg(windows)]
         let vm_executable = "vmrt.exe";
         #[cfg(unix)]
         let vm_executable = "vmrt";
 
-        let mut cmd = vm.create_cmd(&runtime_dir.join(vm_executable));
+        let mut cmd = self.vm.get_cmd(&runtime_dir.join(vm_executable));
         cmd.current_dir(runtime_dir);
         let mut instance = cmd
             .stdin(Stdio::piped())
@@ -89,9 +51,120 @@ impl VMRunner {
 
         let stdout = instance.stdout.take().unwrap();
         let stderr = instance.stderr.take().unwrap();
-        spawn(reader_to_log(stdout, ReaderOutputType::StdOutput));
-        spawn(reader_to_log(stderr, ReaderOutputType::StdError));
+        spawn(VMRunner::reader_to_log(stdout, ReaderOutputType::StdOutput));
+        spawn(VMRunner::reader_to_log(stderr, ReaderOutputType::StdError));
 
         self.instance = Some(instance);
+    }
+
+    async fn connect_to_9p_endpoint(&self, tries: usize) -> anyhow::Result<TcpStream> {
+        log::debug!("Connect to the 9P VM endpoint...");
+
+        for _ in 0..tries {
+            match TcpStream::connect(self.vm.get_9p_sock()).await {
+                Ok(stream) => {
+                    log::debug!("Connected to the 9P VM endpoint");
+                    return Ok(stream);
+                }
+                Err(e) => {
+                    log::debug!("Failed to connect to 9P VM endpoint: {e}");
+                    // The VM is not ready yet, try again
+                    sleep(Duration::from_secs(1)).await;
+                }
+            };
+        }
+
+        Err(anyhow!(
+            "Failed to connect to the 9P VM endpoint after #{tries} tries"
+        ))
+    }
+
+    /// Spawns tasks handling 9p communication for given mount points
+    pub async fn start_9p_service(
+        &self,
+        work_dir: &Path,
+        volumes: &[ContainerVolume],
+    ) -> anyhow::Result<(Vec<InprocServer>, DemuxSocketHandle)> {
+        log::debug!("Connecting to the 9P VM endpoint...");
+
+        let vmp9stream = self.connect_to_9p_endpoint(10).await?;
+
+        log::debug!("Spawn 9P inproc servers...");
+
+        let mut runtime_9ps = vec![];
+
+        for volume in volumes.iter() {
+            let mount_point_host = work_dir
+                .join(&volume.name)
+                .to_str()
+                .ok_or(anyhow!("cannot resolve 9P mount point"))?
+                .to_string();
+
+            log::debug!("Creating inproc 9p server with mount point {mount_point_host}");
+            let runtime_9p = InprocServer::new(&mount_point_host);
+
+            runtime_9ps.push(runtime_9p);
+        }
+
+        log::debug!("Connect to 9P inproc servers...");
+
+        let mut p9streams = vec![];
+
+        for server in &runtime_9ps {
+            let client_stream = server.attach_client(MAX_P9_PACKET_SIZE);
+            p9streams.push(client_stream);
+        }
+
+        let demux_socket_handle = start_demux_communication(vmp9stream, p9streams)?;
+
+        // start_demux_communication(vm_stream, p9_streams);
+        Ok((runtime_9ps, demux_socket_handle))
+    }
+
+    pub async fn stop_vm(
+        &mut self,
+        timeout: &Duration,
+        kill_on_timeout: bool,
+    ) -> anyhow::Result<()> {
+        if let Some(instance) = self.instance.as_mut() {
+            tokio::select! {
+            _ = tokio::time::sleep(*timeout) => {
+                println!("operation timed out");
+            }
+            _ = instance.wait() => {
+                println!("operation completed");
+            }
+            }
+        };
+        Ok(())
+    }
+
+    async fn reader_to_log<T: io::AsyncRead + Unpin>(reader: T, stream_type: ReaderOutputType) {
+        let mut reader = io::BufReader::new(reader);
+        let mut buf = Vec::new();
+        loop {
+            match reader.read_until(b'\n', &mut buf).await {
+                Ok(0) => {
+                    log::warn!("VM: reader.read_until returned 0");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Ok(_) => {
+                    let bytes = strip_ansi_escapes::strip(&buf).unwrap();
+                    match stream_type {
+                        ReaderOutputType::StdOutput => {
+                            log::debug!("VM: {}", String::from_utf8_lossy(&bytes).trim_end());
+                        }
+                        ReaderOutputType::StdError => {
+                            log::debug!(
+                            "VM Error Stream: {}",
+                            String::from_utf8_lossy(&bytes).trim_end()
+                        );
+                        }
+                    }
+                    buf.clear();
+                }
+                Err(e) => log::error!("VM output error: {}", e),
+            }
+        }
     }
 }

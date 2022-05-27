@@ -178,74 +178,10 @@ impl VM {
     }
 
     /// Creates Command object with args from the VM instance
-    pub fn create_cmd<S: AsRef<OsStr>>(&self, exe_path: S) -> tokio::process::Command {
+    pub fn get_cmd<S: AsRef<OsStr>>(&self, exe_path: S) -> tokio::process::Command {
         let mut cmd = Command::new(exe_path);
         cmd.args(&self.args);
 
         cmd
-    }
-
-    async fn connect_to_9p_endpoint(&self, tries: usize) -> anyhow::Result<TcpStream> {
-        log::debug!("Connect to the 9P VM endpoint...");
-
-        for _ in 0..tries {
-            match TcpStream::connect(self.get_9p_sock()).await {
-                Ok(stream) => {
-                    log::debug!("Connected to the 9P VM endpoint");
-                    return Ok(stream);
-                }
-                Err(e) => {
-                    log::debug!("Failed to connect to 9P VM endpoint: {e}");
-                    // The VM is not ready yet, try again
-                    sleep(Duration::from_secs(1)).await;
-                }
-            };
-        }
-
-        Err(anyhow!(
-            "Failed to connect to the 9P VM endpoint after #{tries} tries"
-        ))
-    }
-
-    /// Spawns tasks handling 9p communication for given mount points
-    pub async fn start_9p_service(
-        &self,
-        work_dir: &Path,
-        volumes: &[ContainerVolume],
-    ) -> anyhow::Result<(Vec<InprocServer>, DemuxSocketHandle)> {
-        log::debug!("Connecting to the 9P VM endpoint...");
-
-        let vmp9stream = self.connect_to_9p_endpoint(10).await?;
-
-        log::debug!("Spawn 9P inproc servers...");
-
-        let mut runtime_9ps = vec![];
-
-        for volume in volumes.iter() {
-            let mount_point_host = work_dir
-                .join(&volume.name)
-                .to_str()
-                .ok_or(anyhow!("cannot resolve 9P mount point"))?
-                .to_string();
-
-            log::debug!("Creating inproc 9p server with mount point {mount_point_host}");
-            let runtime_9p = InprocServer::new(&mount_point_host);
-
-            runtime_9ps.push(runtime_9p);
-        }
-
-        log::debug!("Connect to 9P inproc servers...");
-
-        let mut p9streams = vec![];
-
-        for server in &runtime_9ps {
-            let client_stream = server.attach_client(MAX_P9_PACKET_SIZE);
-            p9streams.push(client_stream);
-        }
-
-        let demux_socket_handle = start_demux_communication(vmp9stream, p9streams)?;
-
-        // start_demux_communication(vm_stream, p9_streams);
-        Ok((runtime_9ps, demux_socket_handle))
     }
 }
