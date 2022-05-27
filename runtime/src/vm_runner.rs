@@ -1,16 +1,16 @@
 use crate::demux_socket_comm::{start_demux_communication, DemuxSocketHandle, MAX_P9_PACKET_SIZE};
 use crate::vm::VM;
 use anyhow::anyhow;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
-use std::{ffi::OsStr, net::SocketAddr, path::Path};
 use tokio::process::Child;
 use tokio::{
     io::{self, AsyncBufReadExt},
     spawn,
 };
-use tokio::{net::TcpStream, process::Command, time::sleep};
+use tokio::{net::TcpStream, time::sleep};
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 use ya_vm_file_server::InprocServer;
 
@@ -25,15 +25,15 @@ pub enum ReaderOutputType {
 }
 
 impl VMRunner {
-    pub fn new(vm:VM) -> Self {
-        return VMRunner{instance: None, vm}
+    pub fn new(vm: VM) -> Self {
+        return VMRunner { instance: None, vm };
     }
 
     pub fn get_vm(&self) -> &VM {
         return &self.vm;
     }
 
-    pub fn run_vm(&mut self, runtime_dir: PathBuf) {
+    pub async fn run_vm(&mut self, runtime_dir: PathBuf) -> anyhow::Result<()> {
         #[cfg(windows)]
         let vm_executable = "vmrt.exe";
         #[cfg(unix)]
@@ -46,15 +46,16 @@ impl VMRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
-            .spawn()
-            .unwrap();
+            .spawn()?;
 
-        let stdout = instance.stdout.take().unwrap();
-        let stderr = instance.stderr.take().unwrap();
+        let stdout = instance.stdout.take().ok_or(anyhow!("stdout take error"))?;
+        let stderr = instance.stderr.take().ok_or(anyhow!("stdout take error"))?;
         spawn(VMRunner::reader_to_log(stdout, ReaderOutputType::StdOutput));
         spawn(VMRunner::reader_to_log(stderr, ReaderOutputType::StdError));
 
         self.instance = Some(instance);
+
+        Ok(())
     }
 
     async fn connect_to_9p_endpoint(&self, tries: usize) -> anyhow::Result<TcpStream> {
@@ -124,15 +125,15 @@ impl VMRunner {
     pub async fn stop_vm(
         &mut self,
         timeout: &Duration,
-        kill_on_timeout: bool,
+        _kill_on_timeout: bool,
     ) -> anyhow::Result<()> {
         if let Some(instance) = self.instance.as_mut() {
             tokio::select! {
             _ = tokio::time::sleep(*timeout) => {
-                println!("operation timed out");
+                log::error!("Waiting for VM timed out");
             }
             _ = instance.wait() => {
-                println!("operation completed");
+                log::info!("VM closed successfully");
             }
             }
         };
@@ -156,9 +157,9 @@ impl VMRunner {
                         }
                         ReaderOutputType::StdError => {
                             log::debug!(
-                            "VM Error Stream: {}",
-                            String::from_utf8_lossy(&bytes).trim_end()
-                        );
+                                "VM Error Stream: {}",
+                                String::from_utf8_lossy(&bytes).trim_end()
+                            );
                         }
                     }
                     buf.clear();

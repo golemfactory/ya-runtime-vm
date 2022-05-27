@@ -220,7 +220,7 @@ pub struct Opt {
 }
 
 #[tokio::main]
-async fn main() -> io::Result<()> {
+async fn main() -> anyhow::Result<()> {
     let opt: Opt = Opt::from_args();
     env_logger::init();
 
@@ -230,7 +230,8 @@ async fn main() -> io::Result<()> {
         fs::remove_dir_all(&temp_path)?;
     }
     fs::create_dir_all(&temp_path)?;
-    let (mut child, vm) = spawn_vm(&temp_path, opt.cpu_cores, (opt.mem_gib * 1024.0) as usize);
+    let mut vm_runner =
+        spawn_vm(&temp_path, opt.cpu_cores, (opt.mem_gib * 1024.0) as usize).await?;
 
     let notifications = Arc::new(Notifications::new());
 
@@ -256,14 +257,18 @@ async fn main() -> io::Result<()> {
 
     let mount_args = Arc::new(mount_args);
 
-    let (_p9streams, _muxer_handle) = vm.start_9p_service(&temp_path, &mount_args).await.unwrap();
+    let (_p9streams, _muxer_handle) = vm_runner
+        .start_9p_service(&temp_path, &mount_args)
+        .await
+        .unwrap();
 
     let ns = notifications.clone();
-    let ga_mutex = GuestAgent::connected(vm.get_manager_sock(), 10, move |n, _g| {
-        let notifications = ns.clone();
-        async move { notifications.clone().handle(n).await }.boxed()
-    })
-    .await?;
+    let ga_mutex =
+        GuestAgent::connected(vm_runner.get_vm().get_manager_sock(), 10, move |n, _g| {
+            let notifications = ns.clone();
+            async move { notifications.clone().handle(n).await }.boxed()
+        })
+        .await?;
 
     {
         let mut ga = ga_mutex.lock().await;
@@ -363,14 +368,13 @@ async fn main() -> io::Result<()> {
     }
 
     /* VM should quit now. */
-    let e = timeout(Duration::from_secs(5), child.wait()).await;
-    log::info!("{:?}", e);
-    child.kill().await.unwrap();
+    //let e = timeout(Duration::from_secs(5), vm_runner..wait()).await;
+    vm_runner.stop_vm(&Duration::from_secs(5), true).await?;
+    //log::info!("{:?}", e);
+    //child.kill().await.unwrap();
 
     Ok(())
 }
-
-const NO_REDIR: [Option<RedirectFdType>; 3] = [None, None, None];
 
 async fn test_write(
     ga: Arc<Mutex<GuestAgent>>,

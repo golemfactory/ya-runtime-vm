@@ -10,6 +10,7 @@ use std::convert::TryFrom;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 use structopt::StructOpt;
 use ya_runtime_vm::demux_socket_comm::{
     stop_demux_communication, DemuxSocketHandle, MAX_P9_PACKET_SIZE,
@@ -38,6 +39,7 @@ use ya_runtime_vm::{
     guest_agent_comm::{GuestAgent, Notification, RedirectFdType, RemoteCommandResult},
 };
 
+use ya_runtime_vm::vm_runner::VMRunner;
 use ya_vm_file_server::InprocServer;
 
 const DIR_RUNTIME: &str = "runtime";
@@ -91,7 +93,7 @@ enum NetworkEndpoint {
 
 #[derive(Default)]
 struct RuntimeData {
-    runtime: Option<process::Child>,
+    vm_runner: Option<VMRunner>,
     runtime_p9: Vec<InprocServer>,
     p9_communication_handle: Option<DemuxSocketHandle>,
     network: Option<NetworkEndpoint>,
@@ -100,10 +102,10 @@ struct RuntimeData {
 }
 
 impl RuntimeData {
-    fn runtime(&mut self) -> anyhow::Result<process::Child> {
-        self.runtime
+    fn vm_runner(&mut self) -> anyhow::Result<VMRunner> {
+        self.vm_runner
             .take()
-            .ok_or_else(|| anyhow::anyhow!("Runtime process not available"))
+            .ok_or_else(|| anyhow::anyhow!("VM runner process not available"))
     }
 
     fn deployment(&self) -> anyhow::Result<&Deployment> {
@@ -258,7 +260,7 @@ async fn start(
         None,
     )
     .build();
-    let mut cmd = vm.create_cmd(runtime_dir.join(FILE_RUNTIME));
+    /* let mut cmd = vm.get_cmd(runtime_dir.join(FILE_RUNTIME));
 
     cmd.current_dir(&runtime_dir);
 
@@ -267,9 +269,11 @@ async fn start(
         runtime_dir.to_str().unwrap_or("???"),
         FILE_RUNTIME,
         vm.get_args().join(" ")
-    );
+    );*/
 
-    let mut runtime = cmd
+    let mut vm_runner = VMRunner::new(vm);
+    vm_runner.run_vm(runtime_dir).await?;
+    /* let mut runtime = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -280,19 +284,24 @@ async fn start(
     let stdout = runtime.stdout.take().unwrap();
     let stderr = runtime.stderr.take().unwrap();
     spawn(reader_to_log(stdout));
-    spawn(reader_to_log_error(stderr));
+    spawn(reader_to_log_error(stderr));*/
 
-    let (runtime_9ps, demux_socket_handle) =
-        vm.start_9p_service(&work_dir, &deployment.volumes).await?;
+    let (runtime_9ps, demux_socket_handle) = vm_runner
+        .start_9p_service(&work_dir, &deployment.volumes)
+        .await?;
 
-    let ga = GuestAgent::connected(vm.get_manager_sock(), 10, move |notification, ga| {
-        let mut emitter = emitter.clone();
-        async move {
-            let status = notification_into_status(notification, ga).await;
-            emitter.emit(status).await;
-        }
-        .boxed()
-    })
+    let ga = GuestAgent::connected(
+        vm_runner.get_vm().get_manager_sock(),
+        10,
+        move |notification, ga| {
+            let mut emitter = emitter.clone();
+            async move {
+                let status = notification_into_status(notification, ga).await;
+                emitter.emit(status).await;
+            }
+            .boxed()
+        },
+    )
     .await?;
 
     {
@@ -311,9 +320,10 @@ async fn start(
 
     data.runtime_p9 = runtime_9ps; //prevent dropping
     data.p9_communication_handle.replace(demux_socket_handle); //prevent dropping
-    data.runtime.replace(runtime);
-    data.network
-        .replace(NetworkEndpoint::Socket(vm.get_net_sock().into()));
+    data.network.replace(NetworkEndpoint::Socket(
+        vm_runner.get_vm().get_net_sock().into(),
+    ));
+    data.vm_runner.replace(vm_runner);
     data.ga.replace(ga);
 
     Ok(None)
@@ -387,7 +397,7 @@ async fn stop(runtime_data: Arc<Mutex<RuntimeData>>) -> Result<(), server::Error
         stop_demux_communication(dsh).await;
     }
 
-    let mut runtime = data.runtime().unwrap();
+    let mut vm_runner = data.vm_runner.take().unwrap();
 
     {
         let mutex = data.ga().unwrap();
@@ -395,8 +405,8 @@ async fn stop(runtime_data: Arc<Mutex<RuntimeData>>) -> Result<(), server::Error
         convert_result(ga.quit().await, "Sending quit")?;
     }
 
-    runtime
-        .wait()
+    vm_runner
+        .stop_vm(&Duration::from_secs(60), false)
         .await
         .expect("Waiting for runtime stop failed");
     Ok(())

@@ -1,22 +1,15 @@
-use std::process::Stdio;
-use std::time::Duration;
 use std::{
     collections::HashMap,
     env, fs,
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tokio::{
-    io::{self, AsyncBufReadExt, AsyncWriteExt},
-    spawn,
-};
-use tokio::{
-    process::Child,
-    sync::{self, Mutex},
-};
+use tokio::io::{self, AsyncWriteExt};
+use tokio::sync::{self, Mutex};
+use ya_runtime_vm::vm_runner::VMRunner;
 use ya_runtime_vm::{
     guest_agent_comm::{GuestAgent, Notification, RedirectFdType},
-    vm::{VMBuilder, VM},
+    vm::VMBuilder,
 };
 
 pub struct Notifications {
@@ -151,50 +144,13 @@ fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
     .to_string()
 }
 
-async fn reader_to_log<T: io::AsyncRead + Unpin>(reader: T) {
-    let mut reader = io::BufReader::new(reader);
-    let mut buf = Vec::new();
-    loop {
-        match reader.read_until(b'\n', &mut buf).await {
-            Ok(0) => {
-                log::warn!("VM: reader.read_until returned 0");
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            Ok(_) => {
-                let bytes = strip_ansi_escapes::strip(&buf).unwrap();
-                log::debug!("VM: {}", String::from_utf8_lossy(&bytes).trim_end());
-                buf.clear();
-            }
-            Err(e) => log::error!("VM output error: {}", e),
-        }
-    }
-}
-
-async fn reader_to_log_error<T: io::AsyncRead + Unpin>(reader: T) {
-    let mut reader = io::BufReader::new(reader);
-    let mut buf = Vec::new();
-    loop {
-        match reader.read_until(b'\n', &mut buf).await {
-            Ok(0) => {
-                log::warn!("VM ERROR: reader.read_until returned 0");
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            Ok(_) => {
-                let bytes = strip_ansi_escapes::strip(&buf).unwrap();
-                log::debug!(
-                    "VM ERROR STREAM: {}",
-                    String::from_utf8_lossy(&bytes).trim_end()
-                );
-                buf.clear();
-            }
-            Err(e) => log::error!("VM stderr error: {}", e),
-        }
-    }
-}
-
-pub fn spawn_vm(tmp_path: &Path, cpu_cores: usize, mem_mib: usize) -> (Child, VM) {
+pub async fn spawn_vm(
+    tmp_path: &Path,
+    cpu_cores: usize,
+    mem_mib: usize,
+) -> anyhow::Result<VMRunner> {
     #[cfg(windows)]
-    let vm_executable = "vmrt.exe";
+    let _vm_executable = "vmrt.exe";
     #[cfg(unix)]
     let vm_executable = "vmrt";
 
@@ -207,8 +163,8 @@ pub fn spawn_vm(tmp_path: &Path, cpu_cores: usize, mem_mib: usize) -> (Child, VM
         .join("qcow2")
         .join("empty_10GB.qcow2");
     let qcow2_file = tmp_path.join("rw_drive.qcow2");
-    fs::copy(&source_qcow2_file, &qcow2_file).unwrap();
-    let qcow2_file = qcow2_file.canonicalize().unwrap();
+    fs::copy(&source_qcow2_file, &qcow2_file)?;
+    let qcow2_file = qcow2_file.canonicalize()?;
 
     let vm = VMBuilder::new(
         cpu_cores,
@@ -220,24 +176,7 @@ pub fn spawn_vm(tmp_path: &Path, cpu_cores: usize, mem_mib: usize) -> (Child, VM
     .with_ramfs_path(join_as_string(&init_dir, "initramfs.cpio.gz"))
     .build();
 
-    let mut cmd = vm.create_cmd(&runtime_dir.join(vm_executable));
-    cmd.current_dir(runtime_dir);
-    let mut runtime = cmd
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
-
-    let stdout = runtime.stdout.take().unwrap();
-    let stderr = runtime.stderr.take().unwrap();
-    spawn(reader_to_log(stdout));
-    spawn(reader_to_log_error(stderr));
-
-    (runtime, vm)
-}
-
-fn main() {
-    println!("Common module does not contain any example to run, but utilities that makes writing examples easier.");
+    let mut vm_runner = VMRunner::new(vm);
+    vm_runner.run_vm(runtime_dir).await?;
+    Ok(vm_runner)
 }

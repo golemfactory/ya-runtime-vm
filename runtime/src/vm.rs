@@ -1,16 +1,7 @@
-use anyhow::anyhow;
-use std::{
-    ffi::OsStr,
-    net::SocketAddr,
-    path::{Path, PathBuf},
-    time::Duration,
-};
-use tokio::{net::TcpStream, process::Command, time::sleep};
-use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
-use ya_vm_file_server::InprocServer;
+use std::{ffi::OsStr, net::SocketAddr, path::PathBuf};
+use tokio::process::Command;
 
 use crate::arg_builder::ArgsBuilder;
-use crate::demux_socket_comm::{start_demux_communication, DemuxSocketHandle, MAX_P9_PACKET_SIZE};
 
 const FILE_VMLINUZ: &str = "vmlinuz-virt";
 const FILE_INITRAMFS: &str = "initramfs.cpio.gz";
