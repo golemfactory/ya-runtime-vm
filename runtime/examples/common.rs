@@ -1,6 +1,9 @@
-use std::{collections::HashMap, env, fs, io::{self, Write}, path::{Path, PathBuf}, sync::Arc};
+use std::{collections::HashMap, env, fs, path::{Path, PathBuf}, sync::Arc};
 use std::process::Stdio;
-
+use tokio::{
+    io::{self, AsyncBufReadExt, AsyncWriteExt},
+    process, spawn,
+};
 use tokio::{
     process::Child,
     sync::{self, Mutex},
@@ -9,6 +12,7 @@ use ya_runtime_vm::{
     guest_agent_comm::{GuestAgent, Notification, RedirectFdType},
     vm::{VMBuilder, VM},
 };
+use anyhow::Context as _;
 
 pub struct Notifications {
     process_died: Mutex<HashMap<u64, Arc<sync::Notify>>>,
@@ -100,7 +104,7 @@ pub async fn run_process_with_output(
                 match ga.query_output(id, 1, 0, u64::MAX).await? {
                     Ok(out) => {
                         log::info!("STDOUT Output {argv:?}:");
-                        io::stdout().write_all(&out)?;
+                        io::stdout().write_all(&out).await?;
                     }
                     Err(code) => log::info!("{argv:?} no data on STDOUT, reason {code}"),
                 }
@@ -108,7 +112,7 @@ pub async fn run_process_with_output(
                 match ga.query_output(id, 2, 0, u64::MAX).await? {
                     Ok(out) => {
                         log::error!("STDERR Output {argv:?}:");
-                        io::stdout().write_all(&out)?;
+                        io::stdout().write_all(&out).await?;
                     }
                     Err(code) => log::info!("{argv:?} no data on STDERR, reason {code}"),
                 }
@@ -142,6 +146,45 @@ fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
     .to_string()
 }
 
+async fn reader_to_log<T: io::AsyncRead + Unpin>(reader: T) {
+    let mut reader = io::BufReader::new(reader);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_until(b'\n', &mut buf).await {
+            Ok(0) => {
+                log::warn!("VM: reader.read_until returned 0")
+            }
+            Ok(_) => {
+                let bytes = strip_ansi_escapes::strip(&buf).unwrap();
+                log::debug!("VM: {}", String::from_utf8_lossy(&bytes).trim_end());
+                buf.clear();
+            }
+            Err(e) => log::error!("VM output error: {}", e),
+        }
+    }
+}
+
+async fn reader_to_log_error<T: io::AsyncRead + Unpin>(reader: T) {
+    let mut reader = io::BufReader::new(reader);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_until(b'\n', &mut buf).await {
+            Ok(0) => {
+                log::warn!("VM ERROR: reader.read_until returned 0")
+            }
+            Ok(_) => {
+                let bytes = strip_ansi_escapes::strip(&buf).unwrap();
+                log::debug!(
+                    "VM ERROR STREAM: {}",
+                    String::from_utf8_lossy(&bytes).trim_end()
+                );
+                buf.clear();
+            }
+            Err(e) => log::error!("VM stderr error: {}", e),
+        }
+    }
+}
+
 pub fn spawn_vm(tmp_path: &Path, cpu_cores: usize, mem_mib: usize) -> (Child, VM) {
     #[cfg(windows)]
         let vm_executable = "vmrt.exe";
@@ -170,7 +213,20 @@ pub fn spawn_vm(tmp_path: &Path, cpu_cores: usize, mem_mib: usize) -> (Child, VM
         .with_ramfs_path(join_as_string(&init_dir, "initramfs.cpio.gz"))
         .build();
 
+
     let mut cmd = vm.create_cmd(&runtime_dir.join(vm_executable));
+    let mut runtime = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn().unwrap();
+
+    let stdout = runtime.stdout.take().unwrap();
+    let stderr = runtime.stderr.take().unwrap();
+    spawn(reader_to_log(stdout));
+    spawn(reader_to_log_error(stderr));
+
 //    let mut cmd = vm.create_cmd(r#"C:\Program Files\qemu\qemu-system-x86_64.exe"#);
 
     log::info!("CMD: {cmd:?}");
