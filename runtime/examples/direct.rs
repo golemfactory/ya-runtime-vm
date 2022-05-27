@@ -111,7 +111,7 @@ fn spawn_vm() -> (Child, VM) {
     let image_dir = project_dir.join("poc").join("squashfs");
     let init_dir = project_dir.join("init-container");
 
-    let vm = VMBuilder::new(1, 256, &image_dir.join("ubuntu.gvmi"))
+    let vm = VMBuilder::new(1, 256, &image_dir.join("ubuntu.gvmi"), None)
         .with_kernel_path(join_as_string(&init_dir, "vmlinuz-virt"))
         .with_ramfs_path(join_as_string(&init_dir, "initramfs.cpio.gz"))
         .build();
