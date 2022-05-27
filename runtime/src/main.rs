@@ -406,7 +406,7 @@ async fn stop(runtime_data: Arc<Mutex<RuntimeData>>) -> Result<(), server::Error
     }
 
     vm_runner
-        .stop_vm(&Duration::from_secs(60), false)
+        .stop_vm(&Duration::from_secs(5), false)
         .await
         .expect("Waiting for runtime stop failed");
     Ok(())

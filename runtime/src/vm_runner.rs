@@ -125,16 +125,34 @@ impl VMRunner {
     pub async fn stop_vm(
         &mut self,
         timeout: &Duration,
-        _kill_on_timeout: bool,
+        kill_on_timeout: bool,
     ) -> anyhow::Result<()> {
         if let Some(instance) = self.instance.as_mut() {
-            tokio::select! {
-            _ = tokio::time::sleep(*timeout) => {
-                log::error!("Waiting for VM timed out");
-            }
-            _ = instance.wait() => {
-                log::info!("VM closed successfully");
-            }
+            let stopped = tokio::select! {
+                _ = tokio::time::sleep(*timeout) => {
+                    log::warn!("Waiting for VM timed out");
+                    if !kill_on_timeout {
+                        return Err(anyhow!("Waiting for VM timed out"))
+                    }
+                    false
+                }
+                _ = instance.wait() => {
+                    log::info!("VM closed successfully");
+                    true
+                }
+            };
+            if !stopped && kill_on_timeout {
+                instance.start_kill()?;
+                tokio::select! {
+                    _ = tokio::time::sleep(*timeout) => {
+                        log::error!("Cannot kill VM");
+                        return Err(anyhow!("Cannot kill VM due to unknown reason"))
+                    }
+                    _ = instance.wait() => {
+                        log::info!("VM killed successfully");
+                        true
+                    }
+                };
             }
         };
         Ok(())
