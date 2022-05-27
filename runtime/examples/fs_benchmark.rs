@@ -20,10 +20,10 @@ use futures::future::{BoxFuture, LocalBoxFuture};
 use ya_runtime_sdk::runtime_api::server::RuntimeHandler;
 use tokio::{process::Command, sync::Notify};
 mod common;
-use common::run_process_with_output;
 use common::spawn_vm;
 use common::Notifications;
 use ya_runtime_sdk::runtime_api::server::{self, ProcessStatus, RuntimeService, RuntimeStatus};
+use ya_runtime_vm::local_notification_handler::{LocalNotifications, run_process_with_output};
 use ya_runtime_vm::local_runtime_handler::EventsLocal;
 
 fn get_project_dir() -> PathBuf {
@@ -54,7 +54,7 @@ fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
 async fn test_parallel_write_small_chunks(
     mount_args: Arc<Vec<ContainerVolume>>,
     ga_mutex: Arc<Mutex<GuestAgent>>,
-    notifications: Arc<Notifications>,
+    notifications: Arc<LocalNotifications>,
 ) {
     let mut tasks = vec![];
 
@@ -91,7 +91,7 @@ async fn test_parallel_write_big_chunk(
     test_file_size: u64,
     mount_args: Arc<Vec<ContainerVolume>>,
     ga_mutex: Arc<Mutex<GuestAgent>>,
-    notifications: Arc<Notifications>,
+    notifications: Arc<LocalNotifications>,
 ) {
     // prepare chunk
 
@@ -170,7 +170,7 @@ async fn test_parallel_write_big_chunk(
 async fn test_fio(
     mount_args: Arc<Vec<ContainerVolume>>,
     ga_mutex: Arc<Mutex<GuestAgent>>,
-    notifications: Arc<Notifications>,
+    notifications: Arc<LocalNotifications>,
 ) {
     for ContainerVolume { name: _, path } in mount_args.iter() {
         let mut ga = ga_mutex.lock().await;
@@ -240,7 +240,7 @@ async fn main() -> anyhow::Result<()> {
     let mut vm_runner =
         spawn_vm(&temp_path, opt.cpu_cores, (opt.mem_gib * 1024.0) as usize).await?;
 
-    let notifications = Arc::new(Notifications::new());
+    let notifications = Arc::new(LocalNotifications::new());
 
     const MOUNTS: usize = 2;
 
@@ -269,17 +269,9 @@ async fn main() -> anyhow::Result<()> {
         .await
         .unwrap();
 
-    let events = EventsLocal::new();
-    let event_emitter = EventEmitter::spawn(events);
-    vm_runner.start_guest_agent_communication(event_emitter);
 
-    let ns = notifications.clone();
-    let ga_mutex =
-        GuestAgent::connected(vm_runner.get_vm().get_manager_sock(), 10, move |n, _g| {
-            let notifications = ns.clone();
-            async move { notifications.clone().handle(n).await }.boxed()
-        })
-        .await?;
+    vm_runner.start_local_agent_communication(notifications.clone()).await?;
+    let ga_mutex = vm_runner.get_ga();
 
     {
         let mut ga = ga_mutex.lock().await;
@@ -339,7 +331,7 @@ async fn main() -> anyhow::Result<()> {
     test_parallel_write_big_chunk(
         opt.file_test_size,
         mount_args.clone(),
-        ga_mutex.clone(),
+        vm_runner.get_ga().clone(),
         notifications.clone(),
     )
     .await;
@@ -389,7 +381,7 @@ async fn main() -> anyhow::Result<()> {
 
 async fn test_write(
     ga: Arc<Mutex<GuestAgent>>,
-    notifications: &Notifications,
+    notifications: &LocalNotifications,
     cmd: &str,
 ) -> io::Result<()> {
     log::info!("***** test_big_write *****");

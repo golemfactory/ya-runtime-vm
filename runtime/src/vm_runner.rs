@@ -28,6 +28,7 @@ use ya_runtime_sdk::{
     Context, EmptyResponse, EndpointResponse, EventEmitter, OutputResponse, ProcessId,
     ProcessIdResponse, RuntimeMode,
 };
+use crate::local_notification_handler::LocalNotifications;
 
 pub struct VMRunner {
     instance: Option<Child>,
@@ -47,6 +48,10 @@ impl VMRunner {
 
     pub fn get_vm(&self) -> &VM {
         return &self.vm;
+    }
+
+    pub fn get_ga(&self) -> Arc<Mutex<GuestAgent>> {
+        self.ga.clone().unwrap()
     }
 
     pub async fn run_vm(&mut self, runtime_dir: PathBuf) -> anyhow::Result<()> {
@@ -88,6 +93,15 @@ impl VMRunner {
                 }.boxed()
             },
         ).await?;
+        self.ga = Some(ga);
+        Ok(())
+    }
+
+    pub async fn start_local_agent_communication(&mut self, notifications: Arc<LocalNotifications>) -> anyhow::Result<()> {
+        let ga = GuestAgent::connected(self.vm.get_manager_sock(), 10, move |n, _g| {
+            let notifications = notifications.clone();
+            async move { notifications.clone().handle(n).await }.boxed()
+        }).await?;
         self.ga = Some(ga);
         Ok(())
     }
