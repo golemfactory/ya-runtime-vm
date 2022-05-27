@@ -8,23 +8,23 @@ use std::{
     io::{self},
     sync::Arc,
 };
-use std::collections::HashMap;
+
 use structopt::StructOpt;
 use tokio::time::timeout;
-use ya_runtime_sdk::EventEmitter;
+
 
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 use ya_runtime_vm::demux_socket_comm::MAX_P9_PACKET_SIZE;
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, RedirectFdType};
-use futures::future::{BoxFuture, LocalBoxFuture};
-use ya_runtime_sdk::runtime_api::server::RuntimeHandler;
-use tokio::{process::Command, sync::Notify};
+
+
+
 mod common;
 use common::spawn_vm;
-use common::Notifications;
-use ya_runtime_sdk::runtime_api::server::{self, ProcessStatus, RuntimeService, RuntimeStatus};
+
+use ya_runtime_sdk::runtime_api::server::{RuntimeService};
 use ya_runtime_vm::local_notification_handler::{LocalNotifications, run_process_with_output};
-use ya_runtime_vm::local_runtime_handler::EventsLocal;
+
 
 fn get_project_dir() -> PathBuf {
     PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())

@@ -17,16 +17,11 @@ use ya_vm_file_server::InprocServer;
 use crate::guest_agent_comm::{GuestAgent, Notification};
 use futures::lock::Mutex;
 use futures::future::FutureExt;
-use futures::TryFutureExt;
+
 use ya_runtime_sdk::{
     runtime_api::{
-        deploy::{DeployResult, StartMode},
         server,
-    },
-    serialize,
-    server::Server,
-    Context, EmptyResponse, EndpointResponse, EventEmitter, OutputResponse, ProcessId,
-    ProcessIdResponse, RuntimeMode,
+    }, EventEmitter,
 };
 use crate::local_notification_handler::LocalNotifications;
 

@@ -1,14 +1,11 @@
 use std::{
     collections::HashMap,
-    env, fs,
-    path::{Path, PathBuf},
     sync::Arc,
 };
 use tokio::io::{self, AsyncWriteExt};
 use tokio::sync::{self, Mutex};
 use crate::{
     guest_agent_comm::{GuestAgent, Notification, RedirectFdType},
-    vm::VMBuilder,
 };
 
 pub struct LocalNotifications {

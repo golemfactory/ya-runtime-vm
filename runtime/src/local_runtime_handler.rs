@@ -3,12 +3,10 @@ use futures::FutureExt;
 use std::{
     clone::Clone,
     collections::HashMap,
-    env,
-    path::PathBuf,
     sync::{Arc, Mutex},
 };
-use tokio::{process::Command, sync::Notify};
-use ya_runtime_sdk::runtime_api::server::{self, ProcessStatus, RuntimeService, RuntimeStatus};
+use tokio::{sync::Notify};
+use ya_runtime_sdk::runtime_api::server::{self, ProcessStatus, RuntimeStatus};
 
 pub struct ProcessDataLocal {
     status: Option<ProcessStatus>,
