@@ -1,5 +1,6 @@
 use std::{collections::HashMap, env, fs, path::{Path, PathBuf}, sync::Arc};
 use std::process::Stdio;
+use std::time::Duration;
 use tokio::{
     io::{self, AsyncBufReadExt, AsyncWriteExt}, spawn,
 };
@@ -151,7 +152,8 @@ async fn reader_to_log<T: io::AsyncRead + Unpin>(reader: T) {
     loop {
         match reader.read_until(b'\n', &mut buf).await {
             Ok(0) => {
-                log::warn!("VM: reader.read_until returned 0")
+                log::warn!("VM: reader.read_until returned 0");
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
             Ok(_) => {
                 let bytes = strip_ansi_escapes::strip(&buf).unwrap();
@@ -169,7 +171,8 @@ async fn reader_to_log_error<T: io::AsyncRead + Unpin>(reader: T) {
     loop {
         match reader.read_until(b'\n', &mut buf).await {
             Ok(0) => {
-                log::warn!("VM ERROR: reader.read_until returned 0")
+                log::warn!("VM ERROR: reader.read_until returned 0");
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
             Ok(_) => {
                 let bytes = strip_ansi_escapes::strip(&buf).unwrap();
@@ -214,6 +217,7 @@ pub fn spawn_vm(tmp_path: &Path, cpu_cores: usize, mem_mib: usize) -> (Child, VM
 
 
     let mut cmd = vm.create_cmd(&runtime_dir.join(vm_executable));
+    cmd.current_dir(runtime_dir);
     let mut runtime = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -226,14 +230,7 @@ pub fn spawn_vm(tmp_path: &Path, cpu_cores: usize, mem_mib: usize) -> (Child, VM
     spawn(reader_to_log(stdout));
     spawn(reader_to_log_error(stderr));
 
-//    let mut cmd = vm.create_cmd(r#"C:\Program Files\qemu\qemu-system-x86_64.exe"#);
-
-    log::info!("CMD: {cmd:?}");
-
-    cmd.stdin(Stdio::piped());
-
-    cmd.current_dir(runtime_dir);
-    (cmd.spawn().expect("failed to spawn VM"), vm)
+    (runtime, vm)
 }
 
 fn main() {

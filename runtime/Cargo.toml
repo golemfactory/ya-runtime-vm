@@ -63,7 +63,7 @@ git = "https://github.com/golemfactory/ya-runtime-sdk"
 branch = "sz/update_tokio"
 
 [dependencies]
-ya-vm-file-server = {git = "https://github.com/golemfactory/ya-vm-file-server", version = "0.2.0"}
+ya-vm-file-server = {git = "https://github.com/golemfactory/ya-vm-file-server", version = "0.2.1"}
 anyhow = "1.0"
 bollard-stubs = "1.40.2"
 crc = "2.1.0"

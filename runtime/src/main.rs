@@ -255,6 +255,7 @@ async fn start(
         deployment.cpu_cores,
         deployment.mem_mib,
         &deployment.task_package,
+        None
     )
     .build();
     let mut cmd = vm.create_cmd(runtime_dir.join(FILE_RUNTIME));
