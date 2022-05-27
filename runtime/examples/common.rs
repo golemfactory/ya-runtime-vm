@@ -1,8 +1,14 @@
-use std::{collections::HashMap, env, fs, path::{Path, PathBuf}, sync::Arc};
 use std::process::Stdio;
 use std::time::Duration;
+use std::{
+    collections::HashMap,
+    env, fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::{
-    io::{self, AsyncBufReadExt, AsyncWriteExt}, spawn,
+    io::{self, AsyncBufReadExt, AsyncWriteExt},
+    spawn,
 };
 use tokio::{
     process::Child,
@@ -12,7 +18,6 @@ use ya_runtime_vm::{
     guest_agent_comm::{GuestAgent, Notification, RedirectFdType},
     vm::{VMBuilder, VM},
 };
-
 
 pub struct Notifications {
     process_died: Mutex<HashMap<u64, Arc<sync::Notify>>>,
@@ -189,9 +194,9 @@ async fn reader_to_log_error<T: io::AsyncRead + Unpin>(reader: T) {
 
 pub fn spawn_vm(tmp_path: &Path, cpu_cores: usize, mem_mib: usize) -> (Child, VM) {
     #[cfg(windows)]
-        let vm_executable = "vmrt.exe";
+    let vm_executable = "vmrt.exe";
     #[cfg(unix)]
-        let vm_executable = "vmrt";
+    let vm_executable = "vmrt";
 
     let project_dir = get_project_dir();
     let runtime_dir = project_dir.join("poc").join("runtime");
@@ -211,10 +216,9 @@ pub fn spawn_vm(tmp_path: &Path, cpu_cores: usize, mem_mib: usize) -> (Child, VM
         &image_dir.join("ubuntu.gvmi"),
         Some(&qcow2_file),
     )
-        .with_kernel_path(join_as_string(&init_dir, "vmlinuz-virt"))
-        .with_ramfs_path(join_as_string(&init_dir, "initramfs.cpio.gz"))
-        .build();
-
+    .with_kernel_path(join_as_string(&init_dir, "vmlinuz-virt"))
+    .with_ramfs_path(join_as_string(&init_dir, "initramfs.cpio.gz"))
+    .build();
 
     let mut cmd = vm.create_cmd(&runtime_dir.join(vm_executable));
     cmd.current_dir(runtime_dir);
@@ -223,7 +227,8 @@ pub fn spawn_vm(tmp_path: &Path, cpu_cores: usize, mem_mib: usize) -> (Child, VM
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
-        .spawn().unwrap();
+        .spawn()
+        .unwrap();
 
     let stdout = runtime.stdout.take().unwrap();
     let stderr = runtime.stderr.take().unwrap();

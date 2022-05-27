@@ -1,16 +1,22 @@
-use std::{collections::HashMap, env, fs, path::{Path, PathBuf}, sync::Arc};
+use crate::{
+    guest_agent_comm::{GuestAgent, Notification, RedirectFdType},
+    vm::{VMBuilder, VM},
+};
 use std::process::Stdio;
 use std::time::Duration;
+use std::{
+    collections::HashMap,
+    env, fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::{
-    io::{self, AsyncBufReadExt, AsyncWriteExt}, spawn,
+    io::{self, AsyncBufReadExt, AsyncWriteExt},
+    spawn,
 };
 use tokio::{
     process::Child,
     sync::{self, Mutex},
-};
-use crate::{
-    guest_agent_comm::{GuestAgent, Notification, RedirectFdType},
-    vm::{VMBuilder, VM},
 };
 
 #[derive(Default)]
@@ -20,7 +26,7 @@ pub struct VMRunner {
 
 pub enum ReaderOutputType {
     StdOutput,
-    StdError
+    StdError,
 }
 
 async fn reader_to_log<T: io::AsyncRead + Unpin>(reader: T, streamType: ReaderOutputType) {
@@ -37,9 +43,12 @@ async fn reader_to_log<T: io::AsyncRead + Unpin>(reader: T, streamType: ReaderOu
                 match streamType {
                     ReaderOutputType::StdOutput => {
                         log::debug!("VM: {}", String::from_utf8_lossy(&bytes).trim_end());
-                    },
+                    }
                     ReaderOutputType::StdError => {
-                        log::debug!("VM Error Stream: {}", String::from_utf8_lossy(&bytes).trim_end());
+                        log::debug!(
+                            "VM Error Stream: {}",
+                            String::from_utf8_lossy(&bytes).trim_end()
+                        );
                     }
                 }
                 buf.clear();
@@ -72,14 +81,12 @@ async fn reader_to_log_error<T: io::AsyncRead + Unpin>(reader: T) {
     }
 }*/
 
-
 impl VMRunner {
     pub fn run_vm(&mut self, vm: &VM, runtime_dir: PathBuf) {
         #[cfg(windows)]
-            let vm_executable = "vmrt.exe";
+        let vm_executable = "vmrt.exe";
         #[cfg(unix)]
-            let vm_executable = "vmrt";
-
+        let vm_executable = "vmrt";
 
         let mut cmd = vm.create_cmd(&runtime_dir.join(vm_executable));
         cmd.current_dir(runtime_dir);
@@ -88,7 +95,8 @@ impl VMRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
-            .spawn().unwrap();
+            .spawn()
+            .unwrap();
 
         let stdout = instance.stdout.take().unwrap();
         let stderr = instance.stderr.take().unwrap();

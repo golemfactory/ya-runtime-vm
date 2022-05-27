@@ -15,12 +15,10 @@ use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 use ya_runtime_vm::demux_socket_comm::MAX_P9_PACKET_SIZE;
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, RedirectFdType};
 
-
 mod common;
 use common::run_process_with_output;
 use common::spawn_vm;
 use common::Notifications;
-
 
 fn get_project_dir() -> PathBuf {
     PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
@@ -44,8 +42,6 @@ fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
     .display()
     .to_string()
 }
-
-
 
 /// Write for one byte to the file, create as many tasks as there are mount points
 #[allow(dead_code)]
@@ -124,8 +120,6 @@ async fn test_parallel_write_big_chunk(
             time_in_secs,
             speed_mbs
         );
-
-
     }
 
     let mut tasks = vec![];
@@ -172,7 +166,7 @@ async fn test_fio(
     ga_mutex: Arc<Mutex<GuestAgent>>,
     notifications: Arc<Notifications>,
 ) {
-    for ContainerVolume { name : _, path } in mount_args.iter() {
+    for ContainerVolume { name: _, path } in mount_args.iter() {
         let mut ga = ga_mutex.lock().await;
 
         // TODO: this is serialized
@@ -201,7 +195,6 @@ async fn test_fio(
         .unwrap();
     }
 }
-
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "options", about = "Options for performance benchmark")]
@@ -296,18 +289,32 @@ async fn main() -> io::Result<()> {
 
         tokio::time::sleep(Duration::from_secs(5)).await;
         log::error!("dupa_start");
-        run_process_with_output(&mut ga, &notifications, "/bin/mkdir", &["mkdir", "/mnt/here"])
-            .await?;
+        run_process_with_output(
+            &mut ga,
+            &notifications,
+            "/bin/mkdir",
+            &["mkdir", "/mnt/here"],
+        )
+        .await?;
         //log::error!("dupa_koniec");
 
-        run_process_with_output(&mut ga, &notifications,"/bin/ls",&["ls", "-al", "/dev2"])
+        run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-al", "/dev2"])
             .await?;
-        run_process_with_output(&mut ga, &notifications, "/bin/mount", &["mount", "-t", "ext4", "/dev/vdb", "/mnt/here"])
-            .await?;
-         run_process_with_output(&mut ga, &notifications,"/bin/ls",&["ls", "-al", "/mnt"])
-             .await?;
-        run_process_with_output(&mut ga, &notifications,"/bin/ls",&["ls", "-al", "/mnt/here"])
-            .await?;
+        run_process_with_output(
+            &mut ga,
+            &notifications,
+            "/bin/mount",
+            &["mount", "-t", "ext4", "/dev/vdb", "/mnt/here"],
+        )
+        .await?;
+        run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-al", "/mnt"]).await?;
+        run_process_with_output(
+            &mut ga,
+            &notifications,
+            "/bin/ls",
+            &["ls", "-al", "/mnt/here"],
+        )
+        .await?;
     }
 
     // test_parallel_write_small_chunks(mount_args.clone(), ga_mutex.clone(), notifications.clone())
@@ -323,13 +330,11 @@ async fn main() -> io::Result<()> {
 
     log::info!("test_parallel_write_big_chunk finished");
 
-
     {
         let mut ga = ga_mutex.lock().await;
 
         //run_process_with_output(&mut ga, &notifications, "/bin/ps", &["ps", "aux"]).await?;
         run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-la", "/dev"]).await?;
-
     }
 
     {
