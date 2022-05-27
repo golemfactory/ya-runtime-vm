@@ -1,22 +1,11 @@
-use crate::{
-    guest_agent_comm::{GuestAgent, Notification, RedirectFdType},
-    vm::{VMBuilder, VM},
-};
+use crate::vm::VM;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
-use std::{
-    collections::HashMap,
-    env, fs,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use tokio::process::Child;
 use tokio::{
-    io::{self, AsyncBufReadExt, AsyncWriteExt},
+    io::{self, AsyncBufReadExt},
     spawn,
-};
-use tokio::{
-    process::Child,
-    sync::{self, Mutex},
 };
 
 #[derive(Default)]
@@ -29,7 +18,7 @@ pub enum ReaderOutputType {
     StdError,
 }
 
-async fn reader_to_log<T: io::AsyncRead + Unpin>(reader: T, streamType: ReaderOutputType) {
+async fn reader_to_log<T: io::AsyncRead + Unpin>(reader: T, stream_type: ReaderOutputType) {
     let mut reader = io::BufReader::new(reader);
     let mut buf = Vec::new();
     loop {
@@ -40,7 +29,7 @@ async fn reader_to_log<T: io::AsyncRead + Unpin>(reader: T, streamType: ReaderOu
             }
             Ok(_) => {
                 let bytes = strip_ansi_escapes::strip(&buf).unwrap();
-                match streamType {
+                match stream_type {
                     ReaderOutputType::StdOutput => {
                         log::debug!("VM: {}", String::from_utf8_lossy(&bytes).trim_end());
                     }
