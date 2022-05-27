@@ -16,8 +16,8 @@ use ya_runtime_vm::{
 };
 
 pub struct Notifications {
-    process_died: Mutex<HashMap<u64, Arc<sync::Notify>>>,
-    output_available: Mutex<HashMap<u64, Arc<sync::Notify>>>,
+    pub process_died: Mutex<HashMap<u64, Arc<sync::Notify>>>,
+    pub output_available: Mutex<HashMap<u64, Arc<sync::Notify>>>,
 }
 
 impl Notifications {
