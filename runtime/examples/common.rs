@@ -1,8 +1,7 @@
 use std::{collections::HashMap, env, fs, path::{Path, PathBuf}, sync::Arc};
 use std::process::Stdio;
 use tokio::{
-    io::{self, AsyncBufReadExt, AsyncWriteExt},
-    process, spawn,
+    io::{self, AsyncBufReadExt, AsyncWriteExt}, spawn,
 };
 use tokio::{
     process::Child,
@@ -12,7 +11,7 @@ use ya_runtime_vm::{
     guest_agent_comm::{GuestAgent, Notification, RedirectFdType},
     vm::{VMBuilder, VM},
 };
-use anyhow::Context as _;
+
 
 pub struct Notifications {
     process_died: Mutex<HashMap<u64, Arc<sync::Notify>>>,
@@ -207,7 +206,7 @@ pub fn spawn_vm(tmp_path: &Path, cpu_cores: usize, mem_mib: usize) -> (Child, VM
         cpu_cores,
         mem_mib,
         &image_dir.join("ubuntu.gvmi"),
-        &qcow2_file,
+        Some(&qcow2_file),
     )
         .with_kernel_path(join_as_string(&init_dir, "vmlinuz-virt"))
         .with_ramfs_path(join_as_string(&init_dir, "initramfs.cpio.gz"))

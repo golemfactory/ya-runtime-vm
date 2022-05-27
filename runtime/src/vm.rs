@@ -17,7 +17,7 @@ const FILE_INITRAMFS: &str = "initramfs.cpio.gz";
 
 #[derive(Default)]
 pub struct VMBuilder {
-    rw_drive: String,
+    rw_drive: Option<String>,
     task_package: String,
     cpu_cores: usize,
     mem_mib: usize,
@@ -30,10 +30,10 @@ impl VMBuilder {
         cpu_cores: usize,
         mem_mib: usize,
         task_package: &PathBuf,
-        rw_drive: &PathBuf,
+        rw_drive: Option<&PathBuf>,
     ) -> Self {
         Self {
-            rw_drive: rw_drive.as_os_str().to_str().unwrap().into(),
+            rw_drive: rw_drive.map(|rw_drive| rw_drive.as_os_str().to_str().unwrap().into()),
             task_package: task_package.as_os_str().to_str().unwrap().into(),
             cpu_cores,
             mem_mib,
@@ -101,8 +101,6 @@ impl VMBuilder {
         let kernel_path = self.kernel_path.unwrap_or(FILE_VMLINUZ.to_string());
         let ramfs_path = self.ramfs_path.unwrap_or(FILE_INITRAMFS.to_string());
 
-        let use_rw_drive = true;
-
         #[rustfmt::skip]
         let ab = {
             let mut ab = ArgsBuilder::new();
@@ -122,7 +120,7 @@ impl VMBuilder {
             ab.add_2("-device", "virtserialport,chardev=net_cdev,name=net_port");
             ab.add_2("-device", "virtserialport,chardev=p9_cdev,name=p9_port");
             ab.add_2("-drive", &format!("file={},cache=unsafe,readonly=on,format=raw,if=virtio", self.task_package));
-            if use_rw_drive { ab.add_2("-drive", &format!("file={},format=qcow2,if=virtio", self.rw_drive)) }
+            if let Some(rw_drive) = self.rw_drive { ab.add_2("-drive", &format!("file={},format=qcow2,if=virtio", rw_drive)) }
             ab.add_1("-no-reboot");
             ab.add_2("-accel", acceleration);
             ab.add_1("-nodefaults");

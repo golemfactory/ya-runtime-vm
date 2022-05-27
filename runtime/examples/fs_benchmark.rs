@@ -1,21 +1,20 @@
 use ::futures::{future, lock::Mutex, FutureExt};
-use std::collections::HashMap;
+
 use std::convert::TryFrom;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use std::{
     env, fs,
-    io::{self, prelude::*},
-    process::Stdio,
+    io::{self},
     sync::Arc,
 };
 use structopt::StructOpt;
 use tokio::time::timeout;
-use tokio::{process::Child, sync};
+
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 use ya_runtime_vm::demux_socket_comm::MAX_P9_PACKET_SIZE;
-use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
-use ya_runtime_vm::vm::{VMBuilder, VM};
+use ya_runtime_vm::guest_agent_comm::{GuestAgent, RedirectFdType};
+
 
 mod common;
 use common::run_process_with_output;
