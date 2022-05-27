@@ -4,6 +4,7 @@ use anyhow::anyhow;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::{Arc};
 use std::time::Duration;
 use tokio::process::Child;
 use tokio::{
@@ -13,10 +14,25 @@ use tokio::{
 use tokio::{net::TcpStream, time::sleep};
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 use ya_vm_file_server::InprocServer;
+use crate::guest_agent_comm::{GuestAgent, Notification};
+use futures::lock::Mutex;
+use futures::future::FutureExt;
+use futures::TryFutureExt;
+use ya_runtime_sdk::{
+    runtime_api::{
+        deploy::{DeployResult, StartMode},
+        server,
+    },
+    serialize,
+    server::Server,
+    Context, EmptyResponse, EndpointResponse, EventEmitter, OutputResponse, ProcessId,
+    ProcessIdResponse, RuntimeMode,
+};
 
 pub struct VMRunner {
     instance: Option<Child>,
     vm: VM,
+    ga: Option<Arc<Mutex<GuestAgent>>>
 }
 
 pub enum ReaderOutputType {
@@ -26,7 +42,7 @@ pub enum ReaderOutputType {
 
 impl VMRunner {
     pub fn new(vm: VM) -> Self {
-        return VMRunner { instance: None, vm };
+        return VMRunner { instance: None, vm, ga: None };
     }
 
     pub fn get_vm(&self) -> &VM {
@@ -55,6 +71,24 @@ impl VMRunner {
 
         self.instance = Some(instance);
 
+
+
+        Ok(())
+    }
+
+    pub async fn start_guest_agent_communication(&mut self, eventEmmitter: EventEmitter) -> anyhow::Result<()> {
+        let ga = GuestAgent::connected(
+            self.vm.get_manager_sock(),
+            10,
+            move |notification, ga| {
+                let mut emitter = eventEmmitter.clone();
+                async move {
+                    let status = VMRunner::notification_into_status(notification, ga).await;
+                    emitter.emit(status).await;
+                }.boxed()
+            },
+        ).await?;
+        self.ga = Some(ga);
         Ok(())
     }
 
@@ -183,6 +217,59 @@ impl VMRunner {
                     buf.clear();
                 }
                 Err(e) => log::error!("VM output error: {}", e),
+            }
+        }
+    }
+
+    async fn notification_into_status(
+        notification: Notification,
+        ga: Arc<Mutex<GuestAgent>>,
+    ) -> server::ProcessStatus {
+        match notification {
+            Notification::OutputAvailable { id, fd } => {
+                log::debug!("Process {} has output available on fd {}", id, fd);
+
+                let output = {
+                    let result = {
+                        let mut guard = ga.lock().await;
+                        guard.query_output(id, fd as u8, 0, u64::MAX).await
+                    };
+                    match result {
+                        Ok(Ok(vec)) => vec,
+                        Ok(Err(e)) => {
+                            log::error!("Remote error while querying output: {:?}", e);
+                            Vec::new()
+                        }
+                        Err(e) => {
+                            log::error!("Error querying output: {:?}", e);
+                            Vec::new()
+                        }
+                    }
+                };
+                let (stdout, stderr) = match fd {
+                    1 => (output, Vec::new()),
+                    _ => (Vec::new(), output),
+                };
+
+                server::ProcessStatus {
+                    pid: id,
+                    running: true,
+                    return_code: 0,
+                    stdout,
+                    stderr,
+                }
+            }
+            Notification::ProcessDied { id, reason } => {
+                log::debug!("Process {} died with {:?}", id, reason);
+
+                // TODO: reason._type ?
+                server::ProcessStatus {
+                    pid: id,
+                    running: false,
+                    return_code: reason.status as i32,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                }
             }
         }
     }

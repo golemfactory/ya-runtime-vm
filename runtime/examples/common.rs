@@ -149,11 +149,6 @@ pub async fn spawn_vm(
     cpu_cores: usize,
     mem_mib: usize,
 ) -> anyhow::Result<VMRunner> {
-    #[cfg(windows)]
-    let _vm_executable = "vmrt.exe";
-    #[cfg(unix)]
-    let vm_executable = "vmrt";
-
     let project_dir = get_project_dir();
     let runtime_dir = project_dir.join("poc").join("runtime");
     let image_dir = project_dir.join("poc").join("squashfs");

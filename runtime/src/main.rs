@@ -273,18 +273,6 @@ async fn start(
 
     let mut vm_runner = VMRunner::new(vm);
     vm_runner.run_vm(runtime_dir).await?;
-    /* let mut runtime = cmd
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .context(format!("Failed command: {cmd:?}"))?;
-
-    let stdout = runtime.stdout.take().unwrap();
-    let stderr = runtime.stderr.take().unwrap();
-    spawn(reader_to_log(stdout));
-    spawn(reader_to_log_error(stderr));*/
 
     let (runtime_9ps, demux_socket_handle) = vm_runner
         .start_9p_service(&work_dir, &deployment.volumes)

@@ -116,7 +116,7 @@ fn spawn_vm() -> (Child, VM) {
         .with_ramfs_path(join_as_string(&init_dir, "initramfs.cpio.gz"))
         .build();
 
-    let mut cmd = vm.create_cmd(&runtime_dir.join(vm_executable));
+    let mut cmd = vm.get_cmd(&runtime_dir.join(vm_executable));
 
     println!("CMD: {cmd:?}");
 
