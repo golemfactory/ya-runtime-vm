@@ -63,64 +63,6 @@ impl Notifications {
         }
     }
 }
-
-pub async fn run_process_with_output(
-    ga: &mut GuestAgent,
-    notifications: &Notifications,
-    bin: &str,
-    argv: &[&str],
-) -> io::Result<()> {
-    let id = ga
-        .run_process(
-            bin,
-            argv,
-            None,
-            0,
-            0,
-            &[
-                None,
-                Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
-                Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
-            ],
-            None,
-        )
-        .await?
-        .expect("Run process failed");
-
-    log::info!("Spawned process with id: {}", id);
-    let died = notifications.get_process_died_notification(id).await;
-
-    let output = notifications.get_output_available_notification(id).await;
-
-    loop {
-        tokio::select! {
-            _ = died.notified() => {
-                log::info!("Process {id} died");
-                break;
-            },
-            _ = output.notified() => {
-                match ga.query_output(id, 1, 0, u64::MAX).await? {
-                    Ok(out) => {
-                        log::info!("STDOUT Output {argv:?}:");
-                        io::stdout().write_all(&out).await?;
-                    }
-                    Err(code) => log::info!("{argv:?} no data on STDOUT, reason {code}"),
-                }
-
-                match ga.query_output(id, 2, 0, u64::MAX).await? {
-                    Ok(out) => {
-                        log::error!("STDERR Output {argv:?}:");
-                        io::stdout().write_all(&out).await?;
-                    }
-                    Err(code) => log::info!("{argv:?} no data on STDERR, reason {code}"),
-                }
-             }
-        }
-    }
-
-    Ok(())
-}
-
 fn get_project_dir() -> PathBuf {
     PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
         .canonicalize()

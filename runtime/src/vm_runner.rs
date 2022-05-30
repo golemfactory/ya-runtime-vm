@@ -1,13 +1,9 @@
 use crate::demux_socket_comm::{start_demux_communication, DemuxSocketHandle, MAX_P9_PACKET_SIZE};
-use crate::guest_agent_comm::{GuestAgent, Notification};
 use crate::vm::VM;
 use anyhow::anyhow;
-use futures::future::FutureExt;
-use futures::lock::Mutex;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Child;
 use tokio::{
@@ -17,9 +13,6 @@ use tokio::{
 use tokio::{net::TcpStream, time::sleep};
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 use ya_vm_file_server::InprocServer;
-
-use crate::local_notification_handler::LocalNotifications;
-use ya_runtime_sdk::{runtime_api::server, EventEmitter};
 
 pub struct VMRunner {
     instance: Option<Child>,
@@ -212,56 +205,6 @@ impl VMRunner {
         }
     }
 
-    async fn notification_into_status(
-        notification: Notification,
-        ga: Arc<Mutex<GuestAgent>>,
-    ) -> server::ProcessStatus {
-        match notification {
-            Notification::OutputAvailable { id, fd } => {
-                log::debug!("Process {} has output available on fd {}", id, fd);
 
-                let output = {
-                    let result = {
-                        let mut guard = ga.lock().await;
-                        guard.query_output(id, fd as u8, 0, u64::MAX).await
-                    };
-                    match result {
-                        Ok(Ok(vec)) => vec,
-                        Ok(Err(e)) => {
-                            log::error!("Remote error while querying output: {:?}", e);
-                            Vec::new()
-                        }
-                        Err(e) => {
-                            log::error!("Error querying output: {:?}", e);
-                            Vec::new()
-                        }
-                    }
-                };
-                let (stdout, stderr) = match fd {
-                    1 => (output, Vec::new()),
-                    _ => (Vec::new(), output),
-                };
 
-                server::ProcessStatus {
-                    pid: id,
-                    running: true,
-                    return_code: 0,
-                    stdout,
-                    stderr,
-                }
-            }
-            Notification::ProcessDied { id, reason } => {
-                log::debug!("Process {} died with {:?}", id, reason);
-
-                // TODO: reason._type ?
-                server::ProcessStatus {
-                    pid: id,
-                    running: false,
-                    return_code: reason.status as i32,
-                    stdout: Vec::new(),
-                    stderr: Vec::new(),
-                }
-            }
-        }
-    }
 }
