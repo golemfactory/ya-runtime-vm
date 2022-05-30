@@ -23,7 +23,7 @@ mod common;
 use common::spawn_vm;
 
 use ya_runtime_sdk::runtime_api::server::{RuntimeService};
-use ya_runtime_vm::local_notification_handler::{LocalNotifications, run_process_with_output};
+use ya_runtime_vm::local_notification_handler::{LocalNotifications, start_local_agent_communication, LocalAgentCommunication};
 
 
 fn get_project_dir() -> PathBuf {
@@ -53,28 +53,22 @@ fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
 #[allow(dead_code)]
 async fn test_parallel_write_small_chunks(
     mount_args: Arc<Vec<ContainerVolume>>,
-    ga_mutex: Arc<Mutex<GuestAgent>>,
-    notifications: Arc<LocalNotifications>,
+    comm: Arc<LocalAgentCommunication>
 ) {
     let mut tasks = vec![];
 
     for ContainerVolume { name, path } in mount_args.as_ref() {
-        let ga_mutex = ga_mutex.clone();
-        let notifications = notifications.clone();
-
         let cmd = format!("for i in {{1..100}}; do echo -ne a >> {path}/small_chunks; done; cat {path}/small_chunks");
 
         let name = name.clone();
         let path = path.clone();
+        let comm = comm.clone();
         let join = tokio::spawn(async move {
             log::info!("Spawning task for {name}");
-            let ga = ga_mutex.clone();
-            test_write(ga_mutex, &notifications, &cmd).await.unwrap();
+            test_write(comm.clone(), &cmd).await.unwrap();
 
             {
-                let mut ga = ga.lock().await;
-                // List files
-                run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-la", &path])
+                comm.run_command("/bin/ls", &["ls", "-la", &path])
                     .await
                     .unwrap();
             }
@@ -90,19 +84,15 @@ async fn test_parallel_write_small_chunks(
 async fn test_parallel_write_big_chunk(
     test_file_size: u64,
     mount_args: Arc<Vec<ContainerVolume>>,
-    ga_mutex: Arc<Mutex<GuestAgent>>,
-    notifications: Arc<LocalNotifications>,
+    comm: Arc<LocalAgentCommunication>
 ) {
     // prepare chunk
 
     {
-        let mut ga = ga_mutex.lock().await;
         let start = Instant::now();
         // List files
         let block_size = 1000000;
-        run_process_with_output(
-            &mut ga,
-            &notifications,
+        comm.run_command(
             "/bin/dd",
             &[
                 "dd",
@@ -131,30 +121,25 @@ async fn test_parallel_write_big_chunk(
     let mut tasks = vec![];
 
     for ContainerVolume { name, path } in mount_args.as_ref() {
-        let ga_mutex = ga_mutex.clone();
-        let notifications = notifications.clone();
-
         // let cmd = format!("A=\"A\"; for i in {{1..24}}; do A=\"${{A}}${{A}}\"; done; echo -ne $A >> {path}/big_chunk");
         let cmd = format!("cat /mnt/mnt1/tag0/big_file >  {path}/big_chunk;");
         // let cmd = format!("cp /mnt/mnt1/tag0/big_file  /{path}/big_chunk");
 
         let name = name.clone();
         let path = path.clone();
+        let comm = comm.clone();
         let join = tokio::spawn(async move {
             log::info!("Spawning task for {name}");
-            let ga = ga_mutex.clone();
-
             let start = Instant::now();
-            test_write(ga_mutex, &notifications, &cmd).await.unwrap();
+            test_write(comm.clone(), &cmd).await.unwrap();
 
             log::info!(
                 "Copy big chunk for {name} took {}s",
                 start.elapsed().as_secs()
             );
             {
-                let mut ga = ga.lock().await;
                 // List files
-                run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-l", &path])
+                comm.run_command( "/bin/ls", &["ls", "-l", &path])
                     .await
                     .unwrap();
             }
@@ -169,16 +154,11 @@ async fn test_parallel_write_big_chunk(
 
 async fn test_fio(
     mount_args: Arc<Vec<ContainerVolume>>,
-    ga_mutex: Arc<Mutex<GuestAgent>>,
-    notifications: Arc<LocalNotifications>,
+    comm: LocalAgentCommunication
 ) {
     for ContainerVolume { name: _, path } in mount_args.iter() {
-        let mut ga = ga_mutex.lock().await;
-
         // TODO: this is serialized
-        run_process_with_output(
-            &mut ga,
-            &notifications,
+        comm.run_command(
             "/usr/bin/fio",
             &[
                 "fio",
@@ -240,7 +220,7 @@ async fn main() -> anyhow::Result<()> {
     let mut vm_runner =
         spawn_vm(&temp_path, opt.cpu_cores, (opt.mem_gib * 1024.0) as usize).await?;
 
-    let notifications = Arc::new(LocalNotifications::new());
+    //let mut notifications = Arc::new(LocalNotifications::new());
 
     const MOUNTS: usize = 2;
 
@@ -270,60 +250,32 @@ async fn main() -> anyhow::Result<()> {
         .unwrap();
 
 
-    vm_runner.start_local_agent_communication(notifications.clone()).await?;
-    let ga_mutex = vm_runner.get_ga();
+    let comm = start_local_agent_communication(vm_runner.get_vm().get_manager_sock()).await?;
+    //vm_runner.start_local_agent_communication(notifications.clone()).await?;
+    //let ga_mutex = notifications.get_ga();
 
     {
-        let mut ga = ga_mutex.lock().await;
+        let ga = comm.get_ga();
+        let mut guest_agent = ga.lock().await;
 
         for ContainerVolume { name, path } in mount_args.iter() {
             let max_p9_packet_size = u32::try_from(MAX_P9_PACKET_SIZE).unwrap();
 
-            if let Err(e) = ga.mount(name, max_p9_packet_size, path).await? {
+            if let Err(e) = guest_agent.mount(name, max_p9_packet_size, path).await? {
                 log::error!("Mount failed at {name}, {path}, {e}")
             }
         }
 
-        run_process_with_output(
-            &mut ga,
-            &notifications,
+    }
+    {
+        comm.run_command(
             "/bin/ls",
             &["ls", "-al", "/mnt/mnt1/"],
         )
-        .await?;
-    }
-    {
-        let mut ga = ga_mutex.lock().await;
-
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        log::error!("dupa_start");
-        run_process_with_output(
-            &mut ga,
-            &notifications,
-            "/bin/mkdir",
-            &["mkdir", "/mnt/here"],
-        )
-        .await?;
-        //log::error!("dupa_koniec");
-
-        run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-al", "/dev2"])
             .await?;
-        run_process_with_output(
-            &mut ga,
-            &notifications,
-            "/bin/mount",
-            &["mount", "-t", "ext4", "/dev/vdb", "/mnt/here"],
-        )
-        .await?;
-        run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-al", "/mnt"]).await?;
-        run_process_with_output(
-            &mut ga,
-            &notifications,
-            "/bin/ls",
-            &["ls", "-al", "/mnt/here"],
-        )
-        .await?;
+
     }
+
 
     // test_parallel_write_small_chunks(mount_args.clone(), ga_mutex.clone(), notifications.clone())
     //     .await;
@@ -331,27 +283,21 @@ async fn main() -> anyhow::Result<()> {
     test_parallel_write_big_chunk(
         opt.file_test_size,
         mount_args.clone(),
-        vm_runner.get_ga().clone(),
-        notifications.clone(),
+        comm.clone()
     )
     .await;
 
     log::info!("test_parallel_write_big_chunk finished");
 
     {
-        let mut ga = ga_mutex.lock().await;
 
         //run_process_with_output(&mut ga, &notifications, "/bin/ps", &["ps", "aux"]).await?;
-        run_process_with_output(&mut ga, &notifications, "/bin/ls", &["ls", "-la", "/dev"]).await?;
+        comm.run_command( "/bin/ls", &["ls", "-la", "/dev"]).await?;
     }
 
     {
-        let mut ga = ga_mutex.lock().await;
-
         //run_process_with_output(&mut ga, &notifications, "/bin/ps", &["ps", "aux"]).await?;
-        run_process_with_output(
-            &mut ga,
-            &notifications,
+        comm.run_command(
             "/bin/busybox",
             &["top", "-b", "-n", "1"],
         )
@@ -380,36 +326,14 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn test_write(
-    ga: Arc<Mutex<GuestAgent>>,
-    notifications: &LocalNotifications,
+    comm: Arc<LocalAgentCommunication>,
     cmd: &str,
 ) -> io::Result<()> {
     log::info!("***** test_big_write *****");
 
-    let fds = &[
-        None,
-        Some(RedirectFdType::RedirectFdPipeBlocking(0x10000)),
-        None,
-    ];
     let argv = ["bash", "-c", &cmd];
 
-    let id = {
-        let mut ga = ga.lock().await;
-        ga.run_process("/bin/bash", &argv, None, 0, 0, fds, None)
-            .await
-            .expect("Run process failed")
-            .expect("Remote command failed")
-    };
-
-    log::info!("Spawned process with id: {}, for {}", id, cmd);
-
-    log::info!("waiting on died for {id}");
-    let notif = notifications.get_process_died_notification(id).await;
-    let fut = notif.notified();
-
-    if let Err(_) = timeout(Duration::from_secs(60), fut).await {
-        log::error!("Got timeout on died notification for process {id}");
-    }
+    comm.run_command("/bin/bash", &argv).await?;
 
     // log::info!("waiting on output for {id}");
     // notifications

@@ -28,7 +28,6 @@ use crate::local_notification_handler::LocalNotifications;
 pub struct VMRunner {
     instance: Option<Child>,
     vm: VM,
-    ga: Option<Arc<Mutex<GuestAgent>>>
 }
 
 pub enum ReaderOutputType {
@@ -38,16 +37,13 @@ pub enum ReaderOutputType {
 
 impl VMRunner {
     pub fn new(vm: VM) -> Self {
-        return VMRunner { instance: None, vm, ga: None };
+        return VMRunner { instance: None, vm };
     }
 
     pub fn get_vm(&self) -> &VM {
         return &self.vm;
     }
 
-    pub fn get_ga(&self) -> Arc<Mutex<GuestAgent>> {
-        self.ga.clone().unwrap()
-    }
 
     pub async fn run_vm(&mut self, runtime_dir: PathBuf) -> anyhow::Result<()> {
         #[cfg(windows)]
@@ -76,6 +72,7 @@ impl VMRunner {
         Ok(())
     }
 
+    /*
     pub async fn start_guest_agent_communication(&mut self, event_emitter: EventEmitter) -> anyhow::Result<()> {
         let ga = GuestAgent::connected(
             self.vm.get_manager_sock(),
@@ -91,15 +88,7 @@ impl VMRunner {
         self.ga = Some(ga);
         Ok(())
     }
-
-    pub async fn start_local_agent_communication(&mut self, notifications: Arc<LocalNotifications>) -> anyhow::Result<()> {
-        let ga = GuestAgent::connected(self.vm.get_manager_sock(), 10, move |n, _g| {
-            let notifications = notifications.clone();
-            async move { notifications.clone().handle(n).await }.boxed()
-        }).await?;
-        self.ga = Some(ga);
-        Ok(())
-    }
+*/
 
     async fn connect_to_9p_endpoint(&self, tries: usize) -> anyhow::Result<TcpStream> {
         log::debug!("Connect to the 9P VM endpoint...");

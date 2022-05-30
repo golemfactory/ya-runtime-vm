@@ -3,10 +3,15 @@ use std::{
     sync::Arc,
 };
 use tokio::io::{self, AsyncWriteExt};
-use tokio::sync::{self, Mutex};
+use tokio::sync;
+use futures::lock::Mutex;
+
 use crate::{
     guest_agent_comm::{GuestAgent, Notification, RedirectFdType},
 };
+use futures::future::FutureExt;
+use std::borrow::BorrowMut;
+
 
 pub struct LocalNotifications {
     process_died: Mutex<HashMap<u64, Arc<sync::Notify>>>,
@@ -20,6 +25,7 @@ impl LocalNotifications {
             output_available: Mutex::new(HashMap::new()),
         }
     }
+
 
     pub async fn get_process_died_notification(&self, id: u64) -> Arc<sync::Notify> {
         let notif = {
@@ -58,38 +64,46 @@ impl LocalNotifications {
             }
         }
     }
+
+
 }
 
-pub async fn run_process_with_output(
-    ga: &mut GuestAgent,
-    notifications: &LocalNotifications,
-    bin: &str,
-    argv: &[&str],
-) -> io::Result<()> {
-    let id = ga
-        .run_process(
-            bin,
-            argv,
-            None,
-            0,
-            0,
-            &[
+pub struct LocalAgentCommunication {
+    ln: Arc<LocalNotifications>,
+    ga: Arc<Mutex<GuestAgent>>
+}
+
+impl LocalAgentCommunication {
+    pub fn get_ga(&self) -> Arc<Mutex<GuestAgent>> {
+        self.ga.clone()
+    }
+
+    pub async fn run_command(&self, bin: &str, argv: &[&str]) -> io::Result<()> {
+        let mut ga = self.ga.lock().await;
+        let id = ga
+            .run_process(
+                bin,
+                argv,
                 None,
-                Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
-                Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
-            ],
-            None,
-        )
-        .await?
-        .expect("Run process failed");
+                0,
+                0,
+                &[
+                    None,
+                    Some(RedirectFdType::RedirectFdPipeBlocking(0x10000)),
+                    Some(RedirectFdType::RedirectFdPipeBlocking(0x10000)),
+                ],
+                None,
+            )
+            .await?
+            .expect("Run process failed");
 
-    log::info!("Spawned process {} {:?} - id {}", bin, argv, id);
-    let died = notifications.get_process_died_notification(id).await;
+        log::info!("Spawned process {} {:?} - id {}", bin, argv, id);
+        let died = self.ln.get_process_died_notification(id).await;
 
-    let output = notifications.get_output_available_notification(id).await;
+        let output = self.ln.get_output_available_notification(id).await;
 
-    loop {
-        tokio::select! {
+        loop {
+            tokio::select! {
             _ = died.notified() => {
                 log::debug!("Process {id} terminated");
                 break;
@@ -114,7 +128,19 @@ pub async fn run_process_with_output(
                 }
              }
         }
+        }
+
+        Ok(())
+
     }
 
-    Ok(())
+}
+pub async fn start_local_agent_communication(manager_sock: &str) -> anyhow::Result<Arc<LocalAgentCommunication>> {
+    let ln = Arc::new(LocalNotifications::new());
+    let ln2 = ln.clone();
+    let ga = GuestAgent::connected(manager_sock, 10, move |n, _g| {
+        let notifications = ln2.clone();
+        async move { notifications.clone().handle(n).await }.boxed()
+    }).await?;
+    Ok(Arc::new(LocalAgentCommunication{ln, ga}))
 }
