@@ -12,19 +12,17 @@ use std::{
 use structopt::StructOpt;
 use tokio::time::timeout;
 
-
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 use ya_runtime_vm::demux_socket_comm::MAX_P9_PACKET_SIZE;
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, RedirectFdType};
 
-
-
 mod common;
 use common::spawn_vm;
 
-use ya_runtime_sdk::runtime_api::server::{RuntimeService};
-use ya_runtime_vm::local_notification_handler::{LocalNotifications, start_local_agent_communication, LocalAgentCommunication};
-
+use ya_runtime_sdk::runtime_api::server::RuntimeService;
+use ya_runtime_vm::local_notification_handler::{
+    start_local_agent_communication, LocalAgentCommunication, LocalNotifications,
+};
 
 fn get_project_dir() -> PathBuf {
     PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
@@ -53,7 +51,7 @@ fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
 #[allow(dead_code)]
 async fn test_parallel_write_small_chunks(
     mount_args: Arc<Vec<ContainerVolume>>,
-    comm: Arc<LocalAgentCommunication>
+    comm: Arc<LocalAgentCommunication>,
 ) {
     let mut tasks = vec![];
 
@@ -84,7 +82,7 @@ async fn test_parallel_write_small_chunks(
 async fn test_parallel_write_big_chunk(
     test_file_size: u64,
     mount_args: Arc<Vec<ContainerVolume>>,
-    comm: Arc<LocalAgentCommunication>
+    comm: Arc<LocalAgentCommunication>,
 ) {
     // prepare chunk
 
@@ -139,7 +137,7 @@ async fn test_parallel_write_big_chunk(
             );
             {
                 // List files
-                comm.run_command( "/bin/ls", &["ls", "-l", &path])
+                comm.run_command("/bin/ls", &["ls", "-l", &path])
                     .await
                     .unwrap();
             }
@@ -152,10 +150,7 @@ async fn test_parallel_write_big_chunk(
     future::join_all(tasks).await;
 }
 
-async fn test_fio(
-    mount_args: Arc<Vec<ContainerVolume>>,
-    comm: LocalAgentCommunication
-) {
+async fn test_fio(mount_args: Arc<Vec<ContainerVolume>>, comm: LocalAgentCommunication) {
     for ContainerVolume { name: _, path } in mount_args.iter() {
         // TODO: this is serialized
         comm.run_command(
@@ -205,7 +200,6 @@ pub struct Opt {
     file_test_size: u64,
 }
 
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let opt: Opt = Opt::from_args();
@@ -249,7 +243,6 @@ async fn main() -> anyhow::Result<()> {
         .await
         .unwrap();
 
-
     let comm = start_local_agent_communication(vm_runner.get_vm().get_manager_sock()).await?;
     //vm_runner.start_local_agent_communication(notifications.clone()).await?;
     //let ga_mutex = notifications.get_ga();
@@ -265,43 +258,28 @@ async fn main() -> anyhow::Result<()> {
                 log::error!("Mount failed at {name}, {path}, {e}")
             }
         }
-
     }
     {
-        comm.run_command(
-            "/bin/ls",
-            &["ls", "-al", "/mnt/mnt1/"],
-        )
+        comm.run_command("/bin/ls", &["ls", "-al", "/mnt/mnt1/"])
             .await?;
-
     }
-
 
     // test_parallel_write_small_chunks(mount_args.clone(), ga_mutex.clone(), notifications.clone())
     //     .await;
 
-    test_parallel_write_big_chunk(
-        opt.file_test_size,
-        mount_args.clone(),
-        comm.clone()
-    )
-    .await;
+    test_parallel_write_big_chunk(opt.file_test_size, mount_args.clone(), comm.clone()).await;
 
     log::info!("test_parallel_write_big_chunk finished");
 
     {
-
         //run_process_with_output(&mut ga, &notifications, "/bin/ps", &["ps", "aux"]).await?;
-        comm.run_command( "/bin/ls", &["ls", "-la", "/dev"]).await?;
+        comm.run_command("/bin/ls", &["ls", "-la", "/dev"]).await?;
     }
 
     {
         //run_process_with_output(&mut ga, &notifications, "/bin/ps", &["ps", "aux"]).await?;
-        comm.run_command(
-            "/bin/busybox",
-            &["top", "-b", "-n", "1"],
-        )
-        .await?;
+        comm.run_command("/bin/busybox", &["top", "-b", "-n", "1"])
+            .await?;
 
         /*
         let id = ga
@@ -325,10 +303,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn test_write(
-    comm: Arc<LocalAgentCommunication>,
-    cmd: &str,
-) -> io::Result<()> {
+async fn test_write(comm: Arc<LocalAgentCommunication>, cmd: &str) -> io::Result<()> {
     log::info!("***** test_big_write *****");
 
     let argv = ["bash", "-c", &cmd];

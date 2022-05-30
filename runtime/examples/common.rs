@@ -161,15 +161,10 @@ pub async fn spawn_vm(
     fs::copy(&source_qcow2_file, &qcow2_file)?;
     let qcow2_file = qcow2_file.canonicalize()?;
 
-    let vm = VMBuilder::new(
-        cpu_cores,
-        mem_mib,
-        &image_dir.join("ubuntu.gvmi"),
-        None,
-    )
-    .with_kernel_path(join_as_string(&init_dir, "vmlinuz-virt"))
-    .with_ramfs_path(join_as_string(&init_dir, "initramfs.cpio.gz"))
-    .build();
+    let vm = VMBuilder::new(cpu_cores, mem_mib, &image_dir.join("ubuntu.gvmi"), None)
+        .with_kernel_path(join_as_string(&init_dir, "vmlinuz-virt"))
+        .with_ramfs_path(join_as_string(&init_dir, "initramfs.cpio.gz"))
+        .build();
 
     let mut vm_runner = VMRunner::new(vm);
     vm_runner.run_vm(runtime_dir).await?;
