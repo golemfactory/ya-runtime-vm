@@ -1626,8 +1626,10 @@ int main(void) {
                     makedev(5, 2)));
     }
 
-    CHECK(mkdir("/mnt/internal", S_IRWXU));
-    CHECK(mount("/dev/vdb", "/mnt/internal", "ext4", 0, NULL));
+    if (access("/dev/vdb", F_OK) == 0) {
+        CHECK(mkdir("/mnt/internal", S_IRWXU));
+        CHECK(mount("/dev/vdb", "/mnt/internal", "ext4", 0, NULL));
+    }
 
     setup_network();
     setup_agent_directories();

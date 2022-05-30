@@ -6,5 +6,4 @@ pub mod guest_agent_comm;
 mod response_parser;
 pub mod vm;
 pub mod vm_runner;
-pub mod local_runtime_handler;
 pub mod local_notification_handler;

@@ -76,12 +76,12 @@ impl VMRunner {
         Ok(())
     }
 
-    pub async fn start_guest_agent_communication(&mut self, eventEmmitter: EventEmitter) -> anyhow::Result<()> {
+    pub async fn start_guest_agent_communication(&mut self, event_emitter: EventEmitter) -> anyhow::Result<()> {
         let ga = GuestAgent::connected(
             self.vm.get_manager_sock(),
             10,
             move |notification, ga| {
-                let mut emitter = eventEmmitter.clone();
+                let mut emitter = event_emitter.clone();
                 async move {
                     let status = VMRunner::notification_into_status(notification, ga).await;
                     emitter.emit(status).await;

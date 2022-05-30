@@ -46,14 +46,14 @@ impl LocalNotifications {
     pub async fn handle(&self, notification: Notification) {
         match notification {
             Notification::OutputAvailable { id, fd } => {
-                log::debug!("Process {} has output available on fd {}", id, fd);
+                //log::debug!("Process {} has output available on fd {}", id, fd);
 
                 self.get_output_available_notification(id)
                     .await
                     .notify_one();
             }
             Notification::ProcessDied { id, reason } => {
-                log::debug!("Process {} died with {:?}", id, reason);
+                //log::debug!("Process {} died with {:?}", id, reason);
                 self.get_process_died_notification(id).await.notify_one();
             }
         }
@@ -83,7 +83,7 @@ pub async fn run_process_with_output(
         .await?
         .expect("Run process failed");
 
-    log::info!("Spawned process with id: {}", id);
+    log::info!("Spawned process {} {:?} - id {}", bin, argv, id);
     let died = notifications.get_process_died_notification(id).await;
 
     let output = notifications.get_output_available_notification(id).await;
@@ -91,24 +91,26 @@ pub async fn run_process_with_output(
     loop {
         tokio::select! {
             _ = died.notified() => {
-                log::info!("Process {id} died");
+                log::debug!("Process {id} terminated");
                 break;
             },
             _ = output.notified() => {
                 match ga.query_output(id, 1, 0, u64::MAX).await? {
                     Ok(out) => {
-                        log::info!("STDOUT Output {argv:?}:");
-                        io::stdout().write_all(&out).await?;
+                        let s = String::from_utf8_lossy(&out);
+                        log::info!("STDOUT {}:\n{}", id, s);
+                        //io::stdout().write_all(&out).await?;
                     }
-                    Err(code) => log::info!("{argv:?} no data on STDOUT, reason {code}"),
+                    Err(code) => log::info!("STDOUT empty"),
                 }
 
                 match ga.query_output(id, 2, 0, u64::MAX).await? {
                     Ok(out) => {
-                        log::error!("STDERR Output {argv:?}:");
-                        io::stdout().write_all(&out).await?;
+                        let s = String::from_utf8_lossy(&out);
+                        log::info!("STDERR {}:\n{}", id, s);
+                        //io::stdout().write_all(&out).await?;
                     }
-                    Err(code) => log::info!("{argv:?} no data on STDERR, reason {code}"),
+                    Err(code) => log::info!("STDERR empty"),
                 }
              }
         }

@@ -165,7 +165,7 @@ pub async fn spawn_vm(
         cpu_cores,
         mem_mib,
         &image_dir.join("ubuntu.gvmi"),
-        Some(&qcow2_file),
+        None,
     )
     .with_kernel_path(join_as_string(&init_dir, "vmlinuz-virt"))
     .with_ramfs_path(join_as_string(&init_dir, "initramfs.cpio.gz"))
