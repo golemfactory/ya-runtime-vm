@@ -1,4 +1,4 @@
-use ::futures::{future, lock::Mutex, FutureExt};
+use ::futures::{future, FutureExt};
 
 use std::convert::TryFrom;
 use std::path::{Path, PathBuf};
@@ -10,18 +10,17 @@ use std::{
 };
 
 use structopt::StructOpt;
-use tokio::time::timeout;
+
 
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 use ya_runtime_vm::demux_socket_comm::MAX_P9_PACKET_SIZE;
-use ya_runtime_vm::guest_agent_comm::{GuestAgent, RedirectFdType};
 
-mod common;
-use common::spawn_vm;
 
-use ya_runtime_sdk::runtime_api::server::RuntimeService;
+use ya_runtime_vm::local_spawn_vm::spawn_vm;
+
+
 use ya_runtime_vm::local_notification_handler::{
-    start_local_agent_communication, LocalAgentCommunication, LocalNotifications,
+    start_local_agent_communication, LocalAgentCommunication,
 };
 
 fn get_project_dir() -> PathBuf {

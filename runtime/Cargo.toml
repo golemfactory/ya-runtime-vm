@@ -88,11 +88,11 @@ tokio = { version = "1.17.0", features = [
 tokio-byteorder = "0.3.0"
 uuid = { version = "0.8", features = ["v4"] }
 log4rs = "1.0.0"
+dunce = "1.0.2"
 
 [dev-dependencies]
 tempdir = "0.3.7"
 pnet = "0.29.0"
-dunce = "1.0.2"
 
 [build-dependencies]
 anyhow = "1.0"
