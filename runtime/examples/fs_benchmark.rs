@@ -87,7 +87,21 @@ async fn test_parallel_write_big_chunk(
         // List files
         let block_size = 1000000;
         //comm.run_bash_command("touch /mnt/mnt1/tag0/big_file").await.unwrap();
-        comm.run_bash_command(&format!("head -c {} </dev/urandom > /mnt/mnt1/tag0/big_file", test_file_size)).await.unwrap();
+        comm.run_command(
+            "/bin/dd",
+            &[
+                "dd",
+                // TODO: /dev/random causes problems?
+                "if=/dev/urandom",
+                "of=/mnt/mnt1/tag0/big_file",
+                std::format!("bs={}", block_size).as_str(),
+                std::format!("count={}", test_file_size / block_size).as_str(),
+            ],
+        )
+            .await
+            .unwrap();
+
+        //comm.run_bash_command(&format!("head -c {} </dev/urandom > /mnt/mnt1/tag0/big_file", test_file_size)).await.unwrap();
         /*comm.run_command(
             "/bin/busybox",
             &[
@@ -131,8 +145,8 @@ async fn test_parallel_write_big_chunk(
             test_write(comm.clone(), &cmd).await.unwrap();
 
             log::info!(
-                "Copy big chunk for {name} took {}s",
-                start.elapsed().as_secs()
+                "Copy big chunk for {name} took {:.2}s",
+                start.elapsed().as_secs_f64()
             );
             {
                 // List files
