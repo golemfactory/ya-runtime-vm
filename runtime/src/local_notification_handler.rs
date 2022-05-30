@@ -1,10 +1,15 @@
 use futures::lock::Mutex;
-use tokio::io;
 use std::{collections::HashMap, sync::Arc};
+use tokio::io;
 use tokio::sync;
 
 use crate::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
-use futures::future::FutureExt;
+use futures::future::{AbortHandle, Abortable, FutureExt};
+use tokio::join;
+use std::time::Duration;
+use std::borrow::BorrowMut;
+use std::ops::DerefMut;
+use tokio::sync::MutexGuard;
 
 pub struct LocalNotifications {
     process_died: Mutex<HashMap<u64, Arc<sync::Notify>>>,
@@ -60,6 +65,59 @@ impl LocalNotifications {
     }
 }
 
+async fn read_streams(is_finished: Arc<Mutex<i32>>, id: u64, mut ga: Arc<Mutex<GuestAgent>>) -> anyhow::Result<(Vec::<u8>, Vec::<u8>)> {
+
+    let mut stdout = Vec::<u8>::new();
+    let mut stderr = Vec::<u8>::new();
+
+    let mut finishing = false;
+    let mut finish_loops = 0;
+    loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if !finishing {
+            let mut val = is_finished.lock().await;
+            if *val == 1 {
+                finishing = true;
+            }
+        }
+        let mut ga = ga.lock().await;
+
+
+        let stdout_read = match ga.query_output(id, 1, 0, u64::MAX).await? {
+            Ok(out) => {
+                //let s = String::from_utf8_lossy(&out);
+                //log::info!("STDOUT {}:\n{}", id, s);
+                //io::stdout().write_all(&out).await?;
+                stdout.extend(out);
+                true
+            }
+            Err(_code) => {
+                false
+                // log::info!("STDOUT empty") },
+            }
+        };
+
+        let stderr_read = match ga.query_output(id, 2, 0, u64::MAX).await? {
+            Ok(out) => {
+                //let s = String::from_utf8_lossy(&out);
+                //log::info!("STDERR {}:\n{}", id, s);
+                //io::stdout().write_all(&out).await?;
+                stderr.extend(out);
+                true
+            }
+            Err(_code) => {
+                //log::info!("STDERR empty")
+                false
+            },
+        };
+
+        if finishing && !stderr_read && !stdout_read {
+            break;
+        }
+    }
+    Ok((stdout, stderr))
+}
+
 pub struct LocalAgentCommunication {
     ln: Arc<LocalNotifications>,
     ga: Arc<Mutex<GuestAgent>>,
@@ -70,57 +128,62 @@ impl LocalAgentCommunication {
         self.ga.clone()
     }
 
-    pub async fn run_command(&self, bin: &str, argv: &[&str]) -> io::Result<()> {
-        let mut ga = self.ga.lock().await;
-        let id = ga
-            .run_process(
-                bin,
-                argv,
-                None,
-                0,
-                0,
-                &[
-                    None,
-                    Some(RedirectFdType::RedirectFdPipeBlocking(0x10000)),
-                    Some(RedirectFdType::RedirectFdPipeBlocking(0x10000)),
-                ],
-                None,
-            )
-            .await?
-            .expect("Run process failed");
+    pub async fn run_bash_command(&self, cmd:&str) -> io::Result<()> {
+        let argv = ["bash", "-c", &cmd];
+        self.run_command("/bin/bash", &argv).await
+    }
 
+    pub async fn run_command(&self, bin: &str, argv: &[&str]) -> io::Result<()> {
+        let id = {
+            let mut ga = self.ga.lock().await;
+            ga
+                .run_process(
+                    bin,
+                    argv,
+                    None,
+                    0,
+                    0,
+                    &[
+                        None,
+                        Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
+                        Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
+                    ],
+                    None,
+                )
+                .await?
+                .expect("Run process failed")
+        };
         log::info!("Spawned process {} {:?} - id {}", bin, argv, id);
         let died = self.ln.get_process_died_notification(id).await;
 
         let output = self.ln.get_output_available_notification(id).await;
 
-        loop {
-            tokio::select! {
-                _ = died.notified() => {
-                    log::debug!("Process {id} terminated");
-                    break;
-                },
-                _ = output.notified() => {
-                    match ga.query_output(id, 1, 0, u64::MAX).await? {
-                        Ok(out) => {
-                            let s = String::from_utf8_lossy(&out);
-                            log::info!("STDOUT {}:\n{}", id, s);
-                            //io::stdout().write_all(&out).await?;
-                        }
-                        Err(_code) => log::info!("STDOUT empty"),
-                    }
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
 
-                    match ga.query_output(id, 2, 0, u64::MAX).await? {
-                        Ok(out) => {
-                            let s = String::from_utf8_lossy(&out);
-                            log::info!("STDERR {}:\n{}", id, s);
-                            //io::stdout().write_all(&out).await?;
-                        }
-                        Err(_code) => log::info!("STDERR empty"),
-                    }
-                 }
+
+        let common = Arc::new(Mutex::new(0));
+        let future1 = read_streams(common.clone(), id, self.ga.clone());
+        let common = common.clone();
+        let future2 = async move {
+            let _process_finished = died.notified().await;
+            let mut val = common.lock().await;
+            *val = 1;
+        };
+        let (res1, res2) = join!(future1, future2);
+        match res1 {
+            Ok(r) => {
+                let stdout = String::from_utf8_lossy(&r.0);
+                let stderr = String::from_utf8_lossy(&r.1);
+
+                log::info!("STDOUT {}:\n{}", id, stdout);
+                log::info!("STDERR {}:\n{}", id, stderr);
+
+            }
+            Err(err) => {
+                log::error!("COMMAND ENDED ERR: {} {:?}", id, err);
             }
         }
+
 
         Ok(())
     }

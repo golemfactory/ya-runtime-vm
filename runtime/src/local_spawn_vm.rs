@@ -5,12 +5,9 @@ use std::{
     sync::Arc,
 };
 
-use tokio::sync::{self, Mutex};
 use crate::vm_runner::VMRunner;
-use crate::{
-    guest_agent_comm::{Notification},
-    vm::VMBuilder,
-};
+use crate::{guest_agent_comm::Notification, vm::VMBuilder};
+use tokio::sync::{self, Mutex};
 
 fn get_project_dir() -> PathBuf {
     PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
@@ -31,8 +28,8 @@ fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
             .expect(&joined.display().to_string())
             .as_path(),
     )
-        .display()
-        .to_string()
+    .display()
+    .to_string()
 }
 
 pub async fn spawn_vm(

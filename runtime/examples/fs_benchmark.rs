@@ -11,13 +11,10 @@ use std::{
 
 use structopt::StructOpt;
 
-
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 use ya_runtime_vm::demux_socket_comm::MAX_P9_PACKET_SIZE;
 
-
 use ya_runtime_vm::local_spawn_vm::spawn_vm;
-
 
 use ya_runtime_vm::local_notification_handler::{
     start_local_agent_communication, LocalAgentCommunication,
@@ -89,20 +86,23 @@ async fn test_parallel_write_big_chunk(
         let start = Instant::now();
         // List files
         let block_size = 1000000;
-        comm.run_command(
-            "/bin/dd",
+        //comm.run_bash_command("touch /mnt/mnt1/tag0/big_file").await.unwrap();
+        comm.run_bash_command(&format!("head -c {} </dev/urandom > /mnt/mnt1/tag0/big_file", test_file_size)).await.unwrap();
+        /*comm.run_command(
+            "/bin/busybox",
             &[
-                "dd",
+                "shred",
                 // TODO: /dev/random causes problems?
-                "if=/dev/zero",
-                "of=/mnt/mnt1/tag0/big_file",
-                std::format!("bs={}", block_size).as_str(),
-                std::format!("count={}", test_file_size / block_size).as_str(),
+                "-n",
+                "1",
+                "-s",
+                std::format!("{}", test_file_size).as_str(),
+                "/mnt/mnt1/tag0/big_file"
             ],
         )
         .await
         .unwrap();
-
+*/
         let test_file_size = test_file_size / block_size * block_size;
 
         let duration = start.elapsed();
@@ -243,8 +243,6 @@ async fn main() -> anyhow::Result<()> {
         .unwrap();
 
     let comm = start_local_agent_communication(vm_runner.get_vm().get_manager_sock()).await?;
-    //vm_runner.start_local_agent_communication(notifications.clone()).await?;
-    //let ga_mutex = notifications.get_ga();
 
     {
         let ga = comm.get_ga();
@@ -259,7 +257,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     {
-        comm.run_command("/bin/ls", &["ls", "-al", "/mnt/mnt1/"])
+        comm.run_bash_command("ls -la /mnt/mnt1")
             .await?;
     }
 
@@ -272,13 +270,13 @@ async fn main() -> anyhow::Result<()> {
 
     {
         //run_process_with_output(&mut ga, &notifications, "/bin/ps", &["ps", "aux"]).await?;
-        comm.run_command("/bin/ls", &["ls", "-la", "/dev"]).await?;
+        //comm.run_command("/bin/ls", &["ls", "-la", "/dev"]).await?;
+        comm.run_bash_command("ls -la /dev;sleep 0.5").await?;
     }
 
     {
         //run_process_with_output(&mut ga, &notifications, "/bin/ps", &["ps", "aux"]).await?;
-        comm.run_command("/bin/busybox", &["top", "-b", "-n", "1"])
-            .await?;
+        //comm.run_command("/bin/busybox", &["top", "-b", "-n", "1"]).await?;
 
         /*
         let id = ga
