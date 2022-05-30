@@ -1406,7 +1406,7 @@ static void handle_message(void) {
             handle_mount(msg_hdr.msg_id);
             break;
         case MSG_QUERY_OUTPUT:
-            fprintf(stderr, "MSG_QUERY_OUTPUT\n");
+            //fprintf(stderr, "MSG_QUERY_OUTPUT\n");
             handle_query_output(msg_hdr.msg_id);
             break;
         case MSG_NET_CTL:
