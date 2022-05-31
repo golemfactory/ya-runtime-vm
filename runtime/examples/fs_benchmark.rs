@@ -14,7 +14,7 @@ use structopt::StructOpt;
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 use ya_runtime_vm::demux_socket_comm::MAX_P9_PACKET_SIZE;
 
-use ya_runtime_vm::local_spawn_vm::spawn_vm;
+use ya_runtime_vm::local_spawn_vm::{spawn_vm, prepare_tmp_path, prepare_mount_directories};
 
 use ya_runtime_vm::local_notification_handler::{
     start_local_agent_communication, LocalAgentCommunication,
@@ -77,7 +77,7 @@ async fn test_parallel_write_small_chunks(
 
 async fn test_parallel_write_big_chunk(
     test_file_size: u64,
-    mount_args: Arc<Vec<ContainerVolume>>,
+    mount_args: &[ContainerVolume],
     comm: Arc<LocalAgentCommunication>,
 ) {
     // prepare chunk
@@ -219,37 +219,16 @@ async fn main() -> anyhow::Result<()> {
     env_logger::init();
 
     log::info!("Running example fs_benchmark...");
-    let temp_path = get_project_dir().join(Path::new("tmp"));
-    if temp_path.exists() {
-        fs::remove_dir_all(&temp_path)?;
-    }
-    fs::create_dir_all(&temp_path)?;
+
+    let temp_path = prepare_tmp_path();
+    let mount_args = prepare_mount_directories(&temp_path, 2);
+
+
     let mut vm_runner =
-        spawn_vm(&temp_path, opt.cpu_cores, (opt.mem_gib * 1024.0) as usize).await?;
+        spawn_vm(&temp_path, opt.cpu_cores, opt.mem_gib, false).await?;
 
-    //let mut notifications = Arc::new(LocalNotifications::new());
-
-    const MOUNTS: usize = 2;
-
-    let mut mount_args = vec![];
-
-    for id in 0..MOUNTS {
-        let name = format!("inner{id}");
-
-        let inner_path = temp_path.join(&name);
-
-        std::fs::create_dir_all(&inner_path).expect(&format!(
-            "Failed to create a dir {:?} inside temp dir",
-            inner_path.as_os_str()
-        ));
-
-        mount_args.push(ContainerVolume {
-            name,
-            path: format!("/mnt/mnt1/tag{id}"),
-        });
-    }
-
-    let mount_args = Arc::new(mount_args);
+    //let VM start before trying to connect p9 service
+    tokio::time::sleep(Duration::from_secs_f64(2.5)).await;
 
     let (_p9streams, _muxer_handle) = vm_runner
         .start_9p_service(&temp_path, &mount_args)
@@ -258,18 +237,7 @@ async fn main() -> anyhow::Result<()> {
 
     let comm = start_local_agent_communication(vm_runner.get_vm().get_manager_sock()).await?;
 
-    {
-        let ga = comm.get_ga();
-        let mut guest_agent = ga.lock().await;
-
-        for ContainerVolume { name, path } in mount_args.iter() {
-            let max_p9_packet_size = u32::try_from(MAX_P9_PACKET_SIZE).unwrap();
-
-            if let Err(e) = guest_agent.mount(name, max_p9_packet_size, path).await? {
-                log::error!("Mount failed at {name}, {path}, {e}")
-            }
-        }
-    }
+    comm.run_mount(&mount_args).await?;
     {
         comm.run_bash_command("ls -la /mnt/mnt1").await?;
     }
@@ -277,7 +245,7 @@ async fn main() -> anyhow::Result<()> {
     // test_parallel_write_small_chunks(mount_args.clone(), ga_mutex.clone(), notifications.clone())
     //     .await;
 
-    test_parallel_write_big_chunk(opt.file_test_size, mount_args.clone(), comm.clone()).await;
+    test_parallel_write_big_chunk(opt.file_test_size, &mount_args, comm.clone()).await;
 
     log::info!("test_parallel_write_big_chunk finished");
 

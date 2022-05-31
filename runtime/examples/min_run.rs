@@ -33,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
         spawn_vm(&temp_path, opt.cpu_cores, opt.mem_gib, false).await?;
 
     //let VM start before trying to connect p9 service
-    tokio::time::sleep(Duration::from_secs_f64(2.5));
+    tokio::time::sleep(Duration::from_secs_f64(2.5)).await;
 
     let (_p9streams, _muxer_handle) = vm_runner
         .start_9p_service(&temp_path, &mount_args)
