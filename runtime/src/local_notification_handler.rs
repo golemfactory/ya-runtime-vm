@@ -3,13 +3,13 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::io;
 use tokio::sync;
 
+use crate::demux_socket_comm::MAX_P9_PACKET_SIZE;
 use crate::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
-use futures::future::{AbortHandle, Abortable, FutureExt};
-use tokio::join;
+use futures::future::FutureExt;
+use std::convert::TryFrom;
 use std::time::Duration;
-use std::borrow::BorrowMut;
-use std::ops::DerefMut;
-use tokio::sync::MutexGuard;
+use tokio::join;
+use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 
 pub struct LocalNotifications {
     process_died: Mutex<HashMap<u64, Arc<sync::Notify>>>,
@@ -65,23 +65,24 @@ impl LocalNotifications {
     }
 }
 
-async fn read_streams(is_finished: Arc<Mutex<i32>>, id: u64, mut ga: Arc<Mutex<GuestAgent>>) -> anyhow::Result<(Vec::<u8>, Vec::<u8>)> {
-
+async fn read_streams(
+    is_finished: Arc<Mutex<i32>>,
+    id: u64,
+    ga: Arc<Mutex<GuestAgent>>,
+) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     let mut stdout = Vec::<u8>::new();
     let mut stderr = Vec::<u8>::new();
 
     let mut finishing = false;
-    let mut finish_loops = 0;
     loop {
         tokio::time::sleep(Duration::from_millis(100)).await;
         if !finishing {
-            let mut val = is_finished.lock().await;
+            let val = is_finished.lock().await;
             if *val == 1 {
                 finishing = true;
             }
         }
         let mut ga = ga.lock().await;
-
 
         let stdout_read = match ga.query_output(id, 1, 0, u64::MAX).await? {
             Ok(out) => {
@@ -108,7 +109,7 @@ async fn read_streams(is_finished: Arc<Mutex<i32>>, id: u64, mut ga: Arc<Mutex<G
             Err(_code) => {
                 //log::info!("STDERR empty")
                 false
-            },
+            }
         };
 
         if finishing && !stderr_read && !stdout_read {
@@ -128,7 +129,7 @@ impl LocalAgentCommunication {
         self.ga.clone()
     }
 
-    pub async fn run_bash_command(&self, cmd:&str) -> io::Result<()> {
+    pub async fn run_bash_command(&self, cmd: &str) -> io::Result<()> {
         let argv = ["bash", "-c", &cmd];
         self.run_command("/bin/bash", &argv).await
     }
@@ -136,30 +137,26 @@ impl LocalAgentCommunication {
     pub async fn run_command(&self, bin: &str, argv: &[&str]) -> io::Result<()> {
         let id = {
             let mut ga = self.ga.lock().await;
-            ga
-                .run_process(
-                    bin,
-                    argv,
+            ga.run_process(
+                bin,
+                argv,
+                None,
+                0,
+                0,
+                &[
                     None,
-                    0,
-                    0,
-                    &[
-                        None,
-                        Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
-                        Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
-                    ],
-                    None,
-                )
-                .await?
-                .expect("Run process failed")
+                    Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
+                    Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
+                ],
+                None,
+            )
+            .await?
+            .expect("Run process failed")
         };
         log::info!("Spawned process {} {:?} - id {}", bin, argv, id);
         let died = self.ln.get_process_died_notification(id).await;
 
-        let output = self.ln.get_output_available_notification(id).await;
-
-        let (abort_handle, abort_registration) = AbortHandle::new_pair();
-
+        let _output = self.ln.get_output_available_notification(id).await;
 
         let common = Arc::new(Mutex::new(0));
         let future1 = read_streams(common.clone(), id, self.ga.clone());
@@ -169,7 +166,7 @@ impl LocalAgentCommunication {
             let mut val = common.lock().await;
             *val = 1;
         };
-        let (res1, res2) = join!(future1, future2);
+        let (res1, _res2) = join!(future1, future2);
         match res1 {
             Ok(r) => {
                 let stdout = String::from_utf8_lossy(&r.0);
@@ -177,14 +174,25 @@ impl LocalAgentCommunication {
 
                 log::info!("STDOUT {}:\n{}", id, stdout);
                 log::info!("STDERR {}:\n{}", id, stderr);
-
             }
             Err(err) => {
                 log::error!("COMMAND ENDED ERR: {} {:?}", id, err);
             }
         }
 
+        Ok(())
+    }
 
+    pub async fn run_mount(&self, mount_args: &[ContainerVolume]) -> anyhow::Result<()> {
+        let mut guest_agent = self.ga.lock().await;
+
+        for ContainerVolume { name, path } in mount_args.iter() {
+            let max_p9_packet_size = u32::try_from(MAX_P9_PACKET_SIZE).unwrap();
+
+            if let Err(e) = guest_agent.mount(name, max_p9_packet_size, path).await? {
+                log::error!("Mount failed at {name}, {path}, {e}")
+            }
+        }
         Ok(())
     }
 }

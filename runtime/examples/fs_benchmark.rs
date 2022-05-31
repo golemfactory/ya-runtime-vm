@@ -98,25 +98,25 @@ async fn test_parallel_write_big_chunk(
                 std::format!("count={}", test_file_size / block_size).as_str(),
             ],
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         //comm.run_bash_command(&format!("head -c {} </dev/urandom > /mnt/mnt1/tag0/big_file", test_file_size)).await.unwrap();
         /*comm.run_command(
-            "/bin/busybox",
-            &[
-                "shred",
-                // TODO: /dev/random causes problems?
-                "-n",
-                "1",
-                "-s",
-                std::format!("{}", test_file_size).as_str(),
-                "/mnt/mnt1/tag0/big_file"
-            ],
-        )
-        .await
-        .unwrap();
-*/
+                    "/bin/busybox",
+                    &[
+                        "shred",
+                        // TODO: /dev/random causes problems?
+                        "-n",
+                        "1",
+                        "-s",
+                        std::format!("{}", test_file_size).as_str(),
+                        "/mnt/mnt1/tag0/big_file"
+                    ],
+                )
+                .await
+                .unwrap();
+        */
         let test_file_size = test_file_size / block_size * block_size;
 
         let duration = start.elapsed();
@@ -271,8 +271,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     {
-        comm.run_bash_command("ls -la /mnt/mnt1")
-            .await?;
+        comm.run_bash_command("ls -la /mnt/mnt1").await?;
     }
 
     // test_parallel_write_small_chunks(mount_args.clone(), ga_mutex.clone(), notifications.clone())
