@@ -218,7 +218,7 @@ async fn main() -> anyhow::Result<()> {
     let opt: Opt = Opt::from_args();
     env_logger::init();
 
-    log::info!("hai!");
+    log::info!("Running example fs_benchmark...");
     let temp_path = get_project_dir().join(Path::new("tmp"));
     if temp_path.exists() {
         fs::remove_dir_all(&temp_path)?;

@@ -114,6 +114,7 @@ async fn main() -> anyhow::Result<()> {
         temp_dir_string.as_str(),
     ];
 
+    //TODO - this seems to be hardcoded too much. How can it work on Win?
     let runtime_path = PathBuf::from("/usr/lib/yagna/plugins/ya-runtime-vm/ya-runtime-vm");
 
     let mut cmd = Command::new(&runtime_path);
