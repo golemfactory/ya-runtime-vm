@@ -1,47 +1,17 @@
-use ::futures::{future, FutureExt};
-
-use std::convert::TryFrom;
-use std::path::{Path, PathBuf};
+use futures::future;
 use std::time::{Duration, Instant};
-use std::{
-    env, fs,
-    io::{self},
-    sync::Arc,
-};
 
 use structopt::StructOpt;
 
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
-use ya_runtime_vm::demux_socket_comm::MAX_P9_PACKET_SIZE;
 
 use ya_runtime_vm::local_spawn_vm::{spawn_vm, prepare_tmp_path, prepare_mount_directories};
 
 use ya_runtime_vm::local_notification_handler::{
     start_local_agent_communication, LocalAgentCommunication,
 };
-
-fn get_project_dir() -> PathBuf {
-    PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
-        .canonicalize()
-        .expect("invalid manifest dir")
-}
-
-fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
-    let joined = path.as_ref().join(file.to_string());
-
-    // Under windows Paths has UNC prefix that is not parsed correctly by qemu
-    // Wrap Path with simplified method to remove that prefix
-    // It has no effect on Unix
-    dunce::simplified(
-        joined
-            // canonicalize checks existence of the file, it may failed, if does not exist
-            .canonicalize()
-            .expect(&joined.display().to_string())
-            .as_path(),
-    )
-    .display()
-    .to_string()
-}
+use std::sync::Arc;
+use tokio::io;
 
 /// Write for one byte to the file, create as many tasks as there are mount points
 #[allow(dead_code)]
@@ -238,10 +208,8 @@ async fn main() -> anyhow::Result<()> {
     let comm = start_local_agent_communication(vm_runner.get_vm().get_manager_sock()).await?;
 
     comm.run_mount(&mount_args).await?;
-    {
-        comm.run_bash_command("ls -la /mnt/mnt1").await?;
-    }
 
+    comm.run_bash_command("ls -la /mnt/mnt1").await?;
     // test_parallel_write_small_chunks(mount_args.clone(), ga_mutex.clone(), notifications.clone())
     //     .await;
 
@@ -257,19 +225,7 @@ async fn main() -> anyhow::Result<()> {
 
     {
         //run_process_with_output(&mut ga, &notifications, "/bin/ps", &["ps", "aux"]).await?;
-        //comm.run_command("/bin/busybox", &["top", "-b", "-n", "1"]).await?;
-
-        /*
-        let id = ga
-            .run_entrypoint("/bin/sleep", &["sleep", "60"], None, 0, 0, &NO_REDIR, None)
-            .await?
-            .expect("Run process failed");
-        log::info!("Spawned process with id: {}", id);
-        notifications
-            .get_process_died_notification(id)
-            .await
-            .notified()
-            .await;*/
+        comm.run_bash_command("top -b -n 1").await?;
     }
 
     /* VM should quit now. */

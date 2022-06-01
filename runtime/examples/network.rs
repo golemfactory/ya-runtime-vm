@@ -20,11 +20,15 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::{process::Child, sync};
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
 use ya_runtime_vm::vm::{VMBuilder, VM};
+use structopt::StructOpt;
 
 #[cfg(windows)]
 use tokio::net::TcpStream;
 #[cfg(unix)]
 use tokio::net::UnixStream;
+use ya_runtime_vm::local_notification_handler::start_local_agent_communication;
+use std::time::Duration;
+use ya_runtime_vm::local_spawn_vm::{prepare_tmp_path, prepare_mount_directories, spawn_vm};
 
 #[cfg(unix)]
 type PlatformStream = UnixStream;
@@ -122,30 +126,6 @@ fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
     .to_string()
 }
 
-fn spawn_vm() -> (Child, VM) {
-    #[cfg(windows)]
-    let vm_executable = "vmrt.exe";
-    #[cfg(unix)]
-    let vm_executable = "vmrt";
-
-    let project_dir = get_project_dir();
-    let runtime_dir = project_dir.join("poc").join("runtime");
-    let image_dir = project_dir.join("poc").join("squashfs");
-    let init_dir = project_dir.join("init-container");
-
-    let vm = VMBuilder::new(1, 256, &image_dir.join("ubuntu.gvmi"), None)
-        .with_kernel_path(join_as_string(&init_dir, "vmlinuz-virt"))
-        .with_ramfs_path(join_as_string(&init_dir, "initramfs.cpio.gz"))
-        .build();
-
-    let mut cmd = vm.create_cmd(&runtime_dir.join(vm_executable));
-
-    println!("CMD: {cmd:?}");
-
-    cmd.stdin(Stdio::piped());
-    cmd.current_dir(runtime_dir);
-    (cmd.spawn().expect("failed to spawn VM"), vm)
-}
 
 async fn handle_net<P: AsRef<Path>>(path: P) -> anyhow::Result<()> {
     let stream = PlatformStream::connect(path.as_ref().display().to_string()).await?;
@@ -344,31 +324,52 @@ fn handle_ethernet_packet(data: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
+#[derive(Debug, StructOpt)]
+#[structopt(name = "options", about = "Options for VM")]
+pub struct Opt {
+    /// Number of logical CPU cores
+    #[structopt(long, default_value = "1")]
+    cpu_cores: usize,
+    /// Amount of RAM [GiB]
+    #[structopt(long, default_value = "0.25")]
+    mem_gib: f64,
+    /// Amount of disk storage [GiB]
+    #[allow(unused)]
+    #[structopt(long, default_value = "0.25")]
+    storage_gib: f64,
+}
+
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let opt: Opt = Opt::from_args();
     env_logger::init();
 
-    let notifications = Arc::new(Mutex::new(Notifications::new()));
-    let (mut child, vm) = spawn_vm();
+    log::info!("Running example fs_benchmark...");
 
-    let temp_dir = tempdir::TempDir::new("ya-vm-network").expect("Failed to create temp dir");
-    let temp_path = temp_dir.path();
-    let (_p9streams, _muxer_handle) = vm.start_9p_service(&temp_path, &[]).await.unwrap();
+    let temp_path = prepare_tmp_path();
+    let mount_args = prepare_mount_directories(&temp_path, 2);
 
-    let ns = notifications.clone();
 
-    let ga_mutex = GuestAgent::connected(vm.get_manager_sock(), 10, move |n, _g| {
-        let notifications = ns.clone();
-        async move { notifications.clone().lock().await.handle(n) }.boxed()
-    })
-    .await?;
+    let mut vm_runner =
+        spawn_vm(&temp_path, opt.cpu_cores, opt.mem_gib, false).await?;
 
-    {
-        notifications.clone().lock().await.set_ga(ga_mutex.clone());
-    };
+    //let VM start before trying to connect p9 service
+    tokio::time::sleep(Duration::from_secs_f64(2.5)).await;
 
-    handle_net(vm.get_net_sock()).await?;
+    let (_p9streams, _muxer_handle) = vm_runner
+        .start_9p_service(&temp_path, &mount_args)
+        .await
+        .unwrap();
 
+    let comm = start_local_agent_communication(vm_runner.get_vm().get_manager_sock()).await?;
+
+    comm.run_mount(&mount_args).await?;
+
+    handle_net(vm_runner.get_vm().get_net_sock()).await?;
+
+
+    let ga_mutex = comm.get_ga();
     {
         let hosts = [("host0", "127.0.0.2"), ("host1", "127.0.0.3")]
             .iter()
@@ -403,8 +404,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     /* VM should quit now. */
-    let e = child.wait().await.expect("failed to wait on child");
-    eprintln!("{:?}", e);
+    //let e = timeout(Duration::from_secs(5), vm_runner..wait()).await;
+    vm_runner.stop_vm(&Duration::from_secs(5), true).await?;
 
     Ok(())
 }
