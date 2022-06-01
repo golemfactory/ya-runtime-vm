@@ -70,7 +70,7 @@ pub async fn spawn_vm(
     tmp_path: &Path,
     cpu_cores: usize,
     mem_gib: f64,
-    use_qcow2_volume: bool
+    use_qcow2_volume: bool,
 ) -> anyhow::Result<VMRunner> {
     let project_dir = get_project_dir();
     let runtime_dir = project_dir.join("poc").join("runtime");
@@ -86,10 +86,15 @@ pub async fn spawn_vm(
         let _qcow2_file = qcow2_file.canonicalize()?;
     }
 
-    let vm = VMBuilder::new(cpu_cores, (mem_gib * 1024.0) as usize, &image_dir.join("ubuntu.gvmi"), None)
-        .with_kernel_path(join_as_string(&init_dir, "vmlinuz-virt"))
-        .with_ramfs_path(join_as_string(&init_dir, "initramfs.cpio.gz"))
-        .build();
+    let vm = VMBuilder::new(
+        cpu_cores,
+        (mem_gib * 1024.0) as usize,
+        &image_dir.join("ubuntu.gvmi"),
+        None,
+    )
+    .with_kernel_path(join_as_string(&init_dir, "vmlinuz-virt"))
+    .with_ramfs_path(join_as_string(&init_dir, "initramfs.cpio.gz"))
+    .build();
 
     let mut vm_runner = VMRunner::new(vm);
     vm_runner.run_vm(runtime_dir).await?;
