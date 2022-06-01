@@ -1,4 +1,6 @@
-use crate::demux_socket_comm::{start_demux_communication, DemuxSocketHandle, MAX_P9_PACKET_SIZE};
+use crate::demux_socket_comm::{
+    start_demux_communication, stop_demux_communication, DemuxSocketHandle, MAX_P9_PACKET_SIZE,
+};
 use crate::vm::VM;
 use anyhow::anyhow;
 use std::path::Path;
@@ -17,6 +19,8 @@ use ya_vm_file_server::InprocServer;
 pub struct VMRunner {
     instance: Option<Child>,
     vm: VM,
+    file_servers: Option<Vec<InprocServer>>,
+    demux_handle: Option<DemuxSocketHandle>,
 }
 
 pub enum ReaderOutputType {
@@ -26,7 +30,12 @@ pub enum ReaderOutputType {
 
 impl VMRunner {
     pub fn new(vm: VM) -> Self {
-        return VMRunner { instance: None, vm };
+        return VMRunner {
+            instance: None,
+            vm,
+            demux_handle: None,
+            file_servers: None,
+        };
     }
 
     pub fn get_vm(&self) -> &VM {
@@ -100,10 +109,10 @@ impl VMRunner {
 
     /// Spawns tasks handling 9p communication for given mount points
     pub async fn start_9p_service(
-        &self,
+        &mut self,
         work_dir: &Path,
         volumes: &[ContainerVolume],
-    ) -> anyhow::Result<(Vec<InprocServer>, DemuxSocketHandle)> {
+    ) -> anyhow::Result<()> {
         log::debug!("Connecting to the 9P VM endpoint...");
 
         let vmp9stream = self.connect_to_9p_endpoint(10).await?;
@@ -136,8 +145,17 @@ impl VMRunner {
 
         let demux_socket_handle = start_demux_communication(vmp9stream, p9streams)?;
 
+        self.file_servers = Some(runtime_9ps);
+        self.demux_handle = Some(demux_socket_handle);
         // start_demux_communication(vm_stream, p9_streams);
-        Ok((runtime_9ps, demux_socket_handle))
+        Ok(())
+    }
+
+    pub async fn stop_p9_service(&mut self) {
+        //todo - stop servers as well
+        if let Some(demux_handle) = self.demux_handle.take() {
+            stop_demux_communication(demux_handle).await;
+        }
     }
 
     pub async fn stop_vm(

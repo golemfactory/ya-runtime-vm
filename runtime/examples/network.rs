@@ -258,10 +258,7 @@ async fn main() -> anyhow::Result<()> {
     //let VM start before trying to connect p9 service
     tokio::time::sleep(Duration::from_secs_f64(2.5)).await;
 
-    let (_p9streams, _muxer_handle) = vm_runner
-        .start_9p_service(&temp_path, &mount_args)
-        .await
-        .unwrap();
+    let (_p9streams, _muxer_handle) = vm_runner.start_9p_service(&temp_path, &mount_args).await?;
 
     let comm = start_local_agent_communication(vm_runner.get_vm().get_manager_sock()).await?;
 
@@ -296,6 +293,7 @@ async fn main() -> anyhow::Result<()> {
     comm.run_command("/bin/ping", &["ping", "-v", "-n", "-c", "3", "10.0.0.2"])
         .await?;
 
+    vm_runner.stop_p9_service().await;
     /* VM should quit now. */
     //let e = timeout(Duration::from_secs(5), vm_runner..wait()).await;
     vm_runner.stop_vm(&Duration::from_secs(5), true).await?;

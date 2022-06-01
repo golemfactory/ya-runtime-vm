@@ -94,8 +94,7 @@ async fn test_parallel_write_big_chunk(
         let speed_mbs = test_file_size as f64 / time_in_secs / 1000.0 / 1000.0;
         println!(
             "File generated in {:.3}s. {:.3}MB/s",
-            time_in_secs,
-            speed_mbs
+            time_in_secs, speed_mbs
         );
     }
 
@@ -134,7 +133,8 @@ async fn test_parallel_write_big_chunk(
     future::join_all(tasks).await;
     let duration = start.elapsed();
     let time_in_secs = duration.as_secs_f64();
-    let speed_mbs = mount_args.len() as f64 * test_file_size as f64 / time_in_secs / 1000.0 / 1000.0;
+    let speed_mbs =
+        mount_args.len() as f64 * test_file_size as f64 / time_in_secs / 1000.0 / 1000.0;
     println!(
         "Files ({}) copied in {:.3}s. {:.3}MB/s",
         mount_args.len(),
@@ -208,7 +208,7 @@ async fn main() -> anyhow::Result<()> {
     //let VM start before trying to connect p9 service
     tokio::time::sleep(Duration::from_secs_f64(2.5)).await;
 
-    let (_p9streams, _muxer_handle) = vm_runner
+    vm_runner
         .start_9p_service(&temp_path, &mount_args)
         .await
         .unwrap();
@@ -236,6 +236,7 @@ async fn main() -> anyhow::Result<()> {
         comm.run_bash_command("top -b -n 1").await?;
     }
 
+    vm_runner.stop_p9_service().await;
     /* VM should quit now. */
     //let e = timeout(Duration::from_secs(5), vm_runner..wait()).await;
     vm_runner.stop_vm(&Duration::from_secs(5), true).await?;
