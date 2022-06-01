@@ -83,7 +83,7 @@ static int write_exact(int fd, const void* buf, size_t size) {
 
 static void* tunnel_from_p9_virtio_to_sock(void *data) {
     const int bufferSize = MAX_DEMUX_P9_MESSAGE_SIZE;
-    char* buffer = malloc(bufferSize);
+    char* buffer = malloc(bufferSize + sizeof(uint32_t) + sizeof(uint8_t));
 
     //experimental - set thread affinity to get better performance on Windows?
     {
@@ -105,32 +105,24 @@ static void* tunnel_from_p9_virtio_to_sock(void *data) {
     while (true) {
         ssize_t bytes_read = 0;
 
-        uint8_t channel = 0;
-        bytes_read = read_exact(g_p9_fd, &channel, sizeof(channel));
+        bytes_read = read_exact(g_p9_fd, buffer, sizeof(uint8_t) + sizeof(uint32_t));
         if (bytes_read == 0) {
             goto success;
         }
 
-        if (bytes_read != sizeof(channel)) {
+        if (bytes_read != sizeof(uint8_t) + sizeof(uint32_t)) {
             fprintf(stderr, "Error during read from g_p9_fd: bytes_read != sizeof(channel)\n");
             goto error;
         }
-
-        uint32_t packet_size = 0;
-        bytes_read = read_exact(g_p9_fd, &packet_size, sizeof(packet_size));
-        if (bytes_read != sizeof(packet_size)) {
-            fprintf(stderr, "Error during read from g_p9_fd: bytes_read != sizeof(packet_size)\n");
-            goto error;
-        }
-
+        uint8_t channel = *(uint8_t*)buffer;
+        uint32_t packet_size = *(uint32_t*)(&buffer[1]);
 
         if (packet_size > MAX_DEMUX_P9_MESSAGE_SIZE) {
             fprintf(stderr, "Error: Maximum packet size exceeded: packet_size > MAX_PACKET_SIZE\n");
             goto error;
         }
 
-
-        bytes_read = read_exact(g_p9_fd, buffer, packet_size);
+        bytes_read = read_exact(g_p9_fd, buffer + sizeof(uint32_t) + sizeof(uint8_t), packet_size);
         if (bytes_read != packet_size) {
             fprintf(stderr, "Error during read from g_p9_fd: bytes_read != packet_size\n");
             goto error;
@@ -143,7 +135,7 @@ static void* tunnel_from_p9_virtio_to_sock(void *data) {
             fprintf(stderr, "Error during read from g_p9_fd: bytes_read == -1\n");
             goto error;
         }
-        if (write_exact(g_p9_socket_fds[channel][1], buffer, bytes_read) == -1) {
+        if (write_exact(g_p9_socket_fds[channel][1], buffer + sizeof(uint32_t) + sizeof(uint8_t), bytes_read) == -1) {
             fprintf(stderr, "Error writing to g_p9_socket_fds\n");
             goto error;
         }
