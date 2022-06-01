@@ -92,7 +92,7 @@ async fn test_parallel_write_big_chunk(
         let duration = start.elapsed();
         let time_in_secs = duration.as_secs_f64();
         let speed_mbs = test_file_size as f64 / time_in_secs / 1000.0 / 1000.0;
-        log::info!(
+        println!(
             "File generated in {:.3}s. {:.3}MB/s",
             time_in_secs,
             speed_mbs
@@ -100,6 +100,7 @@ async fn test_parallel_write_big_chunk(
     }
 
     let mut tasks = vec![];
+    let start = Instant::now();
 
     for ContainerVolume { name, path } in mount_args.as_ref() {
         // let cmd = format!("A=\"A\"; for i in {{1..24}}; do A=\"${{A}}${{A}}\"; done; echo -ne $A >> {path}/big_chunk");
@@ -131,6 +132,15 @@ async fn test_parallel_write_big_chunk(
 
     log::info!("Joining...");
     future::join_all(tasks).await;
+    let duration = start.elapsed();
+    let time_in_secs = duration.as_secs_f64();
+    let speed_mbs = mount_args.len() as f64 * test_file_size as f64 / time_in_secs / 1000.0 / 1000.0;
+    println!(
+        "Files ({}) copied in {:.3}s. {:.3}MB/s",
+        mount_args.len(),
+        time_in_secs,
+        speed_mbs
+    );
 }
 
 async fn test_fio(mount_args: Arc<Vec<ContainerVolume>>, comm: LocalAgentCommunication) {
