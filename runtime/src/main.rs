@@ -1,4 +1,4 @@
-use anyhow::Context as _;
+
 use futures::future::FutureExt;
 use futures::lock::Mutex;
 use futures::TryFutureExt;
@@ -8,19 +8,18 @@ use log4rs::config::{Appender, Config, Root};
 use log4rs::encode::pattern::PatternEncoder;
 use std::convert::TryFrom;
 use std::path::{Component, Path, PathBuf};
-use std::process::Stdio;
+
 use std::sync::Arc;
 use std::time::Duration;
 use structopt::StructOpt;
 use ya_runtime_vm::demux_socket_comm::{
-    stop_demux_communication, DemuxSocketHandle, MAX_P9_PACKET_SIZE,
+    MAX_P9_PACKET_SIZE,
 };
 use ya_runtime_vm::vm::VMBuilder;
 
 use tokio::{
     fs,
-    io::{self, AsyncBufReadExt, AsyncWriteExt},
-    process, spawn,
+    io::{self, AsyncWriteExt},
 };
 use ya_runtime_sdk::{
     runtime_api::{
@@ -40,14 +39,9 @@ use ya_runtime_vm::{
 };
 
 use ya_runtime_vm::vm_runner::VMRunner;
-use ya_vm_file_server::InprocServer;
+
 
 const DIR_RUNTIME: &str = "runtime";
-#[cfg(unix)]
-const FILE_RUNTIME: &'static str = "vmrt";
-#[cfg(windows)]
-const FILE_RUNTIME: &str = "vmrt.exe";
-
 const FILE_TEST_IMAGE: &str = "self-test.gvmi";
 const FILE_DEPLOYMENT: &str = "deployment.json";
 const DEFAULT_CWD: &str = "/";
@@ -100,11 +94,11 @@ struct RuntimeData {
 }
 
 impl RuntimeData {
-    fn vm_runner(&mut self) -> anyhow::Result<VMRunner> {
-        self.vm_runner
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("VM runner process not available"))
-    }
+    //fn vm_runner(&mut self) -> anyhow::Result<VMRunner> {
+    //    self.vm_runner
+    //        .take()
+    //        .ok_or_else(|| anyhow::anyhow!("VM runner process not available"))
+    //}
 
     fn deployment(&self) -> anyhow::Result<&Deployment> {
         self.deployment
@@ -581,45 +575,6 @@ async fn notification_into_status(
                 stdout: Vec::new(),
                 stderr: Vec::new(),
             }
-        }
-    }
-}
-
-async fn reader_to_log<T: io::AsyncRead + Unpin>(reader: T) {
-    let mut reader = io::BufReader::new(reader);
-    let mut buf = Vec::new();
-    loop {
-        match reader.read_until(b'\n', &mut buf).await {
-            Ok(0) => {
-                log::warn!("VM: reader.read_until returned 0")
-            }
-            Ok(_) => {
-                let bytes = strip_ansi_escapes::strip(&buf).unwrap();
-                log::debug!("VM: {}", String::from_utf8_lossy(&bytes).trim_end());
-                buf.clear();
-            }
-            Err(e) => log::error!("VM output error: {}", e),
-        }
-    }
-}
-
-async fn reader_to_log_error<T: io::AsyncRead + Unpin>(reader: T) {
-    let mut reader = io::BufReader::new(reader);
-    let mut buf = Vec::new();
-    loop {
-        match reader.read_until(b'\n', &mut buf).await {
-            Ok(0) => {
-                log::warn!("VM ERROR: reader.read_until returned 0")
-            }
-            Ok(_) => {
-                let bytes = strip_ansi_escapes::strip(&buf).unwrap();
-                log::debug!(
-                    "VM ERROR STREAM: {}",
-                    String::from_utf8_lossy(&bytes).trim_end()
-                );
-                buf.clear();
-            }
-            Err(e) => log::error!("VM stderr error: {}", e),
         }
     }
 }
