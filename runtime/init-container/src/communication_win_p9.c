@@ -168,7 +168,7 @@ static void* tunnel_from_p9_sock_to_virtio(void *data) {
 #endif
 
     const int bufferSize = MAX_DEMUX_P9_MESSAGE_SIZE;
-    char* buffer = malloc(bufferSize);
+    char* buffer = malloc(sizeof(uint8_t) + sizeof(uint32_t) + bufferSize);
 
     //experimental - set thread affinity to get better performance on Windows?
     {
@@ -183,7 +183,7 @@ static void* tunnel_from_p9_sock_to_virtio(void *data) {
     }
 
     while (true) {
-        ssize_t bytes_read = recv(g_p9_socket_fds[channel][1], buffer, bufferSize, 0);
+        ssize_t bytes_read = recv(g_p9_socket_fds[channel][1], buffer + sizeof(uint32_t) + sizeof(uint8_t), bufferSize, 0);
 
         if (bytes_read == 0) {
             free(buffer);
@@ -199,25 +199,17 @@ static void* tunnel_from_p9_sock_to_virtio(void *data) {
             fprintf(stderr, "pthread_mutex_lock failed\n");
             return (void*)(int64_t)errno;
         }
+
 #if WIN_P9_EXTRA_DEBUG_INFO
         fprintf(stderr, "send message to channel %d, length: %ld\n", channel, bytes_read);
 #endif
 
         bool write_succeeded = true;
 
-        if (write_exact(g_p9_fd, &channel, 1) == -1) {
-            fprintf(stderr, "Failed write g_p9_fd 1\n");
-            write_succeeded = false;
-            goto mutex_unlock;
-        }
-        uint32_t bytes_read_to_send = (uint32_t)bytes_read;
-        assert(sizeof(bytes_read_to_send) == 4);
-        if (write_exact(g_p9_fd, &bytes_read_to_send, sizeof(bytes_read_to_send)) == -1) {
-            fprintf(stderr, "Failed write g_p9_fd 2\n");
-            write_succeeded = false;
-            goto mutex_unlock;
-        }
-        if (write_exact(g_p9_fd, buffer, bytes_read) == -1) {
+        *((uint8_t*)buffer) = channel;
+        *((uint32_t*)&buffer[1]) = (uint32_t)bytes_read;
+
+        if (write_exact(g_p9_fd, buffer, bytes_read + sizeof(uint8_t) + sizeof(uint32_t)) == -1) {
             fprintf(stderr, "Failed write g_p9_fd 3\n");
             write_succeeded = false;
             goto mutex_unlock;
