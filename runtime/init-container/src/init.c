@@ -1649,7 +1649,6 @@ int main(void) {
         CHECK(pthread_setaffinity_np(thread, sizeof(cpus), &cpus));
     }
     //make sure to create threads after blocking signals, not before. Otherwise signals are blocked.
-    CHECK(initialize_p9_socket_descriptors());
 
     main_loop();
     stop_network();

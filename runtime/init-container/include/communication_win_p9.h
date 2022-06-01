@@ -6,12 +6,12 @@
 #include <pthread.h>
 
 
-int initialize_p9_socket_descriptors();
+int initialize_p9_socket_descriptors(int max_p9_message_size);
 uint32_t do_mount_win_p9(const char* tag, uint8_t channel, uint32_t max_p9_message_size, char* path);
 
 #define MAX_P9_VOLUMES (100)
 //this variable has nothing to do with max p9 message size, it's just read buffer for demux communication
-#define MAX_DEMUX_P9_MESSAGE_SIZE (0x80000) //524288
+extern int g_p9_initialized;
 extern int g_p9_fd;
 extern int g_p9_current_channel;
 extern int g_p9_socket_fds[MAX_P9_VOLUMES][2];

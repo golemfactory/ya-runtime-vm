@@ -27,6 +27,7 @@
 
 #include "communication_win_p9.h"
 
+int g_p9_initialized = 0;
 int g_p9_fd = -1;
 int g_p9_current_channel = 0;
 int g_p9_socket_fds[MAX_P9_VOLUMES][2];
@@ -81,8 +82,18 @@ static int write_exact(int fd, const void* buf, size_t size) {
     return bytes_written;
 }
 
+struct tunnel_from_p9_to_sock_params {
+    uint32_t max_packet_size;
+};
+
 static void* tunnel_from_p9_virtio_to_sock(void *data) {
-    const int bufferSize = MAX_DEMUX_P9_MESSAGE_SIZE;
+    struct tunnel_from_p9_to_sock_params* params = (struct tunnel_from_p9_to_sock_params*)data;
+    uint32_t max_packet_size = params->max_packet_size;
+    free(params);
+    params = NULL;
+    data = NULL;
+
+    const int bufferSize = max_packet_size;
     char* buffer = malloc(bufferSize + sizeof(uint32_t) + sizeof(uint8_t));
 
     //experimental - set thread affinity to get better performance on Windows?
@@ -97,10 +108,6 @@ static void* tunnel_from_p9_virtio_to_sock(void *data) {
         pthread_setaffinity_np(thread, sizeof(cpus), &cpus);
     }
 
-    if (data != NULL) {
-        fprintf(stderr, "tunnel_from_p9_virtio_to_sock: data != NULL\n");
-        return NULL;
-    }
 
     while (true) {
         ssize_t bytes_read = 0;
@@ -117,7 +124,7 @@ static void* tunnel_from_p9_virtio_to_sock(void *data) {
         uint8_t channel = *(uint8_t*)buffer;
         uint32_t packet_size = *(uint32_t*)(&buffer[1]);
 
-        if (packet_size > MAX_DEMUX_P9_MESSAGE_SIZE) {
+        if (packet_size > max_packet_size) {
             fprintf(stderr, "Error: Maximum packet size exceeded: packet_size > MAX_PACKET_SIZE\n");
             goto error;
         }
@@ -148,10 +155,19 @@ error:
     return (void*)-1;
 }
 
+struct tunnel_from_p9_params {
+    uint8_t channel;
+    uint32_t max_packet_size;
+};
 
 static void* tunnel_from_p9_sock_to_virtio(void *data) {
-    intptr_t channel_wide_int = (intptr_t)data;
-    uint8_t channel = channel_wide_int;
+    struct tunnel_from_p9_params* params = (struct tunnel_from_p9_params*)data;
+    uint8_t channel = params->channel;
+    uint32_t max_packet_size = params->max_packet_size;
+    free(params);
+    params = NULL;
+    data = NULL;
+
     assert(channel_wide_int < MAX_P9_VOLUMES);
     assert(channel == channel_wide_int);
 
@@ -159,7 +175,7 @@ static void* tunnel_from_p9_sock_to_virtio(void *data) {
     fprintf(stderr, "P9 sender thread started channel: %d\n", channel);
 #endif
 
-    const int bufferSize = MAX_DEMUX_P9_MESSAGE_SIZE;
+    const int bufferSize = max_packet_size;
     char* buffer = malloc(sizeof(uint8_t) + sizeof(uint32_t) + bufferSize);
 
     //experimental - set thread affinity to get better performance on Windows?
@@ -218,25 +234,35 @@ mutex_unlock:
     }
 }
 
-int initialize_p9_socket_descriptors() {
-    for (int i = 0; i < MAX_P9_VOLUMES; i++) {
-        g_p9_socket_fds[i][0] = -1;
-        g_p9_socket_fds[i][1] = -1;
-    }
+int initialize_p9_socket_descriptors(int max_p9_message_size) {
+    if (!g_p9_initialized) {
+        for (int i = 0; i < MAX_P9_VOLUMES; i++) {
+            g_p9_socket_fds[i][0] = -1;
+            g_p9_socket_fds[i][1] = -1;
+        }
 
-    if (pthread_mutex_init(&g_p9_tunnel_mutex_sender, NULL) == -1) {
-        fprintf(stderr, "Error: pthread_mutex_init error\n");
-        return -1;
-    }
-	if (pthread_create(&g_p9_tunnel_thread_receiver, NULL, &tunnel_from_p9_virtio_to_sock, NULL) == -1) {
-        fprintf(stderr, "Error: pthread_create failed pthread_create(&g_p9_tunnel_thread_receiver...\n");
-        return -1;
-	}
+        if (pthread_mutex_init(&g_p9_tunnel_mutex_sender, NULL) == -1) {
+            fprintf(stderr, "Error: pthread_mutex_init error\n");
+            return -1;
+        }
 
+        struct tunnel_from_p9_to_sock_params* params = calloc(1, sizeof(struct tunnel_from_p9_to_sock_params));
+        params->max_packet_size = max_p9_message_size;
+        if (pthread_create(&g_p9_tunnel_thread_receiver, NULL, &tunnel_from_p9_virtio_to_sock, params) == -1) {
+            fprintf(stderr, "Error: pthread_create failed pthread_create(&g_p9_tunnel_thread_receiver...\n");
+            free(params);
+            return -1;
+        }
+        g_p9_initialized = 1;
+    }
     return 0;
 }
 
 uint32_t do_mount_win_p9(const char* tag, uint8_t channel, uint32_t max_p9_message_size, char* path) {
+    int ret = initialize_p9_socket_descriptors(max_p9_message_size);
+    if (ret != 0) {
+        return ret;
+    }
     if (channel >= MAX_P9_VOLUMES) {
         fprintf(stderr, "ERROR: channel >= MAX_P9_VOLUMES\n");
         return -1;
@@ -252,8 +278,11 @@ uint32_t do_mount_win_p9(const char* tag, uint8_t channel, uint32_t max_p9_messa
 
     // TODO: there could be one thread with poll
     //for every socket pair we need one reader
-    uintptr_t channel_wide_int = channel;
-    if (pthread_create(&g_p9_tunnel_thread_sender[channel], NULL, &tunnel_from_p9_sock_to_virtio, (void*) channel_wide_int) == -1) {
+    struct tunnel_from_p9_params* params = calloc(1, sizeof(struct tunnel_from_p9_params));
+    params->channel = channel;
+    params->max_packet_size = max_p9_message_size;
+    if (pthread_create(&g_p9_tunnel_thread_sender[channel], NULL, &tunnel_from_p9_sock_to_virtio, (void*) params) == -1) {
+        free(params);
         fprintf(stderr, "Error: pthread_create failed\n");
         return -1;
     }
