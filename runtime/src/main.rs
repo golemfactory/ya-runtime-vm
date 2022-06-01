@@ -94,8 +94,6 @@ enum NetworkEndpoint {
 #[derive(Default)]
 struct RuntimeData {
     vm_runner: Option<VMRunner>,
-    runtime_p9: Vec<InprocServer>,
-    p9_communication_handle: Option<DemuxSocketHandle>,
     network: Option<NetworkEndpoint>,
     deployment: Option<Deployment>,
     ga: Option<Arc<Mutex<GuestAgent>>>,
@@ -274,7 +272,7 @@ async fn start(
     let mut vm_runner = VMRunner::new(vm);
     vm_runner.run_vm(runtime_dir).await?;
 
-    let (runtime_9ps, demux_socket_handle) = vm_runner
+    vm_runner
         .start_9p_service(&work_dir, &deployment.volumes)
         .await?;
 
@@ -306,8 +304,6 @@ async fn start(
         }
     }
 
-    data.runtime_p9 = runtime_9ps; //prevent dropping
-    data.p9_communication_handle.replace(demux_socket_handle); //prevent dropping
     data.network.replace(NetworkEndpoint::Socket(
         vm_runner.get_vm().get_net_sock().into(),
     ));
@@ -381,11 +377,9 @@ async fn stop(runtime_data: Arc<Mutex<RuntimeData>>) -> Result<(), server::Error
     log::debug!("got shutdown");
     let mut data = runtime_data.lock().await;
 
-    if let Some(dsh) = data.p9_communication_handle.take() {
-        stop_demux_communication(dsh).await;
-    }
-
     let mut vm_runner = data.vm_runner.take().unwrap();
+
+    vm_runner.stop_p9_service().await;
 
     {
         let mutex = data.ga().unwrap();
