@@ -28,9 +28,7 @@ async fn main() -> anyhow::Result<()> {
     let temp_path = prepare_tmp_path();
     let mount_args = prepare_mount_directories(&temp_path, 2);
 
-
-    let mut vm_runner =
-        spawn_vm(&temp_path, opt.cpu_cores, opt.mem_gib, false).await?;
+    let mut vm_runner = spawn_vm(&temp_path, opt.cpu_cores, opt.mem_gib, false).await?;
 
     //let VM start before trying to connect p9 service
     tokio::time::sleep(Duration::from_secs_f64(2.5)).await;

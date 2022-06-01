@@ -5,13 +5,13 @@ use structopt::StructOpt;
 
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 
-use ya_runtime_vm::local_spawn_vm::{spawn_vm, prepare_tmp_path, prepare_mount_directories};
+use ya_runtime_vm::local_spawn_vm::{prepare_mount_directories, prepare_tmp_path, spawn_vm};
 
+use std::sync::Arc;
+use tokio::io;
 use ya_runtime_vm::local_notification_handler::{
     start_local_agent_communication, LocalAgentCommunication,
 };
-use std::sync::Arc;
-use tokio::io;
 
 /// Write for one byte to the file, create as many tasks as there are mount points
 #[allow(dead_code)]
@@ -193,9 +193,7 @@ async fn main() -> anyhow::Result<()> {
     let temp_path = prepare_tmp_path();
     let mount_args = prepare_mount_directories(&temp_path, 2);
 
-
-    let mut vm_runner =
-        spawn_vm(&temp_path, opt.cpu_cores, opt.mem_gib, false).await?;
+    let mut vm_runner = spawn_vm(&temp_path, opt.cpu_cores, opt.mem_gib, false).await?;
 
     //let VM start before trying to connect p9 service
     tokio::time::sleep(Duration::from_secs_f64(2.5)).await;
