@@ -334,7 +334,7 @@ uint32_t do_mount_win_p9(const char* tag, uint8_t channel, uint32_t max_p9_messa
     struct tunnel_from_p9_params* params = calloc(1, sizeof(struct tunnel_from_p9_params));
     params->channel = channel;
     params->max_packet_size = max_p9_message_size;
-    params->benchmark_loops = 1000000000 / max_p9_message_size;
+    params->benchmark_loops = 100000000 / max_p9_message_size;
     if (pthread_create(&g_p9_tunnel_thread_sender[channel], NULL, &tunnel_from_p9_sock_to_virtio, (void*) params) == -1) {
         free(params);
         fprintf(stderr, "Error: pthread_create failed\n");
