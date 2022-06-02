@@ -158,12 +158,14 @@ error:
 struct tunnel_from_p9_params {
     uint8_t channel;
     uint32_t max_packet_size;
+    uint32_t benchmark_loops;
 };
 
 static void* tunnel_from_p9_sock_to_virtio(void *data) {
     struct tunnel_from_p9_params* params = (struct tunnel_from_p9_params*)data;
     uint8_t channel = params->channel;
     uint32_t max_packet_size = params->max_packet_size;
+    uint32_t benchmark_loops = params->benchmark_loops;
     free(params);
     params = NULL;
     data = NULL;
@@ -188,6 +190,46 @@ static void* tunnel_from_p9_sock_to_virtio(void *data) {
         CPU_ZERO(&cpus);
         CPU_SET(1, &cpus);
         pthread_setaffinity_np(thread, sizeof(cpus), &cpus);
+    }
+
+    //run benchmark if benchmark_loops >= 10, lower values don't make any sense.
+    if (benchmark_loops >= 10) {
+        fprintf(stderr, "Benchmark started: \n");
+        //fill data
+        *((uint8_t*)buffer) = 249;
+        *((uint32_t*)&buffer[1]) = (uint32_t)max_packet_size;
+        for (uint32_t i = 0; i < max_packet_size; i++) {
+            buffer[i + sizeof(uint8_t) + sizeof(uint32_t)] = (uint8_t)(i % 256);
+        }
+        int loop_count = benchmark_loops;
+        for (int loop = 0; loop < loop_count; loop += 1) {
+            if (pthread_mutex_lock(&g_p9_tunnel_mutex_sender)) {
+                fprintf(stderr, "pthread_mutex_lock failed\n");
+                return (void*)(int64_t)errno;
+            }
+            if (loop == loop_count - 1) {
+                buffer[sizeof(uint8_t) + sizeof(uint32_t)] = 255; //start benchmark
+            } else {
+                buffer[sizeof(uint8_t) + sizeof(uint32_t)] = 1; //continue benchmark
+            }
+
+            bool write_succeeded = true;
+
+            if (write_exact(g_p9_fd, buffer, max_packet_size + sizeof(uint8_t) + sizeof(uint32_t)) == -1) {
+                fprintf(stderr, "Failed write g_p9_fd 3\n");
+                write_succeeded = false;
+                goto mutex_unlock_benchmark;
+            }
+mutex_unlock_benchmark:
+            if (pthread_mutex_unlock(&g_p9_tunnel_mutex_sender)) {
+                fprintf(stderr, "pthread_mutex_unlock failed\n");
+                return (void*)(int64_t)errno;
+            }
+            if (!write_succeeded) {
+                return (void*)(int64_t)errno;
+            }
+        }
+        fprintf(stderr, "Benchmark finished: \n");
     }
 
     while (true) {
@@ -292,6 +334,7 @@ uint32_t do_mount_win_p9(const char* tag, uint8_t channel, uint32_t max_p9_messa
     struct tunnel_from_p9_params* params = calloc(1, sizeof(struct tunnel_from_p9_params));
     params->channel = channel;
     params->max_packet_size = max_p9_message_size;
+    params->benchmark_loops = 1000000000 / max_p9_message_size;
     if (pthread_create(&g_p9_tunnel_thread_sender[channel], NULL, &tunnel_from_p9_sock_to_virtio, (void*) params) == -1) {
         free(params);
         fprintf(stderr, "Error: pthread_create failed\n");

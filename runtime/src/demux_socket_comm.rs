@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 pub const MAX_P9_PACKET_SIZE: usize = 0x4000 - 5; //262144
 pub const MAX_DEMUX_PACKET_SIZE: usize = 0x4000; //262144
@@ -49,6 +50,8 @@ pub fn start_demux_communication(
 
     let (abort_handle, abort_registration) = AbortHandle::new_pair();
 
+    let mut benchmark_start: Option<Instant> = None;
+    let mut benchmark_bytes: u64 = 0;
     log::debug!("spawning vm_to_p9_splitter...");
     let vm_to_p9_splitter = tokio::spawn(async move {
         let reader_future = Abortable::new(
@@ -65,7 +68,9 @@ pub fn start_demux_communication(
                     let (channel_bytes, packet_size_bytes) = header_buffer.split_at(1);
                     let channel = u8::from_le_bytes(channel_bytes.try_into().unwrap()) as usize;
 
-                    if channel >= p9_writers.len() {
+                    let is_benchmark_packet = channel == 249;
+
+                    if !is_benchmark_packet && channel >= p9_writers.len() {
                         log::error!("channel exceeded number of connected p9 servers channel: {}, p9_stream.len: {}", channel, p9_writers.len());
                         break;
                     }
@@ -86,13 +91,28 @@ pub fn start_demux_communication(
                         break;
                     }
 
-                    //check above guarantees that index will succeeded
-                    if let Err(err) = p9_writers[channel]
-                        .write_all(&mut message_buffer[0..packet_size])
-                        .await
-                    {
-                        log::error!("Write to p9_writer failed on channel {}: {}", channel, err);
-                        break;
+                    if !is_benchmark_packet {
+                        //check above guarantees that index will succeeded
+                        if let Err(err) = p9_writers[channel]
+                            .write_all(&mut message_buffer[0..packet_size])
+                            .await
+                        {
+                            log::error!("Write to p9_writer failed on channel {}: {}", channel, err);
+                            break;
+                        }
+                    } else {
+                        if benchmark_start == None {
+                            benchmark_start = Some(Instant::now());
+                        }
+                        benchmark_bytes += packet_size as u64;
+                        if message_buffer[0] == 255 {
+                            let time_sec = benchmark_start.unwrap().elapsed().as_secs_f64();
+                            let benchmark_mbytes = 1.0E-6 * benchmark_bytes as f64;
+                            let speed = benchmark_mbytes / time_sec;
+                            println!("Benchmark finished in {}, size {:.2}MB speed: {:.2}MB/s", time_sec, benchmark_mbytes, speed);
+                            benchmark_start = None;
+                            benchmark_bytes = 0;
+                        }
                     }
                 }
             },
