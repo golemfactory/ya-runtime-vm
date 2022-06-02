@@ -276,6 +276,17 @@ uint32_t do_mount_win_p9(const char* tag, uint8_t channel, uint32_t max_p9_messa
         return errno;
     }
 
+
+    /*
+       DEBUG CODE to check internal buffer size of socket stream
+    {
+        int n;
+        unsigned int m = sizeof(n);
+        getsockopt(g_p9_socket_fds[channel][0],SOL_SOCKET,SO_RCVBUF,(void *)&n, &m);
+        fprintf(stderr, "Socket size %d\n", n);
+    }
+    */
+
     // TODO: there could be one thread with poll
     //for every socket pair we need one reader
     struct tunnel_from_p9_params* params = calloc(1, sizeof(struct tunnel_from_p9_params));
