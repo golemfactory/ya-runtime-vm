@@ -412,7 +412,7 @@ fn offer() -> anyhow::Result<Option<serde_json::Value>> {
             "golem.inf.cpu.brand": cpu.model.brand,
             "golem.inf.cpu.model": model,
             "golem.inf.cpu.capabilities": cpu.capabilities,
-            "golem.runtime.capabilities": ["inet", "vpn"]
+            "golem.runtime.capabilities": ["inet", "vpn", "manifest-support"]
         },
         "constraints": ""
     })))
