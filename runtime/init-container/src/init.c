@@ -50,7 +50,7 @@
 #define MODE_RW_UGO (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)
 #define OUTPUT_PATH_PREFIX "/var/tmp/guest_agent_private/fds"
 
-#define MTU_VPN 1400
+#define MTU_VPN 1220
 #define MTU_INET 65521
 
 
