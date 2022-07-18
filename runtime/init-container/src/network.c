@@ -173,9 +173,6 @@ int net_if_addr(const char *name, const char *ip, const char *mask) {
         goto end;
     }
 
-    if ((ret = net_if_mtu(ifr.ifr_name, MTU)) < 0) {
-        goto end;
-    }
 end:
     close(fd);
     return ret;

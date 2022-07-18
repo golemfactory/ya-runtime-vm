@@ -26,7 +26,7 @@ use ya_runtime_sdk::runtime_api::server;
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
 
 const IDENTIFICATION: AtomicU16 = AtomicU16::new(42);
-const MTU: usize = 65535;
+const MTU: usize = 1400;
 const PREFIX_LEN: usize = 2;
 
 struct Notifications {
@@ -178,7 +178,7 @@ async fn handle_net<P: AsRef<Path>>(path: P) -> anyhow::Result<()> {
     let (mut read, mut write) = tokio::io::split(stream);
 
     let fut = async move {
-        let mut buf: [u8; MTU] = [0u8; MTU];
+        let mut buf: [u8; MTU + 32] = [0u8; MTU + 32];
         loop {
             let count = match read.read(&mut buf).await {
                 Err(_) | Ok(0) => break,

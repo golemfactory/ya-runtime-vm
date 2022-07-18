@@ -50,6 +50,9 @@
 #define MODE_RW_UGO (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)
 #define OUTPUT_PATH_PREFIX "/var/tmp/guest_agent_private/fds"
 
+#define MTU_VPN 1220
+#define MTU_INET 65521
+
 
 struct new_process_args {
     char* bin;
@@ -405,16 +408,19 @@ static void setup_network(void) {
     CHECK(net_if_addr(g_lo_name, "127.0.0.1", "255.255.255.0"));
 
     g_net_tap_fd = CHECK(net_create_tap(g_net_tap_name));
-    CHECK(net_if_mtu(g_net_tap_name, MTU));
+    CHECK(net_if_mtu(g_net_tap_name, MTU_VPN));
 
     g_inet_tap_fd = CHECK(net_create_tap(g_inet_tap_name));
-    CHECK(net_if_mtu(g_inet_tap_name, MTU));
+    CHECK(net_if_mtu(g_inet_tap_name, MTU_INET));
 
-    CHECK(fwd_start(g_net_tap_fd, g_net_fd, MTU, false, true));
-    CHECK(fwd_start(g_net_fd, g_net_tap_fd, MTU, true, false));
+    int vpn_sz = 4 * (MTU_VPN + 14);
+    int inet_sz = MTU_INET + 14;
 
-    CHECK(fwd_start(g_inet_tap_fd, g_inet_fd, MTU, false, true));
-    CHECK(fwd_start(g_inet_fd, g_inet_tap_fd, MTU, true, false));
+    CHECK(fwd_start(g_net_tap_fd, g_net_fd, vpn_sz, false, true));
+    CHECK(fwd_start(g_net_fd, g_net_tap_fd, vpn_sz, true, false));
+
+    CHECK(fwd_start(g_inet_tap_fd, g_inet_fd, inet_sz, false, true));
+    CHECK(fwd_start(g_inet_fd, g_inet_tap_fd, inet_sz, true, false));
 }
 
 static void stop_network(void) {
