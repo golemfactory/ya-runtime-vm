@@ -2782,7 +2782,7 @@ dependencies = [
 
 [[package]]
 name = "ya-runtime-vm"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "anyhow",
  "bollard-stubs",
