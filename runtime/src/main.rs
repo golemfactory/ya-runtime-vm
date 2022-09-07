@@ -40,11 +40,11 @@ const DEFAULT_CWD: &'static str = "/";
 pub struct Cli {
     /// GVMI image path
     #[structopt(short, long, required_ifs(
-    &[
-    ("command", "deploy"),
-    ("command", "start"),
-    ("command", "run")
-    ])
+        &[
+            ("command", "deploy"),
+            ("command", "start"),
+            ("command", "run")
+        ])
     )]
     task_package: Option<PathBuf>,
     /// Number of logical CPU cores
@@ -228,6 +228,7 @@ async fn start(
     let manager_sock = temp_dir.join(format!("{}.sock", uid));
     let net_sock = temp_dir.join(format!("{}_net.sock", uid));
     let inet_sock = temp_dir.join(format!("{}_inet.sock", uid));
+    let test_sock = temp_dir.join(format!("{}_test.sock", uid));
 
     let mut data = runtime_data.lock().await;
     let deployment = data.deployment().expect("Missing deployment data");
@@ -264,12 +265,16 @@ async fn start(
         chardev("net_cdev", &net_sock).as_str(),
         "-chardev",
         chardev("inet_cdev", &inet_sock).as_str(),
+        "-chardev",
+        chardev("test_cdev", &test_sock).as_str(),
         "-device",
         "virtserialport,chardev=manager_cdev,name=manager_port",
         "-device",
         "virtserialport,chardev=net_cdev,name=net_port",
         "-device",
         "virtserialport,chardev=inet_cdev,name=inet_port",
+        "-device",
+        "virtserialport,chardev=test_cdev,name=test_port",
         "-drive",
         format!(
             "file={},cache=unsafe,readonly=on,format=raw,if=virtio",
