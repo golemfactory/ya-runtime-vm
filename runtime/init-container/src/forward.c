@@ -11,6 +11,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/uio.h>
 #include <threads.h>
 #include <unistd.h>
 
@@ -155,6 +156,48 @@ int write_fd(
     return 0;
 }
 
+int writev_fd(
+    struct io_uring *ring,
+    int fd,
+    const struct iovec *iovecs,
+    uint16_t nr_vecs
+) {
+    struct io_uring_sqe *sqe;
+    struct io_uring_cqe *cqe;
+
+    int ret = 0;
+    int wc = 0;
+    size_t count = 0;
+    size_t wo = 0;
+
+    for (size_t i = 0; i < nr_vecs; ++i) {
+        count = iovecs[i].iov_len;
+    }
+
+    while (working && wo < count) {
+        if (!(sqe = io_uring_get_sqe(ring))) {
+            return -1;
+        }
+
+        io_uring_prep_writev(sqe, fd, iovecs, nr_vecs, wo);
+        sqe->flags |= IOSQE_FIXED_FILE;
+
+        io_uring_submit(ring);
+        if ((ret = io_uring_wait_cqe(ring, &cqe)) < 0) {
+            return ret;
+        }
+
+        wc = cqe->res;
+        io_uring_cqe_seen(ring, cqe);
+        if (wc < 0) {
+            return -2;
+        }
+        wo += wc;
+    }
+
+    return 0;
+}
+
 
 int fwd(void *data) {
     struct io_uring ring;
@@ -194,12 +237,20 @@ int fwd(void *data) {
         sz.i = ret;
 
         if (args->write_hdr) {
-            if ((ret = write_fd(&ring, wfd, sz.b, 2)) < 0) {
+            struct iovec iovecs[] = {
+                { .iov_base = &sz.b, .iov_len = sizeof(sz.i) },
+                { .iov_base = buf, .iov_len = (size_t) sz.i },
+            };
+            if ((ret = writev_fd(&ring,
+                                 wfd,
+                                 (struct iovec*) &iovecs,
+                                 sizeof(iovecs) / sizeof(struct iovec))) < 0) {
                 goto end;
             }
-        }
-        if ((ret = write_fd(&ring, wfd, buf, sz.i)) < 0) {
-            goto end;
+        } else {
+            if ((ret = write_fd(&ring, wfd, buf, sz.i)) < 0) {
+                goto end;
+            }
         }
     }
 
