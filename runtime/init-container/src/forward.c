@@ -19,10 +19,6 @@
 #define QUEUE_DEPTH         8
 
 static int working = true;
-struct timespec sleep_tsc = {
-    .tv_sec = 0,
-    .tv_nsec = 500 * 1000 * 1000
-};
 
 struct fwd_args {
     int *fds;
@@ -102,7 +98,7 @@ int read_fd(
         io_uring_prep_read(sqe, fd, dst + ro, count - ro, 0);
         sqe->flags |= IOSQE_FIXED_FILE;
 
-        io_uring_submit(ring);
+        io_uring_submit_and_wait(ring, 1);
         if ((ret = io_uring_wait_cqe(ring, &cqe)) < 0) {
             return ret;
         }
@@ -110,7 +106,6 @@ int read_fd(
         rc = cqe->res;
         io_uring_cqe_seen(ring, cqe);
         if (rc <= 0) {
-            thrd_sleep(&sleep_tsc, 0);
             continue;
         }
         ro += rc;
