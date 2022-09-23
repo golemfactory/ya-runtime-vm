@@ -50,6 +50,8 @@
 #define MODE_RW_UGO (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)
 #define OUTPUT_PATH_PREFIX "/var/tmp/guest_agent_private/fds"
 
+#define NET_MEM_DEFAULT 1048576
+#define NET_MEM_MAX 2097152
 #define MTU_VPN 1220
 #define MTU_INET 65521
 
@@ -383,6 +385,19 @@ static int set_network_ns(char *entries[], int n) {
     return 0;
 }
 
+int write_sys(char *path, size_t value) {
+    FILE *f;
+    if ((f = fopen(path, "w")) == 0) {
+        return -1;
+    }
+
+    fprintf(f, "%ld", value);
+    fflush(f);
+    fclose(f);
+
+    return 0;
+}
+
 static void setup_network(void) {
     char *hosts[][2] = {
         {"127.0.0.1",   "localhost"},
@@ -396,6 +411,11 @@ static void setup_network(void) {
         "1.1.1.1",
         "8.8.8.8",
     };
+
+    CHECK(write_sys("/proc/sys/net/core/rmem_default", NET_MEM_DEFAULT));
+    CHECK(write_sys("/proc/sys/net/core/rmem_max", NET_MEM_MAX));
+    CHECK(write_sys("/proc/sys/net/core/wmem_default", NET_MEM_DEFAULT));
+    CHECK(write_sys("/proc/sys/net/core/wmem_max", NET_MEM_MAX));
 
     strcpy(g_lo_name, "lo");
     strcpy(g_net_tap_name, "vpn%d");
