@@ -1,0 +1,16 @@
+name: Add New Issues To Core Team Project
+
+on:
+  issues:
+    types:
+      - opened
+
+jobs:
+  add-to-project:
+    name: Add issue to project
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/add-to-project@v0.1.0
+      with:
+        project-url: https://github.com/orgs/golemfactory/projects/30
+        github-token: ${{ secrets.CORE_BOARD_ACTIONS_TOKEN }}
