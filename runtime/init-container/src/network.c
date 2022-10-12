@@ -219,12 +219,54 @@ int net_if_addr6(const char *name, const char *ip6) {
     if ((ret = ioctl(fd, SIOCSIFFLAGS, &ifr)) < 0) {
         goto end;
     }
-
-    if ((ret = net_if_mtu(ifr.ifr_name, MTU)) < 0) {
-        goto end;
-    }
 end:
     close(fd);
+    return ret;
+}
+
+int net_if_addr_to_hw_addr(const char *ip, char *mac) {
+    struct ifreq ifr;
+    int ret = 0;
+
+    struct sockaddr_in* sa = (struct sockaddr_in*) &ifr.ifr_addr;
+    sa->sin_family = AF_INET;
+
+    if ((ret = inet_pton(AF_INET, ip, &sa->sin_addr)) < 0) {
+        goto end;
+    }
+
+    char *p = (char *)(void *) &sa->sin_addr;
+
+    mac[0] = 0x90;
+    mac[1] = 0x13;
+    mac[2] = p[0];
+    mac[3] = p[1];
+    mac[4] = p[2];
+    mac[5] = p[3];
+
+end:
+    return ret;
+}
+
+
+int net_if_addr6_to_hw_addr(const char *ip, char *mac) {
+    struct ifreq6_stub ifr6;
+    int ret = 0;
+
+    if ((ret = inet_pton(AF_INET6, ip, (void *) &ifr6.addr)) < 0) {
+        goto end;
+    }
+
+    char *p = ((char *)(void *) &ifr6.addr) + 12;
+
+    mac[0] = 0x90;
+    mac[1] = 0x13;
+    mac[2] = p[0];
+    mac[3] = p[1];
+    mac[4] = p[2];
+    mac[5] = p[3];
+
+end:
     return ret;
 }
 

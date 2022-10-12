@@ -24,7 +24,6 @@
 
 #include "communication.h"
 #include "cyclic_buffer.h"
-#include "forward.h"
 #include "network.h"
 #include "process_bookkeeping.h"
 #include "proto.h"
@@ -44,12 +43,15 @@
     }
 
 #define VPORT_CMD "/dev/vport0p1"
-#define VPORT_NET "/dev/vport0p2"
-#define VPORT_INET "/dev/vport0p3"
+
+#define DEV_VPN "eth0"
+#define DEV_INET "eth1"
 
 #define MODE_RW_UGO (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)
 #define OUTPUT_PATH_PREFIX "/var/tmp/guest_agent_private/fds"
 
+#define NET_MEM_DEFAULT 1048576
+#define NET_MEM_MAX 2097152
 #define MTU_VPN 1220
 #define MTU_INET 65521
 
@@ -83,14 +85,8 @@ extern char** environ;
 static int g_cmds_fd = -1;
 static int g_sig_fd = -1;
 static int g_epoll_fd = -1;
-static int g_net_fd = -1;
-static int g_net_tap_fd = -1;
-static int g_inet_fd = -1;
-static int g_inet_tap_fd = -1;
 
 static char g_lo_name[16];
-static char g_net_tap_name[16];
-static char g_inet_tap_name[16];
 
 static struct process_desc* g_entrypoint_desc = NULL;
 
@@ -98,8 +94,6 @@ static noreturn void die(void) {
     sync();
     (void)close(g_epoll_fd);
     (void)close(g_sig_fd);
-    (void)close(g_inet_fd);
-    (void)close(g_net_fd);
     (void)close(g_cmds_fd);
 
     while (1) {
@@ -383,6 +377,19 @@ static int set_network_ns(char *entries[], int n) {
     return 0;
 }
 
+int write_sys(char *path, size_t value) {
+    FILE *f;
+    if ((f = fopen(path, "w")) == 0) {
+        return -1;
+    }
+
+    fprintf(f, "%ld", value);
+    fflush(f);
+    fclose(f);
+
+    return 0;
+}
+
 static void setup_network(void) {
     char *hosts[][2] = {
         {"127.0.0.1",   "localhost"},
@@ -398,8 +405,6 @@ static void setup_network(void) {
     };
 
     strcpy(g_lo_name, "lo");
-    strcpy(g_net_tap_name, "vpn%d");
-    strcpy(g_inet_tap_name, "inet%d");
 
     CHECK(add_network_hosts(hosts, sizeof(hosts) / sizeof(*hosts)));
     CHECK(set_network_ns(nameservers, sizeof(nameservers) / sizeof(*nameservers)));
@@ -407,24 +412,13 @@ static void setup_network(void) {
     CHECK(net_create_lo(g_lo_name));
     CHECK(net_if_addr(g_lo_name, "127.0.0.1", "255.255.255.0"));
 
-    g_net_tap_fd = CHECK(net_create_tap(g_net_tap_name));
-    CHECK(net_if_mtu(g_net_tap_name, MTU_VPN));
+    net_if_mtu(DEV_VPN, MTU_VPN);
+    net_if_mtu(DEV_INET, MTU_INET);
 
-    g_inet_tap_fd = CHECK(net_create_tap(g_inet_tap_name));
-    CHECK(net_if_mtu(g_inet_tap_name, MTU_INET));
-
-    int vpn_sz = 4 * (MTU_VPN + 14);
-    int inet_sz = MTU_INET + 14;
-
-    CHECK(fwd_start(g_net_tap_fd, g_net_fd, vpn_sz, false, true));
-    CHECK(fwd_start(g_net_fd, g_net_tap_fd, vpn_sz, true, false));
-
-    CHECK(fwd_start(g_inet_tap_fd, g_inet_fd, inet_sz, false, true));
-    CHECK(fwd_start(g_inet_fd, g_inet_tap_fd, inet_sz, true, false));
-}
-
-static void stop_network(void) {
-    fwd_stop();
+    CHECK(write_sys("/proc/sys/net/core/rmem_default", NET_MEM_DEFAULT));
+    CHECK(write_sys("/proc/sys/net/core/rmem_max", NET_MEM_MAX));
+    CHECK(write_sys("/proc/sys/net/core/wmem_default", NET_MEM_DEFAULT));
+    CHECK(write_sys("/proc/sys/net/core/wmem_max", NET_MEM_MAX));
 }
 
 static void send_response_hdr(msg_id_t msg_id, enum GUEST_MSG_TYPE type) {
@@ -1024,7 +1018,8 @@ static uint32_t do_mount(const char* tag, char* path) {
     if (create_dir_path(path) < 0) {
         return errno;
     }
-    if (mount(tag, path, "9p", 0, "trans=virtio,version=9p2000.L") < 0) {
+//    if (mount(tag, path, "9p", 0, "trans=virtio,version=9p2000.L,msize=104857600,cache=loose") < 0) {
+    if (mount(tag, path, "9p", 0, "trans=virtio,version=9p2000.L,msize=128000,cache=loose") < 0) {
         return errno;
     }
     return 0;
@@ -1331,10 +1326,10 @@ static void handle_net_ctl(msg_id_t msg_id) {
 
     switch (if_kind) {
         case SUB_MSG_NET_IF_INET:
-            if_name = g_inet_tap_name;
+            if_name = DEV_INET;
             break;
         default:
-            if_name = g_net_tap_name;
+            if_name = DEV_VPN;
     }
 
     if (if_addr) {
@@ -1345,6 +1340,17 @@ static void handle_net_ctl(msg_id_t msg_id) {
                 perror("Error setting IPv6 address");
                 goto out_err;
             }
+
+            char hw_addr[6] = { 0, 0, 0, 0, 0, 0};
+
+            if ((ret = net_if_addr6_to_hw_addr(if_addr, hw_addr)) < 0) {
+                perror("Error setting MAC address");
+                goto out_err;
+            }
+            if ((ret = net_if_hw_addr(if_name, hw_addr)) < 0) {
+                perror("Error setting MAC address");
+                goto out_err;
+            }
         } else {
             if (!mask) {
                 ret = EINVAL;
@@ -1352,6 +1358,17 @@ static void handle_net_ctl(msg_id_t msg_id) {
             }
             if ((ret = net_if_addr(if_name, if_addr, mask)) < 0) {
                 perror("Error setting IPv4 address");
+                goto out_err;
+            }
+
+            char hw_addr[6] = { 0, 0, 0, 0, 0, 0};
+
+            if ((ret = net_if_addr_to_hw_addr(if_addr, hw_addr)) < 0) {
+                perror("Error setting MAC address");
+                goto out_err;
+            }
+            if ((ret = net_if_hw_addr(if_name, hw_addr)) < 0) {
+                perror("Error setting MAC address");
                 goto out_err;
             }
         }
@@ -1583,9 +1600,13 @@ int main(void) {
     CHECK(mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID,
                 "mode=0755,size=2M"));
 
+    load_module("/failover.ko");
     load_module("/virtio.ko");
     load_module("/virtio_ring.ko");
     load_module("/virtio_pci.ko");
+//    load_module("/virtio_mmio.ko");
+    load_module("/net_failover.ko");
+    load_module("/virtio_net.ko");
     load_module("/virtio_console.ko");
     load_module("/rng-core.ko");
     load_module("/virtio-rng.ko");
@@ -1601,8 +1622,6 @@ int main(void) {
     load_module("/9p.ko");
 
     g_cmds_fd = CHECK(open(VPORT_CMD, O_RDWR | O_CLOEXEC));
-    g_net_fd = CHECK(open(VPORT_NET, O_RDWR | O_CLOEXEC));
-    g_inet_fd = CHECK(open(VPORT_INET, O_RDWR | O_CLOEXEC));
 
     CHECK(mkdir("/mnt", S_IRWXU));
     CHECK(mkdir("/mnt/image", S_IRWXU));
@@ -1672,5 +1691,4 @@ int main(void) {
     setup_sigfd();
 
     main_loop();
-    stop_network();
 }
