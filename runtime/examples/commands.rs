@@ -69,7 +69,7 @@ impl server::RuntimeHandler for Events {
                 let died = was_running && !status.running;
                 data.status.replace(status);
                 if died {
-                    data.died.notify();
+                    data.died.notify_waiters();
                 }
             }
         }
@@ -89,7 +89,7 @@ impl Clone for Events {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let root_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
         .join("..")
         .canonicalize()
@@ -110,8 +110,8 @@ async fn main() -> anyhow::Result<()> {
 
     let mut cmd = Command::new(&runtime_path);
     cmd.env("RUST_LOG", "debug").args(&args).arg("deploy");
-    let child = cmd.spawn()?;
-    child.await?;
+    let mut child = cmd.spawn()?;
+    child.wait().await?;
 
     let mut cmd = Command::new(&runtime_path);
     cmd.env("RUST_LOG", "debug").args(&args).arg("start");

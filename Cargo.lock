@@ -2733,6 +2733,7 @@ dependencies = [
  "anyhow",
  "bollard-stubs",
  "crc 1.8.1",
+ "env_logger",
  "futures",
  "log",
  "pnet",
