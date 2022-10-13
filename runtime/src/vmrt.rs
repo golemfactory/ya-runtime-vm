@@ -18,8 +18,7 @@ use crate::deploy::Deployment;
 use crate::guest_agent_comm::{GuestAgent, Notification};
 
 const DIR_RUNTIME: &'static str = "runtime";
-// const FILE_RUNTIME: &'static str = "vmrt";
-const FILE_RUNTIME: &'static str = "/usr/bin/qemu-system-x86_64";
+const FILE_RUNTIME: &'static str = "vmrt";
 const FILE_VMLINUZ: &'static str = "vmlinuz-virt";
 const FILE_INITRAMFS: &'static str = "initramfs.cpio.gz";
 
@@ -217,7 +216,7 @@ fn set_endpoint_netdev(
     tcp_port: u16,
     cmd: &mut process::Command,
 ) -> anyhow::Result<()> {
-    const COUNTER: AtomicU32 = AtomicU32::new(1);
+    static COUNTER: AtomicU32 = AtomicU32::new(1);
 
     if let Some(endpoint) = endpoint {
         match endpoint {
