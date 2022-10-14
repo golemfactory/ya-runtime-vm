@@ -15,6 +15,7 @@ assets = [
     ["poc/runtime/bios-256k.bin", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
     ["poc/runtime/kvmvapic.bin", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
     ["poc/runtime/linuxboot_dma.bin", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
+    ["poc/runtime/efi-virtio.rom", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
 
     ["init-container/initramfs.cpio.gz", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
     ["init-container/vmlinuz-virt", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
