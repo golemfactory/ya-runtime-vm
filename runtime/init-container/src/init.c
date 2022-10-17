@@ -1018,8 +1018,7 @@ static uint32_t do_mount(const char* tag, char* path) {
     if (create_dir_path(path) < 0) {
         return errno;
     }
-//    if (mount(tag, path, "9p", 0, "trans=virtio,version=9p2000.L,msize=104857600,cache=loose") < 0) {
-    if (mount(tag, path, "9p", 0, "trans=virtio,version=9p2000.L,msize=128000,cache=loose") < 0) {
+    if (mount(tag, path, "9p", 0, "trans=virtio,version=9p2000.L") < 0) {
         return errno;
     }
     return 0;
@@ -1604,7 +1603,6 @@ int main(void) {
     load_module("/virtio.ko");
     load_module("/virtio_ring.ko");
     load_module("/virtio_pci.ko");
-//    load_module("/virtio_mmio.ko");
     load_module("/net_failover.ko");
     load_module("/virtio_net.ko");
     load_module("/virtio_console.ko");
