@@ -23,10 +23,9 @@ UNPACKED_KERNEL := unpacked_kernel
 UNPACKED_HEADERS := unpacked_headers
 SRC_DIR ?= src
 TEST_DIR ?= tests
-LIBURING_DIR ?= external/liburing
 
 OBJECTS = $(addprefix $(SRC_DIR)/,init.o communication.o process_bookkeeping.o cyclic_buffer.o)
-OBJECTS_EXT = $(addprefix $(SRC_DIR)/,network.o forward.o)
+OBJECTS_EXT = $(addprefix $(SRC_DIR)/,network.o)
 
 # Below are the steps performed by this Makefile:
 # - download the kernel && kernel headers apk packages
@@ -36,7 +35,6 @@ OBJECTS_EXT = $(addprefix $(SRC_DIR)/,network.o forward.o)
 # - create a build directory for initramfs
 # - copy required kernel modules from the extracted kernel package to initramfs build directory
 # - bundle initramfs.cpio.gz
-# - build liburing
 # - compile init (https://en.wikipedia.org/wiki/Init) from sources
 
 .DEFAULT_GOAL = all
@@ -48,19 +46,11 @@ $(SRC_DIR)/network.o: $(SRC_DIR)/network.c
 	    -I"$(CURDIR)/$(UNPACKED_HEADERS)/usr/include" \
 	    -o $@ -c $^
 
-$(SRC_DIR)/forward.o: $(SRC_DIR)/forward.c
-	$(QUIET_CC)$(CC) -O2 -Wall -Wextra -Werror -fPIE -pie \
-	    -I"$(CURDIR)/$(UNPACKED_HEADERS)/usr/include/" \
-        -I"$(LIBURING_DIR)/src/include/" \
-        -Iinclude/ \
-        -lstdthreads \
-	    -o $@ -c $^
-
 %.o: %.c
 	$(QUIET_CC)$(CC) $(CFLAGS) -o $@ -c $^
 
-init: $(UNPACKED_HEADERS) liburing $(OBJECTS) $(OBJECTS_EXT)
-	$(QUIET_CC)$(CC) $(CFLAGS) -static -o $@ $(wordlist 3, $(words $^), $^) "$(CURDIR)/$(LIBURING_DIR)/src/liburing.a"
+init: $(UNPACKED_HEADERS) $(OBJECTS) $(OBJECTS_EXT)
+	$(QUIET_CC)$(CC) $(CFLAGS) -static -o $@ $(wordlist 2, $(words $^), $^)
 	@# default musl libs on some distros have debug symbols, lets strip them (and everything else)
 	strip $@
 
@@ -80,11 +70,6 @@ $(UNPACKED_KERNEL):
 	tar --warning=no-unknown-keyword -C $(UNPACKED_KERNEL) -vxzf kernel >/dev/null
 	$(RM) kernel
 
-liburing: $(UNPACKED_HEADERS)
-	@echo build liburing
-	(cd $(LIBURING_DIR) && CC=$(CC) CXX=$(CXX) ./configure > /dev/null)
-	$(MAKE) -e CC=$(CC) -e CFLAGS=-I"$(CURDIR)/unpacked_headers/usr/include" -C "$(LIBURING_DIR)/src" all
-
 vmlinuz-virt: $(UNPACKED_KERNEL)
 	cp $(UNPACKED_KERNEL)/boot/vmlinuz-virt .
 
@@ -100,12 +85,15 @@ initramfs.cpio.gz: init $(UNPACKED_KERNEL)
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/drivers/char/virtio_console.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/drivers/block/virtio_blk.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/drivers/net/tun.ko initramfs
+	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/drivers/net/net_failover.ko initramfs
+	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/drivers/net/virtio_net.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/9p/9p.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/squashfs/squashfs.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/overlayfs/overlay.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/fscache/fscache.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/9p/9pnet.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/9p/9pnet_virtio.ko initramfs
+	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/core/failover.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/ipv6/ipv6.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/packet/af_packet.ko initramfs
 	cd initramfs && find . | cpio --quiet -o -H newc -R 0:0 | gzip -9 > ../$@
@@ -127,12 +115,8 @@ test: $(TESTS)
 clean:
 	$(RM) init $(SRC_DIR)/*.o $(TEST_DIR)/*.o *.o $(TESTS)
 	$(RM) vmlinuz-virt initramfs.cpio.gz
-	$(MAKE) -s -C external/liburing/src clean
-	$(MAKE) -s -C external/liburing clean
 
 .PHONY: distclean
 distclean:
 	$(RM) -rf $(UNPACKED_KERNEL) $(UNPACKED_HEADERS)
-	$(MAKE) -s -C external/liburing/src clean
-	$(MAKE) -s -C external/liburing clean
 	git submodule foreach git reset --hard

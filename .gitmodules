@@ -1,3 +1,0 @@
-[submodule "runtime/init-container/external/liburing"]
-	path = runtime/init-container/external/liburing
-	url = https://github.com/axboe/liburing

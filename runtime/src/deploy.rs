@@ -1,15 +1,17 @@
-use bollard_stubs::models::ContainerConfig;
-use crc::crc32;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::path::PathBuf;
+
+use bollard_stubs::models::ContainerConfig;
+use crc::crc32;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 use tokio_byteorder::LittleEndian;
 use uuid::Uuid;
+
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Deployment {
     #[serde(default)]
     pub cpu_cores: usize,

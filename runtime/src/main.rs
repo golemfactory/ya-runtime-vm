@@ -1,16 +1,18 @@
+use std::convert::TryFrom;
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+
 use futures::future::FutureExt;
 use futures::lock::Mutex;
 use futures::TryFutureExt;
-use std::path::{Component, Path, PathBuf};
-use std::process::Stdio;
-use std::sync::Arc;
 use structopt::StructOpt;
 use tokio::{
     fs,
-    io::{self, AsyncBufReadExt, AsyncWriteExt},
-    process, spawn,
+    io::{self, AsyncWriteExt},
 };
+use url::Url;
 
+use ya_runtime_sdk::runtime_api::deploy::ContainerEndpoint;
 use ya_runtime_sdk::{
     runtime_api::{
         deploy::{DeployResult, StartMode},
@@ -18,19 +20,16 @@ use ya_runtime_sdk::{
     },
     serialize,
     server::Server,
-    Context, EmptyResponse, EndpointResponse, EventEmitter, OutputResponse, ProcessId,
-    ProcessIdResponse, RuntimeMode,
+    Context, EmptyResponse, EndpointResponse, Error, ErrorExt, EventEmitter, OutputResponse,
+    ProcessId, ProcessIdResponse, RuntimeMode,
 };
 use ya_runtime_vm::{
     cpu::CpuInfo,
     deploy::Deployment,
-    guest_agent_comm::{GuestAgent, Notification, RedirectFdType, RemoteCommandResult},
+    guest_agent_comm::{RedirectFdType, RemoteCommandResult},
+    vmrt::{runtime_dir, start_vmrt, RuntimeData},
 };
 
-const DIR_RUNTIME: &'static str = "runtime";
-const FILE_RUNTIME: &'static str = "vmrt";
-const FILE_VMLINUZ: &'static str = "vmlinuz-virt";
-const FILE_INITRAMFS: &'static str = "initramfs.cpio.gz";
 const FILE_TEST_IMAGE: &'static str = "self-test.gvmi";
 const FILE_DEPLOYMENT: &'static str = "deployment.json";
 const DEFAULT_CWD: &'static str = "/";
@@ -40,11 +39,11 @@ const DEFAULT_CWD: &'static str = "/";
 pub struct Cli {
     /// GVMI image path
     #[structopt(short, long, required_ifs(
-    &[
-    ("command", "deploy"),
-    ("command", "start"),
-    ("command", "run")
-    ])
+        &[
+            ("command", "deploy"),
+            ("command", "start"),
+            ("command", "run")
+        ])
     )]
     task_package: Option<PathBuf>,
     /// Number of logical CPU cores
@@ -57,47 +56,18 @@ pub struct Cli {
     #[allow(unused)]
     #[structopt(long, default_value = "0.25")]
     storage_gib: f64,
+    /// VPN endpoint address
+    #[structopt(long)]
+    vpn_endpoint: Option<Url>,
+    /// INET endpoint address
+    #[structopt(long)]
+    inet_endpoint: Option<Url>,
 }
 
 #[derive(ya_runtime_sdk::RuntimeDef, Default)]
 #[cli(Cli)]
 struct Runtime {
     data: Arc<Mutex<RuntimeData>>,
-}
-
-#[derive(Clone)]
-#[non_exhaustive]
-enum NetworkEndpoint {
-    Socket(PathBuf),
-}
-
-#[derive(Default)]
-struct RuntimeData {
-    runtime: Option<process::Child>,
-    vpn: Option<NetworkEndpoint>,
-    inet: Option<NetworkEndpoint>,
-    deployment: Option<Deployment>,
-    ga: Option<Arc<Mutex<GuestAgent>>>,
-}
-
-impl RuntimeData {
-    fn runtime(&mut self) -> anyhow::Result<process::Child> {
-        self.runtime
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("Runtime process not available"))
-    }
-
-    fn deployment(&self) -> anyhow::Result<&Deployment> {
-        self.deployment
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Runtime not deployed"))
-    }
-
-    fn ga(&self) -> anyhow::Result<Arc<Mutex<GuestAgent>>> {
-        self.ga
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("Runtime not started"))
-    }
 }
 
 impl ya_runtime_sdk::Runtime for Runtime {
@@ -112,20 +82,41 @@ impl ya_runtime_sdk::Runtime for Runtime {
         let emitter = ctx
             .emitter
             .clone()
-            .expect("Service is not running in Server mode");
-        let workdir = ctx.cli.workdir.clone().expect("Workdir not provided");
-        let data = self.data.clone();
+            .expect("Service not running in Server mode");
 
+        let workdir = ctx.cli.workdir.clone().expect("Workdir not provided");
+
+        let deployment_file = std::fs::File::open(workdir.join(FILE_DEPLOYMENT))
+            .expect("Unable to open the deployment file");
+        let deployment: Deployment = serialize::json::from_reader(deployment_file)
+            .expect("Failed to read the deployment file");
+
+        log::debug!("Deployment: {deployment:?}");
+
+        let vpn_endpoint = ctx.cli.runtime.vpn_endpoint.clone();
+        let inet_endpoint = ctx.cli.runtime.inet_endpoint.clone();
+
+        log::info!("VPN endpoint: {:?}", vpn_endpoint);
+        log::info!("INET endpoint: {:?}", inet_endpoint);
+
+        let data = self.data.clone();
         async move {
-            let deployment_file = std::fs::File::open(workdir.join(FILE_DEPLOYMENT))
-                .expect("Unable to open the deployment file");
-            let deployment: Deployment = serialize::json::from_reader(deployment_file)
-                .expect("Failed to read the deployment file");
             {
                 let mut data = data.lock().await;
+
+                if let Some(vpn_endpoint) = vpn_endpoint {
+                    let endpoint =
+                        ContainerEndpoint::try_from(vpn_endpoint).map_err(Error::from)?;
+                    data.vpn.replace(endpoint);
+                }
+                if let Some(inet_endpoint) = inet_endpoint {
+                    let endpoint =
+                        ContainerEndpoint::try_from(inet_endpoint).map_err(Error::from)?;
+                    data.inet.replace(endpoint);
+                }
+
                 data.deployment.replace(deployment);
             }
-
             start(workdir, data, emitter).await
         }
         .map_err(Into::into)
@@ -194,7 +185,7 @@ async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<Option<serialize::
         package_path,
     )
     .await
-    .expect("Error reading package metadata");
+    .or_err("Error reading package metadata")?;
 
     for vol in &deployment.volumes {
         fs::create_dir_all(work_dir.join(&vol.name)).await?;
@@ -221,107 +212,7 @@ async fn start(
     runtime_data: Arc<Mutex<RuntimeData>>,
     emitter: EventEmitter,
 ) -> anyhow::Result<Option<serialize::json::Value>> {
-    let runtime_dir = runtime_dir().expect("Unable to resolve current directory");
-    let temp_dir = std::env::temp_dir();
-    let uid = uuid::Uuid::new_v4().to_simple().to_string();
-
-    let manager_sock = temp_dir.join(format!("{}.sock", uid));
-    let net_sock = temp_dir.join(format!("{}_net.sock", uid));
-    let inet_sock = temp_dir.join(format!("{}_inet.sock", uid));
-
-    let mut data = runtime_data.lock().await;
-    let deployment = data.deployment().expect("Missing deployment data");
-
-    let chardev = |n, p: &PathBuf| format!("socket,path={},server,nowait,id={}", p.display(), n);
-    let mut cmd = process::Command::new(runtime_dir.join(FILE_RUNTIME));
-    cmd.current_dir(&runtime_dir);
-    cmd.args(&[
-        "-m",
-        format!("{}M", deployment.mem_mib).as_str(),
-        "-nographic",
-        "-vga",
-        "none",
-        "-kernel",
-        FILE_VMLINUZ,
-        "-initrd",
-        FILE_INITRAMFS,
-        "-net",
-        "none",
-        "-enable-kvm",
-        "-cpu",
-        "host",
-        "-smp",
-        deployment.cpu_cores.to_string().as_str(),
-        "-append",
-        "console=ttyS0 panic=1",
-        "-device",
-        "virtio-serial",
-        "-device",
-        "virtio-rng-pci",
-        "-chardev",
-        chardev("manager_cdev", &manager_sock).as_str(),
-        "-chardev",
-        chardev("net_cdev", &net_sock).as_str(),
-        "-chardev",
-        chardev("inet_cdev", &inet_sock).as_str(),
-        "-device",
-        "virtserialport,chardev=manager_cdev,name=manager_port",
-        "-device",
-        "virtserialport,chardev=net_cdev,name=net_port",
-        "-device",
-        "virtserialport,chardev=inet_cdev,name=inet_port",
-        "-drive",
-        format!(
-            "file={},cache=unsafe,readonly=on,format=raw,if=virtio",
-            deployment.task_package.display()
-        )
-        .as_str(),
-        "-no-reboot",
-    ]);
-
-    for (idx, volume) in deployment.volumes.iter().enumerate() {
-        cmd.arg("-virtfs");
-        cmd.arg(format!(
-            "local,id={tag},path={path},security_model=none,mount_tag={tag}",
-            tag = format!("mnt{}", idx),
-            path = work_dir.join(&volume.name).to_string_lossy(),
-        ));
-    }
-
-    let mut runtime = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
-
-    let stdout = runtime.stdout.take().unwrap();
-    spawn(reader_to_log(stdout));
-
-    let ga = GuestAgent::connected(manager_sock, 10, move |notification, ga| {
-        let mut emitter = emitter.clone();
-        async move {
-            let status = notification_into_status(notification, ga).await;
-            emitter.emit(status).await;
-        }
-        .boxed()
-    })
-    .await?;
-
-    {
-        let mut ga = ga.lock().await;
-        for (idx, volume) in deployment.volumes.iter().enumerate() {
-            ga.mount(format!("mnt{}", idx).as_str(), volume.path.as_str())
-                .await?
-                .expect("Mount failed");
-        }
-    }
-
-    data.runtime.replace(runtime);
-    data.vpn.replace(NetworkEndpoint::Socket(net_sock));
-    data.inet.replace(NetworkEndpoint::Socket(inet_sock));
-    data.ga.replace(ga);
-
-    Ok(None)
+    start_vmrt(work_dir, runtime_data, emitter).await
 }
 
 async fn run_command(
@@ -387,7 +278,7 @@ async fn kill_command(
 async fn stop(runtime_data: Arc<Mutex<RuntimeData>>) -> Result<(), server::ErrorResponse> {
     log::debug!("got shutdown");
     let mut data = runtime_data.lock().await;
-    let runtime = data.runtime().unwrap();
+    let mut runtime = data.runtime().unwrap();
 
     {
         let mutex = data.ga().unwrap();
@@ -395,7 +286,10 @@ async fn stop(runtime_data: Arc<Mutex<RuntimeData>>) -> Result<(), server::Error
         convert_result(ga.quit().await, "Sending quit")?;
     }
 
-    runtime.await.expect("Waiting for runtime stop failed");
+    runtime
+        .wait()
+        .await
+        .expect("Waiting for runtime stop failed");
     Ok(())
 }
 
@@ -466,7 +360,7 @@ async fn test() -> anyhow::Result<()> {
 async fn join_network(
     runtime_data: Arc<Mutex<RuntimeData>>,
     join: server::CreateNetwork,
-) -> Result<String, server::ErrorResponse> {
+) -> Result<ContainerEndpoint, server::ErrorResponse> {
     let hosts = join.hosts;
     let networks = join.networks;
     let iface = match server::NetworkInterface::from_i32(join.interface) {
@@ -484,9 +378,7 @@ async fn join_network(
         server::NetworkInterface::Vpn => data.vpn.as_ref(),
         server::NetworkInterface::Inet => data.inet.as_ref(),
     }
-    .map(|network| match network {
-        NetworkEndpoint::Socket(path) => path.display().to_string(),
-    })
+    .cloned()
     .expect("No network endpoint");
 
     let mutex = data.ga().unwrap();
@@ -496,7 +388,7 @@ async fn join_network(
     for net in networks {
         let (net_addr, net_mask) = match iface {
             server::NetworkInterface::Vpn => (net.addr, net.mask.clone()),
-            server::NetworkInterface::Inet => (String::new(), String::new()),
+            server::NetworkInterface::Inet => Default::default(),
         };
 
         convert_result(
@@ -545,85 +437,7 @@ fn convert_result<T>(
     }
 }
 
-async fn notification_into_status(
-    notification: Notification,
-    ga: Arc<Mutex<GuestAgent>>,
-) -> server::ProcessStatus {
-    match notification {
-        Notification::OutputAvailable { id, fd } => {
-            log::debug!("Process {} has output available on fd {}", id, fd);
-
-            let output = {
-                let result = {
-                    let mut guard = ga.lock().await;
-                    guard.query_output(id, fd as u8, 0, u64::MAX).await
-                };
-                match result {
-                    Ok(Ok(vec)) => vec,
-                    Ok(Err(e)) => {
-                        log::error!("Remote error while querying output: {:?}", e);
-                        Vec::new()
-                    }
-                    Err(e) => {
-                        log::error!("Error querying output: {:?}", e);
-                        Vec::new()
-                    }
-                }
-            };
-            let (stdout, stderr) = match fd {
-                1 => (output, Vec::new()),
-                _ => (Vec::new(), output),
-            };
-
-            server::ProcessStatus {
-                pid: id,
-                running: true,
-                return_code: 0,
-                stdout,
-                stderr,
-            }
-        }
-        Notification::ProcessDied { id, reason } => {
-            log::debug!("Process {} died with {:?}", id, reason);
-
-            // TODO: reason._type ?
-            server::ProcessStatus {
-                pid: id,
-                running: false,
-                return_code: reason.status as i32,
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            }
-        }
-    }
-}
-
-async fn reader_to_log<T: io::AsyncRead + Unpin>(reader: T) {
-    let mut reader = io::BufReader::new(reader);
-    let mut buf = Vec::new();
-    loop {
-        match reader.read_until(b'\n', &mut buf).await {
-            Ok(0) => break,
-            Ok(_) => {
-                let bytes = strip_ansi_escapes::strip(&buf).unwrap();
-                log::debug!("VM: {}", String::from_utf8_lossy(&bytes).trim_end());
-                buf.clear();
-            }
-            Err(e) => log::error!("VM output error: {}", e),
-        }
-    }
-}
-
-fn runtime_dir() -> io::Result<PathBuf> {
-    Ok(std::env::current_exe()?
-        .parent()
-        .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?
-        .to_path_buf()
-        .join(DIR_RUNTIME))
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::init();
     ya_runtime_sdk::run::<Runtime>().await
 }
