@@ -27,11 +27,12 @@ HEADERS_SHA256 ?= 0b0f0c30be30ff367f5d1eaee227e919efc4b7f442bc03b3190c6e0d1a1653
 
 UNPACKED_KERNEL := unpacked_kernel
 UNPACKED_HEADERS := unpacked_headers
+LIBURING_SUBMODULE ?= liburing
 SRC_DIR ?= src
 TEST_DIR ?= tests
 
 OBJECTS = $(addprefix $(SRC_DIR)/,init.o communication.o communication_win_p9.o process_bookkeeping.o cyclic_buffer.o)
-OBJECTS_EXT = $(addprefix $(SRC_DIR)/,network.o)
+OBJECTS_EXT = $(addprefix $(SRC_DIR)/,network.o forward.o)
 
 # Below are the steps performed by this Makefile:
 # - download the kernel && kernel headers apk packages
@@ -56,9 +57,9 @@ $(SRC_DIR)/network.o: $(SRC_DIR)/network.c
 %.o: %.c
 	$(QUIET_CC)$(CC) $(CFLAGS) -o $@ -c $^
 
-init: $(UNPACKED_HEADERS) liburing $(OBJECTS) $(OBJECTS_EXT)
+init: $(UNPACKED_HEADERS) uring $(OBJECTS) $(OBJECTS_EXT)
 	@echo "Compile params for init:" $(CC) $(CFLAGS)
-	$(QUIET_CC)$(CC) $(CFLAGS) -static -o $@ $(wordlist 3, $(words $^), $^) "$(CURDIR)/$(LIBURING_DIR)/src/liburing.a"
+	$(QUIET_CC)$(CC) $(CFLAGS) -static -o $@ $(wordlist 3, $(words $^), $^) "$(CURDIR)/$(LIBURING_SUBMODULE)/src/liburing.a"
 	@# default musl libs on some distros have debug symbols, lets strip them (and everything else)
 	strip $@
 
@@ -77,6 +78,10 @@ $(UNPACKED_KERNEL):
 	mkdir $(UNPACKED_KERNEL)
 	tar --warning=no-unknown-keyword -C $(UNPACKED_KERNEL) -vxzf kernel >/dev/null
 	$(RM) kernel
+
+uring: $(UNPACKED_HEADERS)
+	(cd $(LIBURING_SUBMODULE) && CC=$(CC) CXX=$(CXX) ./configure > /dev/null)
+	$(MAKE) -e CC=$(CC) -e CFLAGS=-I"$(CURDIR)/$(UNPACKED_HEADERS)/usr/include" -C "$(LIBURING_SUBMODULE)/src" all
 
 vmlinuz-virt: $(UNPACKED_KERNEL)
 	cp $(UNPACKED_KERNEL)/boot/vmlinuz-virt .
@@ -129,8 +134,10 @@ test: $(TESTS)
 clean:
 	$(RM) init $(SRC_DIR)/*.o $(TEST_DIR)/*.o *.o $(TESTS)
 	$(RM) vmlinuz-virt initramfs.cpio.gz
+	$(MAKE) -s -C $(LIBURING_SUBMODULE) clean
 
 .PHONY: distclean
 distclean:
 	$(RM) -rf $(UNPACKED_KERNEL) $(UNPACKED_HEADERS)
+	$(MAKE) -s -C $(LIBURING_SUBMODULE) clean
 	git submodule foreach git reset --hard
