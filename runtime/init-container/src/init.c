@@ -27,6 +27,7 @@
 #include "network.h"
 #include "process_bookkeeping.h"
 #include "proto.h"
+#include "forward.h"
 
 #define CONTAINER_OF(ptr, type, member) (type*)((char*)(ptr) - offsetof(type, member))
 
@@ -43,6 +44,8 @@
     }
 
 #define VPORT_CMD "/dev/vport0p1"
+#define VPORT_NET "/dev/vport0p2"
+#define VPORT_INET "/dev/vport0p3"
 
 #define DEV_VPN "eth0"
 #define DEV_INET "eth1"
@@ -85,8 +88,14 @@ extern char** environ;
 static int g_cmds_fd = -1;
 static int g_sig_fd = -1;
 static int g_epoll_fd = -1;
+static int g_vpn_fd = -1;
+static int g_vpn_tap_fd = -1;
+static int g_inet_fd = -1;
+static int g_inet_tap_fd = -1;
 
 static char g_lo_name[16];
+static char g_vpn_tap_name[16];
+static char g_inet_tap_name[16];
 
 static struct process_desc* g_entrypoint_desc = NULL;
 
@@ -94,6 +103,8 @@ static noreturn void die(void) {
     sync();
     (void)close(g_epoll_fd);
     (void)close(g_sig_fd);
+    (void)close(g_inet_fd);
+    (void)close(g_vpn_fd);
     (void)close(g_cmds_fd);
 
     while (1) {
@@ -405,6 +416,8 @@ static void setup_network(void) {
     };
 
     strcpy(g_lo_name, "lo");
+    strcpy(g_vpn_tap_name, "vpn%d");
+    strcpy(g_inet_tap_name, "inet%d");
 
     CHECK(add_network_hosts(hosts, sizeof(hosts) / sizeof(*hosts)));
     CHECK(set_network_ns(nameservers, sizeof(nameservers) / sizeof(*nameservers)));
@@ -412,13 +425,41 @@ static void setup_network(void) {
     CHECK(net_create_lo(g_lo_name));
     CHECK(net_if_addr(g_lo_name, "127.0.0.1", "255.255.255.0"));
 
-    net_if_mtu(DEV_VPN, MTU_VPN);
-    net_if_mtu(DEV_INET, MTU_INET);
-
     CHECK(write_sys("/proc/sys/net/core/rmem_default", NET_MEM_DEFAULT));
     CHECK(write_sys("/proc/sys/net/core/rmem_max", NET_MEM_MAX));
     CHECK(write_sys("/proc/sys/net/core/wmem_default", NET_MEM_DEFAULT));
     CHECK(write_sys("/proc/sys/net/core/wmem_max", NET_MEM_MAX));
+
+    // FIXME: VPORT_NET and VPORT_INET are only present when supervised by a legacy ExeUnit
+    if (access(VPORT_NET, F_OK) == 0) {
+        int vpn_sz = 4 * (MTU_VPN + 14);
+
+        g_vpn_fd = CHECK(open(VPORT_NET, O_RDWR | O_CLOEXEC));
+        g_vpn_tap_fd = CHECK(net_create_tap(g_vpn_tap_name));
+
+        CHECK(net_if_mtu(g_vpn_tap_name, MTU_VPN));
+        CHECK(fwd_start(g_vpn_tap_fd, g_vpn_fd, vpn_sz, false, true));
+        CHECK(fwd_start(g_vpn_fd, g_vpn_tap_fd, vpn_sz, true, false));
+    } else {
+        net_if_mtu(DEV_VPN, MTU_VPN);
+    }
+
+    if (access(VPORT_INET, F_OK) == 0) {
+        int inet_sz = MTU_INET + 14;
+
+        g_inet_fd = CHECK(open(VPORT_INET, O_RDWR | O_CLOEXEC));
+        g_inet_tap_fd = CHECK(net_create_tap(g_inet_tap_name));
+
+        CHECK(net_if_mtu(g_inet_tap_name, MTU_INET));
+        CHECK(fwd_start(g_inet_tap_fd, g_inet_fd, inet_sz, false, true));
+        CHECK(fwd_start(g_inet_fd, g_inet_tap_fd, inet_sz, true, false));
+    } else {
+        net_if_mtu(DEV_INET, MTU_INET);
+    }
+}
+
+static void stop_network(void) {
+    fwd_stop();
 }
 
 static void send_response_hdr(msg_id_t msg_id, enum GUEST_MSG_TYPE type) {
@@ -1325,10 +1366,18 @@ static void handle_net_ctl(msg_id_t msg_id) {
 
     switch (if_kind) {
         case SUB_MSG_NET_IF_INET:
-            if_name = DEV_INET;
+            if (g_inet_tap_fd != -1) {
+                if_name = g_inet_tap_name;
+            } else {
+                if_name = DEV_INET;
+            }
             break;
         default:
-            if_name = DEV_VPN;
+            if (g_vpn_tap_fd != -1) {
+                if_name = g_vpn_tap_name;
+            } else {
+                if_name = DEV_VPN;
+            }
     }
 
     if (if_addr) {
@@ -1689,4 +1738,5 @@ int main(void) {
     setup_sigfd();
 
     main_loop();
+    stop_network();
 }

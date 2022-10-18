@@ -1,5 +1,5 @@
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering::Relaxed;
@@ -108,31 +108,26 @@ pub async fn start_vmrt(
         "-no-reboot",
     ]);
 
-    let ipv4 = Ipv4Addr::new(127, 0, 0, 1);
-    let (vpn_udp, inet_udp) =
-        test_udp_port_pair(format!("{ipv4}:0")).or_err("no free UDP ports available")?;
-    let (vpn_tcp, inet_tcp) =
-        test_tcp_port_pair(format!("{ipv4}:0")).or_err("no free TCP ports available")?;
+    let (vpn, inet) =
+    // backward-compatibility mode
+    if vpn_remote.is_none() && inet_remote.is_none() {
+        cmd.args(["-net", "none"]);
 
-    set_endpoint_netdev(
-        "vpn",
-        &mut data.vpn,
-        &vpn_remote,
-        ipv4,
-        vpn_udp,
-        vpn_tcp,
-        &mut cmd,
-    )?;
+        let vpn = configure_chardev_endpoint(&mut cmd, "vpn", &temp_dir, &uid)?;
+        let inet = configure_chardev_endpoint(&mut cmd, "inet", &temp_dir, &uid)?;
+        (vpn, inet)
+    // virtio-net (preferred)
+    } else {
+        let mut pair = SocketPairConf::default();
+        pair.probe().await?;
 
-    set_endpoint_netdev(
-        "inet",
-        &mut data.inet,
-        &inet_remote,
-        ipv4,
-        inet_udp,
-        inet_tcp,
-        &mut cmd,
-    )?;
+        let vpn = configure_netdev_endpoint(&mut cmd, "vpn", &vpn_remote, pair.first)?;
+        let inet = configure_netdev_endpoint(&mut cmd, "inet", &inet_remote, pair.second)?;
+        (vpn, inet)
+    };
+
+    data.vpn.replace(vpn);
+    data.inet.replace(inet);
 
     for (idx, volume) in volumes.iter().enumerate() {
         cmd.arg("-virtfs");
@@ -179,99 +174,124 @@ pub async fn start_vmrt(
     Ok(None)
 }
 
-pub fn runtime_dir() -> io::Result<PathBuf> {
-    Ok(std::env::current_exe()?
-        .parent()
-        .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?
-        .to_path_buf()
-        .join(DIR_RUNTIME))
+#[derive(Copy, Clone, Debug)]
+struct SocketConf {
+    ip: Ipv4Addr,
+    udp: u16,
+    tcp: u16,
 }
 
-// FIXME: TOC/TOU
-fn test_udp_port_pair<A: std::net::ToSocketAddrs>(addr: A) -> Option<(u16, u16)> {
-    let first = std::net::UdpSocket::bind(&addr).ok()?;
-    let second = std::net::UdpSocket::bind(&addr).ok()?;
-    Some((
-        first.local_addr().ok()?.port(),
-        second.local_addr().ok()?.port(),
-    ))
+#[derive(Debug)]
+struct SocketPairConf {
+    first: SocketConf,
+    second: SocketConf,
 }
 
-// FIXME: TOC/TOU
-fn test_tcp_port_pair<A: std::net::ToSocketAddrs>(addr: A) -> Option<(u16, u16)> {
-    let first = std::net::TcpListener::bind(&addr).ok()?;
-    let second = std::net::TcpListener::bind(&addr).ok()?;
-    Some((
-        first.local_addr().ok()?.port(),
-        second.local_addr().ok()?.port(),
-    ))
+impl Default for SocketPairConf {
+    fn default() -> Self {
+        let ip = Ipv4Addr::new(127, 0, 0, 1);
+        Self {
+            first: SocketConf { ip, udp: 0, tcp: 0 },
+            second: SocketConf { ip, udp: 0, tcp: 0 },
+        }
+    }
 }
 
-fn set_endpoint_netdev(
-    id: &str,
-    dst: &mut Option<ContainerEndpoint>,
-    endpoint: &Option<ContainerEndpoint>,
-    ipv4: Ipv4Addr,
-    udp_port: u16,
-    tcp_port: u16,
+impl SocketPairConf {
+    // FIXME: TOC/TOU
+    async fn probe(&mut self) -> anyhow::Result<()> {
+        let first = std::net::UdpSocket::bind(&(self.first.ip, self.first.udp))?;
+        let second = std::net::UdpSocket::bind(&(self.second.ip, self.second.udp))?;
+
+        self.first.udp = first.local_addr()?.port();
+        self.second.udp = second.local_addr()?.port();
+
+        let first = std::net::TcpListener::bind(&(self.first.ip, self.first.tcp))?;
+        let second = std::net::TcpListener::bind(&(self.second.ip, self.second.tcp))?;
+
+        self.first.tcp = first.local_addr()?.port();
+        self.second.tcp = second.local_addr()?.port();
+
+        Ok(())
+    }
+}
+
+fn configure_chardev_endpoint(
     cmd: &mut process::Command,
-) -> anyhow::Result<()> {
+    id: &str,
+    temp_dir: impl AsRef<Path>,
+    uid: &str,
+) -> anyhow::Result<ContainerEndpoint> {
+    let sock = temp_dir.as_ref().join(format!("{}_{}.sock", uid, id));
+
+    cmd.arg("-chardev");
+    cmd.arg(format!(
+        "socket,path={},server,wait=off,id={id}_cdev",
+        sock.display()
+    ));
+
+    cmd.arg("-device");
+    cmd.arg(format!("virtserialport,chardev={id}_cdev,name={id}_port"));
+
+    Ok(ContainerEndpoint::UnixStream(sock))
+}
+
+fn configure_netdev_endpoint(
+    cmd: &mut process::Command,
+    id: &str,
+    endpoint: &Option<ContainerEndpoint>,
+    conf: SocketConf,
+) -> anyhow::Result<ContainerEndpoint> {
     static COUNTER: AtomicU32 = AtomicU32::new(1);
 
-    if let Some(endpoint) = endpoint {
+    let ipv4 = conf.ip;
+    let endpoint = if let Some(endpoint) = endpoint {
         match endpoint {
             ContainerEndpoint::UdpDatagram(remote_addr) => {
-                let port = udp_port;
+                let port = conf.udp;
 
                 cmd.arg("-netdev");
                 cmd.arg(format!(
                     "socket,id={id},udp={remote_addr},localaddr={ipv4}:{port}"
                 ));
 
-                dst.replace(ContainerEndpoint::UdpDatagram(
-                    SocketAddrV4::new(ipv4, port).into(),
-                ));
+                ContainerEndpoint::UdpDatagram(SocketAddrV4::new(ipv4, port).into())
             }
             ContainerEndpoint::TcpStream(remote_addr) => {
                 cmd.arg("-netdev");
                 cmd.arg(format!("socket,id={id},connect={remote_addr}"));
 
-                dst.replace(ContainerEndpoint::TcpStream(*remote_addr));
+                ContainerEndpoint::TcpStream(*remote_addr)
             }
             ContainerEndpoint::TcpListener(_) => {
-                let port = tcp_port;
+                let port = conf.tcp;
 
                 cmd.arg("-netdev");
                 cmd.arg(format!("socket,id={id},listen={ipv4}:{port}"));
 
-                dst.replace(ContainerEndpoint::TcpStream(
-                    SocketAddrV4::new(ipv4, port).into(),
-                ));
+                ContainerEndpoint::TcpStream(SocketAddrV4::new(ipv4, port).into())
             }
             _ => return Err(anyhow::anyhow!("Unsupported remote VPN VM endpoint")),
         }
     } else {
-        let port = tcp_port;
+        let port = conf.tcp;
 
         cmd.arg("-netdev");
         cmd.arg(format!("socket,id={id},listen={ipv4}:{port}"));
 
-        dst.replace(ContainerEndpoint::TcpListener(
-            SocketAddrV4::new(ipv4, port).into(),
-        ));
-    }
+        ContainerEndpoint::TcpListener(SocketAddrV4::new(ipv4, port).into())
+    };
 
     let counter = COUNTER.fetch_add(1, Relaxed);
     let bytes = counter.to_be_bytes();
-    let writer = HexWriter(&bytes);
 
     cmd.arg("-device");
     cmd.arg(format!(
         "virtio-net-pci,netdev={id},mac=90:13:{:0x}",
-        writer,
+        HexWriter(&bytes),
     ));
 
-    Ok(())
+    Ok(endpoint)
 }
 
 struct HexWriter<'a>(&'a [u8]);
@@ -288,6 +308,14 @@ impl<'a> std::fmt::LowerHex for HexWriter<'a> {
         }
         Ok(())
     }
+}
+
+pub fn runtime_dir() -> io::Result<PathBuf> {
+    Ok(std::env::current_exe()?
+        .parent()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?
+        .to_path_buf()
+        .join(DIR_RUNTIME))
 }
 
 async fn reader_to_log<T: io::AsyncRead + Unpin>(reader: T) {
