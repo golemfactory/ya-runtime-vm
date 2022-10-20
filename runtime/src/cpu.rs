@@ -1,5 +1,6 @@
-use raw_cpuid::CpuId;
 use std::convert::TryFrom;
+
+use raw_cpuid::CpuId;
 
 pub struct CpuInfo {
     pub model: CpuModel,

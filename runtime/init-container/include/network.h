@@ -1,8 +1,6 @@
 #ifndef _NETWORK_H
 #define _NETWORK_H
 
-#define MTU 65521
-
 int net_create_lo(char *name);
 int net_create_tap(char *name);
 
@@ -14,5 +12,8 @@ int net_if_hw_addr(const char *name, const char mac[6]);
 
 int net_route(const char *name, const char *ip, const char *mask, const char *via);
 int net_route6(const char *name, const char *ip6, const char *via);
+
+int net_if_addr_to_hw_addr(const char *ip, char *mac);
+int net_if_addr6_to_hw_addr(const char *ip, char *mac);
 
 #endif // _NETWORK_H

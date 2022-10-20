@@ -1,99 +1,53 @@
 [package]
 name = "ya-runtime-vm"
-version = "0.2.12"
+version = "0.3.0"
 authors = ["Golem Factory <contact@golem.network>"]
 edition = "2018"
 license = "GPL-3.0"
 
 [package.metadata.deb]
 assets = [
-    [
-        "target/release/ya-runtime-vm",
-        "usr/lib/yagna/plugins/ya-runtime-vm/",
-        "755",
-    ],
-    [
-        "conf/ya-runtime-vm.json",
-        "usr/lib/yagna/plugins/",
-        "644",
-    ],
-    [
-        "image/self-test.gvmi",
-        "usr/lib/yagna/plugins/ya-runtime-vm/runtime/",
-        "644",
-    ],
+    ["target/release/ya-runtime-vm", "usr/lib/yagna/plugins/ya-runtime-vm/", "755"],
+    ["conf/ya-runtime-vm.json", "usr/lib/yagna/plugins/", "644"],
+    ["image/self-test.gvmi", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
 
-    [
-        "poc/runtime/vmrt",
-        "usr/lib/yagna/plugins/ya-runtime-vm/runtime/",
-        "755",
-    ],
-    [
-        "poc/runtime/bios-256k.bin",
-        "usr/lib/yagna/plugins/ya-runtime-vm/runtime/",
-        "644",
-    ],
-    [
-        "poc/runtime/kvmvapic.bin",
-        "usr/lib/yagna/plugins/ya-runtime-vm/runtime/",
-        "644",
-    ],
-    [
-        "poc/runtime/linuxboot_dma.bin",
-        "usr/lib/yagna/plugins/ya-runtime-vm/runtime/",
-        "644",
-    ],
+    ["poc/runtime/vmrt", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "755"],
+    ["poc/runtime/bios-256k.bin", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
+    ["poc/runtime/kvmvapic.bin", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
+    ["poc/runtime/linuxboot_dma.bin", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
+    ["poc/runtime/efi-virtio.rom", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
 
-    [
-        "init-container/initramfs.cpio.gz",
-        "usr/lib/yagna/plugins/ya-runtime-vm/runtime/",
-        "644",
-    ],
-    [
-        "init-container/vmlinuz-virt",
-        "usr/lib/yagna/plugins/ya-runtime-vm/runtime/",
-        "644",
-    ],
+    ["init-container/initramfs.cpio.gz", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
+    ["init-container/vmlinuz-virt", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
 ]
 
 [dependencies.ya-runtime-sdk]
-features = ["macros"]
-# TODO: don't use side-branch
-git = "https://github.com/golemfactory/ya-runtime-sdk"
-branch = "sz/update_tokio"
+version = "0.4"
+features = ["macros", "logger"]
 
 [dependencies]
 ya-vm-file-server = {git = "https://github.com/golemfactory/ya-vm-file-server", version = "0.2.3"}
 anyhow = "1.0"
 bollard-stubs = "1.40.2"
-crc = "2.1.0"
-env_logger = "0.9.0"
+crc = "3.0"
+dunce = "1.0.3"
 futures = "0.3"
-log = "^0.4.14"
+log = "0.4.8"
+rand = "0.8"
 raw-cpuid = "10.2.0"
 serde = { version = "^1.0", features = ["derive"] }
 serde_json = "1.0"
 strip-ansi-escapes = "0.1.0"
 structopt = "0.3"
-tokio = { version = "1", features = [
-    "rt-multi-thread",
-    "rt",
-    "fs",
-    "io-std",
-    "io-util",
-    "macros",
-    "sync",
-    "time",
-] }
-
-tokio-byteorder = "0.3.0"
-uuid = { version = "0.8", features = ["v4"] }
-log4rs = "1.0.0"
-dunce = "1.0.2"
+tokio = { version = "1.21.2", features = ["fs", "io-std", "io-util", "macros", "process", "rt", "rt-multi-thread", "sync", "time", "net"] }
+tokio-byteorder = "0.3"
+uuid = { version = "1.1", features = ["v4"] }
+url = "2.3"
 
 [dev-dependencies]
+env_logger = "0.9"
 tempdir = "0.3.7"
-pnet = "0.29.0"
+pnet = "0.31"
 
 [build-dependencies]
 anyhow = "1.0"

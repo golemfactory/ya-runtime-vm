@@ -1,3 +1,6 @@
+use std::convert::TryFrom;
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use futures::future::FutureExt;
 use futures::lock::Mutex;
@@ -21,6 +24,9 @@ use tokio::{
     fs,
     io::{self, AsyncWriteExt},
 };
+use url::Url;
+
+use ya_runtime_sdk::runtime_api::deploy::ContainerEndpoint;
 use ya_runtime_sdk::{
     runtime_api::{
         deploy::{DeployResult, StartMode},
@@ -28,14 +34,15 @@ use ya_runtime_sdk::{
     },
     serialize,
     server::Server,
-    Context, EmptyResponse, EndpointResponse, EventEmitter, OutputResponse, ProcessId,
-    ProcessIdResponse, RuntimeMode,
+    Context, EmptyResponse, EndpointResponse, Error, ErrorExt, EventEmitter, OutputResponse,
+    ProcessId, ProcessIdResponse, RuntimeMode,
 };
 
 use ya_runtime_vm::{
     cpu::CpuInfo,
     deploy::Deployment,
     guest_agent_comm::{GuestAgent, Notification, RedirectFdType, RemoteCommandResult},
+    vmrt::{runtime_dir, start_vmrt, RuntimeData},
 };
 
 use ya_runtime_vm::vm_runner::VMRunner;
@@ -68,6 +75,12 @@ pub struct Cli {
     #[allow(unused)]
     #[structopt(long, default_value = "0.25")]
     storage_gib: f64,
+    /// VPN endpoint address
+    #[structopt(long)]
+    vpn_endpoint: Option<Url>,
+    /// INET endpoint address
+    #[structopt(long)]
+    inet_endpoint: Option<Url>,
 }
 
 #[derive(ya_runtime_sdk::RuntimeDef, Default)]
@@ -131,6 +144,20 @@ impl ya_runtime_sdk::Runtime for Runtime {
         let workdir = ctx.cli.workdir.clone().expect("Workdir not provided");
         let data = self.data.clone();
 
+        let deployment_file = std::fs::File::open(workdir.join(FILE_DEPLOYMENT))
+            .expect("Unable to open the deployment file");
+        let deployment: Deployment = serialize::json::from_reader(deployment_file)
+            .expect("Failed to read the deployment file");
+
+        log::debug!("Deployment: {deployment:?}");
+
+        let vpn_endpoint = ctx.cli.runtime.vpn_endpoint.clone();
+        let inet_endpoint = ctx.cli.runtime.inet_endpoint.clone();
+
+        log::info!("VPN endpoint: {:?}", vpn_endpoint);
+        log::info!("INET endpoint: {:?}", inet_endpoint);
+
+        let data = self.data.clone();
         async move {
             let deployment_file = std::fs::File::open(workdir.join(FILE_DEPLOYMENT))
                 .expect("Unable to open the deployment file");
@@ -141,6 +168,19 @@ impl ya_runtime_sdk::Runtime for Runtime {
                 data.deployment.replace(deployment);
             }
 
+                if let Some(vpn_endpoint) = vpn_endpoint {
+                    let endpoint =
+                        ContainerEndpoint::try_from(vpn_endpoint).map_err(Error::from)?;
+                    data.vpn.replace(endpoint);
+                }
+                if let Some(inet_endpoint) = inet_endpoint {
+                    let endpoint =
+                        ContainerEndpoint::try_from(inet_endpoint).map_err(Error::from)?;
+                    data.inet.replace(endpoint);
+                }
+
+                data.deployment.replace(deployment);
+            }
             let res = start(workdir, data, emitter).await;
             if let Err(e) = &res {
                 log::error!("Starting the runtime failed with error {e}");
@@ -203,7 +243,7 @@ impl ya_runtime_sdk::Runtime for Runtime {
 }
 
 async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<Option<serialize::json::Value>> {
-    let workdir = normalize_path(&workdir).await?;
+    let work_dir = normalize_path(&workdir).await?;
     let package_path = normalize_path(&cli.task_package.unwrap()).await?;
     let package_file = fs::File::open(&package_path).await?;
 
@@ -214,16 +254,17 @@ async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<Option<serialize::
         package_path,
     )
     .await
-    .expect("Error reading package metadata");
+    .or_err("Error reading package metadata")?;
 
     for vol in &deployment.volumes {
-        fs::create_dir_all(workdir.join(&vol.name)).await?;
+        fs::create_dir_all(work_dir.join(&vol.name)).await?;
     }
+
     fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
-        .open(workdir.join(FILE_DEPLOYMENT))
+        .open(work_dir.join(FILE_DEPLOYMENT))
         .await?
         .write_all(serde_json::to_string(&deployment)?.as_bytes())
         .await?;
@@ -401,7 +442,7 @@ fn offer() -> anyhow::Result<Option<serde_json::Value>> {
             "golem.inf.cpu.brand": cpu.model.brand,
             "golem.inf.cpu.model": model,
             "golem.inf.cpu.capabilities": cpu.capabilities,
-            "golem.runtime.capabilities": ["vpn"]
+            "golem.runtime.capabilities": ["inet", "vpn", "manifest-support"]
         },
         "constraints": ""
     })))
@@ -415,8 +456,9 @@ async fn test() -> anyhow::Result<()> {
             .join(FILE_TEST_IMAGE)
             .canonicalize()
             .expect("Test image not found");
+        println!("Task package: {}", task_package.display());
 
-        log::debug!("Task package: {}", task_package.display());
+        let work_dir = std::env::temp_dir();
         let runtime_data = RuntimeData {
             deployment: Some(Deployment {
                 cpu_cores: 1,
@@ -431,13 +473,9 @@ async fn test() -> anyhow::Result<()> {
         };
 
         println!("Starting runtime");
-        start(
-            std::env::temp_dir(),
-            runtime.data.clone(),
-            EventEmitter::spawn(e),
-        )
-        .await
-        .expect("Failed to start runtime");
+        start(work_dir, runtime.data.clone(), EventEmitter::spawn(e))
+            .await
+            .expect("Failed to start runtime");
 
         println!("Stopping runtime");
         stop(runtime.data.clone())
@@ -458,39 +496,48 @@ async fn test() -> anyhow::Result<()> {
 async fn join_network(
     runtime_data: Arc<Mutex<RuntimeData>>,
     join: server::CreateNetwork,
-) -> Result<String, server::ErrorResponse> {
-    log::error!("join_network");
+) -> Result<ContainerEndpoint, server::ErrorResponse> {
     let hosts = join.hosts;
     let networks = join.networks;
-    let data = runtime_data.lock().await;
+    let iface = match server::NetworkInterface::from_i32(join.interface) {
+        Some(iface) => iface,
+        _ => {
+            return Err(server::ErrorResponse::msg(format!(
+                "invalid network interface type: {:?}",
+                join.interface
+            )));
+        }
+    };
 
-    let endpoint = data
-        .network
-        .as_ref()
-        .map(|network| match network {
-            #[cfg(windows)]
-            NetworkEndpoint::Socket(path) => path.clone(),
-            #[cfg(unix)]
-            NetworkEndpoint::Socket(path) => path
-                .clone()
-                .into_os_string()
-                .into_string()
-                .expect("Invalid endpoint path"),
-        })
-        .expect("No network endpoint");
+    let data = runtime_data.lock().await;
+    let endpoint = match iface {
+        server::NetworkInterface::Vpn => data.vpn.as_ref(),
+        server::NetworkInterface::Inet => data.inet.as_ref(),
+    }
+    .cloned()
+    .expect("No network endpoint");
 
     let mutex = data.ga().unwrap();
     let mut ga = mutex.lock().await;
     convert_result(ga.add_hosts(hosts.iter()).await, "Updating network hosts")?;
 
     for net in networks {
+        let (net_addr, net_mask) = match iface {
+            server::NetworkInterface::Vpn => (net.addr, net.mask.clone()),
+            server::NetworkInterface::Inet => Default::default(),
+        };
+
         convert_result(
-            ga.add_address(&net.if_addr, &net.mask).await,
+            ga.add_address(&net.if_addr, &net.mask, iface as u16).await,
             &format!("Adding interface address {} {}", net.if_addr, net.gateway),
         )?;
         convert_result(
-            ga.create_network(&net.addr, &net.mask, &net.gateway).await,
-            &format!("Creating network {} {}", net.addr, net.gateway),
+            ga.create_network(&net_addr, &net_mask, &net.gateway, iface as u16)
+                .await,
+            &format!(
+                "Creating route via {} for {} ({:?})",
+                net.gateway, net_addr, iface
+            ),
         )?;
     }
 

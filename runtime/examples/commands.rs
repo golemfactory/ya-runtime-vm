@@ -69,11 +69,10 @@ impl server::RuntimeHandler for Events {
                 let died = was_running && !status.running;
                 data.status.replace(status);
                 if died {
-                    data.died.notify_one();
+                    data.died.notify_waiters();
                 }
             }
         }
-
         futures::future::ready(()).boxed()
     }
 
@@ -91,7 +90,6 @@ impl Clone for Events {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-
     let root_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
         .join("..")
         .canonicalize()

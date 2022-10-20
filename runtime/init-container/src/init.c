@@ -26,7 +26,6 @@
 #include "communication_win_p9.h"
 
 #include "cyclic_buffer.h"
-#include "forward.h"
 #include "network.h"
 #include "process_bookkeeping.h"
 #include "proto.h"
@@ -48,9 +47,16 @@
 #define VPORT_CMD "/dev/vport0p1"
 #define VPORT_NET "/dev/vport0p2"
 #define VPORT_P9 "/dev/vport0p3"
+#define DEV_VPN "eth0"
+#define DEV_INET "eth1"
 
 #define MODE_RW_UGO (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)
 #define OUTPUT_PATH_PREFIX "/var/tmp/guest_agent_private/fds"
+
+#define NET_MEM_DEFAULT 1048576
+#define NET_MEM_MAX 2097152
+#define MTU_VPN 1220
+#define MTU_INET 65521
 
 
 struct new_process_args {
@@ -80,13 +86,10 @@ struct epoll_fd_desc {
 extern char** environ;
 
 static int g_cmds_fd = -1;
-static int g_net_fd = -1;
 static int g_sig_fd = -1;
 static int g_epoll_fd = -1;
-static int g_tap_fd = -1;
 
 static char g_lo_name[16];
-static char g_tap_name[16];
 
 static struct process_desc* g_entrypoint_desc = NULL;
 
@@ -94,7 +97,6 @@ static noreturn void die(void) {
     sync();
     (void)close(g_epoll_fd);
     (void)close(g_sig_fd);
-    (void)close(g_net_fd);
     (void)close(g_p9_fd);
     (void)close(g_cmds_fd);
 
@@ -362,6 +364,37 @@ static int add_network_hosts(char *entries[][2], int n) {
     return 0;
 }
 
+static int set_network_ns(char *entries[], int n) {
+    FILE *f;
+    if ((f = fopen("/etc/resolv.conf", "w")) == 0) {
+        return -1;
+    }
+
+    fprintf(f, "search example.com\n");
+    for (int i = 0; i < n; ++i) {
+        fprintf(f, "nameserver %s\n", entries[i]);
+    }
+
+    fflush(f);
+    fsync(fileno(f));
+    fclose(f);
+
+    return 0;
+}
+
+int write_sys(char *path, size_t value) {
+    FILE *f;
+    if ((f = fopen(path, "w")) == 0) {
+        return -1;
+    }
+
+    fprintf(f, "%ld", value);
+    fflush(f);
+    fclose(f);
+
+    return 0;
+}
+
 static void setup_network(void) {
     char *hosts[][2] = {
         {"127.0.0.1",   "localhost"},
@@ -371,23 +404,26 @@ static void setup_network(void) {
         {"ff02::1",     "ip6-allnodes"},
         {"ff02::2",     "ip6-allrouters"},
     };
+    char *nameservers[] = {
+        "1.1.1.1",
+        "8.8.8.8",
+    };
 
     strcpy(g_lo_name, "lo");
-    strcpy(g_tap_name, "golem%d");
+
+    CHECK(add_network_hosts(hosts, sizeof(hosts) / sizeof(*hosts)));
+    CHECK(set_network_ns(nameservers, sizeof(nameservers) / sizeof(*nameservers)));
 
     CHECK(net_create_lo(g_lo_name));
-    g_tap_fd = CHECK(net_create_tap(g_tap_name));
-    CHECK(net_if_mtu(g_tap_name, MTU));
-
     CHECK(net_if_addr(g_lo_name, "127.0.0.1", "255.255.255.0"));
-    CHECK(add_network_hosts(hosts, sizeof(hosts) / sizeof(*hosts)));
 
-    CHECK(fwd_start(g_tap_fd, g_net_fd, MTU, false, true));
-    CHECK(fwd_start(g_net_fd, g_tap_fd, MTU, true, false));
-}
+    net_if_mtu(DEV_VPN, MTU_VPN);
+    net_if_mtu(DEV_INET, MTU_INET);
 
-static void stop_network(void) {
-    fwd_stop();
+    CHECK(write_sys("/proc/sys/net/core/rmem_default", NET_MEM_DEFAULT));
+    CHECK(write_sys("/proc/sys/net/core/rmem_max", NET_MEM_MAX));
+    CHECK(write_sys("/proc/sys/net/core/wmem_default", NET_MEM_DEFAULT));
+    CHECK(write_sys("/proc/sys/net/core/wmem_max", NET_MEM_MAX));
 }
 
 static void send_response_hdr(msg_id_t msg_id, enum GUEST_MSG_TYPE type) {
@@ -983,6 +1019,16 @@ out:
     }
 }
 
+static uint32_t do_mount(const char* tag, char* path) {
+    if (create_dir_path(path) < 0) {
+        return errno;
+    }
+    if (mount(tag, path, "9p", 0, "trans=virtio,version=9p2000.L") < 0) {
+        return errno;
+    }
+    return 0;
+}
+
 static void handle_mount(msg_id_t msg_id) {
     bool done = false;
     uint32_t ret = 0;
@@ -1250,6 +1296,9 @@ static void handle_net_ctl(msg_id_t msg_id) {
     char* mask = NULL;
     char* gateway = NULL;
     char* if_addr = NULL;
+    uint16_t if_kind = 0;
+
+    char* if_name = NULL;
     int ret = 0;
 
     while (!done) {
@@ -1275,6 +1324,9 @@ static void handle_net_ctl(msg_id_t msg_id) {
             case SUB_MSG_NET_CTL_IF_ADDR:
                 CHECK(recv_bytes(g_cmds_fd, &if_addr, NULL, /*is_cstring=*/true));
                 break;
+            case SUB_MSG_NET_CTL_IF:
+                CHECK(recv_u16(g_cmds_fd, &if_kind));
+                break;
             default:
                 fprintf(stderr, "Unknown MSG_NET_CTL subtype: %hhu\n",
                         subtype);
@@ -1282,10 +1334,34 @@ static void handle_net_ctl(msg_id_t msg_id) {
         }
     }
 
+    if (addr && (strlen(addr) == 0)) addr = NULL;
+    if (mask && (strlen(mask) == 0)) mask = NULL;
+
+    switch (if_kind) {
+        case SUB_MSG_NET_IF_INET:
+            if_name = DEV_INET;
+            break;
+        default:
+            if_name = DEV_VPN;
+    }
+
     if (if_addr) {
+        fprintf(stderr, "Configuring '%s' with IP address: %s\n", if_name, if_addr);
+
         if (strstr(if_addr, ":")) {
-            if ((ret = net_if_addr6(g_tap_name, if_addr)) < 0) {
+            if ((ret = net_if_addr6(if_name, if_addr)) < 0) {
                 perror("Error setting IPv6 address");
+                goto out_err;
+            }
+
+            char hw_addr[6] = { 0, 0, 0, 0, 0, 0};
+
+            if ((ret = net_if_addr6_to_hw_addr(if_addr, hw_addr)) < 0) {
+                perror("Error setting MAC address");
+                goto out_err;
+            }
+            if ((ret = net_if_hw_addr(if_name, hw_addr)) < 0) {
+                perror("Error setting MAC address");
                 goto out_err;
             }
         } else {
@@ -1293,26 +1369,34 @@ static void handle_net_ctl(msg_id_t msg_id) {
                 ret = EINVAL;
                 goto out_err;
             }
-            if ((ret = net_if_addr(g_tap_name, if_addr, mask)) < 0) {
+            if ((ret = net_if_addr(if_name, if_addr, mask)) < 0) {
                 perror("Error setting IPv4 address");
+                goto out_err;
+            }
+
+            char hw_addr[6] = { 0, 0, 0, 0, 0, 0};
+
+            if ((ret = net_if_addr_to_hw_addr(if_addr, hw_addr)) < 0) {
+                perror("Error setting MAC address");
+                goto out_err;
+            }
+            if ((ret = net_if_hw_addr(if_name, hw_addr)) < 0) {
+                perror("Error setting MAC address");
                 goto out_err;
             }
         }
     }
 
-    if (addr || gateway) {
-        if (!addr || !gateway) {
-            ret = EINVAL;
-            goto out_err;
-        }
+    if (gateway) {
+        fprintf(stderr, "Configuring '%s' with gateway: %s\n", if_name, gateway);
 
-        if (strstr(addr, ":")) {
-            if ((ret = net_route6(g_tap_name, addr, gateway)) < 0) {
+        if (strstr(gateway, ":")) {
+            if ((ret = net_route6(if_name, addr, gateway)) < 0) {
                 perror("Error setting IPv6 route");
                 goto out_err;
             }
         } else {
-            if ((ret = net_route(g_tap_name, addr, mask, gateway)) < 0) {
+            if ((ret = net_route(if_name, addr, mask, gateway)) < 0) {
                 perror("Error setting IPv4 route");
                 goto out_err;
             }
@@ -1323,6 +1407,7 @@ out_err:
     if (addr) free(addr);
     if (mask) free(mask);
     if (gateway) free(gateway);
+    if (if_addr) free(if_addr);
 
     ret == 0
         ? send_response_ok(msg_id)
@@ -1406,7 +1491,7 @@ static void handle_message(void) {
             handle_mount(msg_hdr.msg_id);
             break;
         case MSG_QUERY_OUTPUT:
-            //fprintf(stderr, "MSG_QUERY_OUTPUT\n");
+            fprintf(stderr, "MSG_QUERY_OUTPUT\n");
             handle_query_output(msg_hdr.msg_id);
             break;
         case MSG_NET_CTL:
@@ -1528,9 +1613,12 @@ int main(void) {
     CHECK(mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID,
                 "mode=0755,size=2M"));
 
+    load_module("/failover.ko");
     load_module("/virtio.ko");
     load_module("/virtio_ring.ko");
     load_module("/virtio_pci.ko");
+    load_module("/net_failover.ko");
+    load_module("/virtio_net.ko");
     load_module("/virtio_console.ko");
     load_module("/rng-core.ko");
     load_module("/virtio-rng.ko");
@@ -1553,7 +1641,6 @@ int main(void) {
 
 
     g_cmds_fd = CHECK(open(VPORT_CMD, O_RDWR | O_CLOEXEC));
-    g_net_fd = CHECK(open(VPORT_NET, O_RDWR | O_CLOEXEC));
     g_p9_fd = CHECK(open(VPORT_P9, O_RDWR | O_CLOEXEC));
 
     CHECK(mkdir("/mnt", S_IRWXU));
@@ -1640,5 +1727,4 @@ int main(void) {
     //make sure to create threads after blocking signals, not before. Otherwise signals are blocked.
 
     main_loop();
-    stop_network();
 }

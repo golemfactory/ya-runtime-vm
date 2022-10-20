@@ -1,15 +1,17 @@
-use bollard_stubs::models::ContainerConfig;
-use crc::{Crc, CRC_32_ISO_HDLC};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::path::PathBuf;
+
+use bollard_stubs::models::ContainerConfig;
+use crc::{Crc, CRC_32_ISO_HDLC};
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 use tokio_byteorder::{AsyncReadBytesExt, LittleEndian};
 use uuid::Uuid;
+
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Deployment {
     #[serde(default)]
     pub cpu_cores: usize,
@@ -62,7 +64,7 @@ impl Deployment {
             cpu_cores,
             mem_mib,
             task_package,
-            user: parse_user(config.user.as_ref())?,
+            user: parse_user(config.user.as_ref()).unwrap_or((0, 0)),
             volumes: parse_volumes(config.volumes.as_ref()),
             config,
         })
@@ -78,11 +80,9 @@ impl Deployment {
 }
 
 fn parse_user(user: Option<&String>) -> anyhow::Result<(u32, u32)> {
-    let user = user.map(|s| s.trim()).unwrap_or("");
-    if user.is_empty() {
-        return Ok((0, 0));
-    }
-
+    let user = user
+        .map(|s| s.trim())
+        .ok_or_else(|| anyhow::anyhow!("User field missing"))?;
     let mut split = user.splitn(2, ":");
     let uid: u32 = split
         .next()

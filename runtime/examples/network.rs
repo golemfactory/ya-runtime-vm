@@ -1,3 +1,4 @@
+use futures::lock::Mutex;
 use futures::FutureExt;
 use pnet::packet::arp::{ArpOperations, ArpPacket, MutableArpPacket};
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
@@ -7,36 +8,177 @@ use pnet::packet::ipv4::{Ipv4Packet, MutableIpv4Packet};
 use pnet::packet::Packet;
 use pnet::util::MacAddr;
 use std::net::IpAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering::Relaxed;
-use std::{io::prelude::*, sync::atomic::AtomicU16};
+use std::{
+    env,
+    io::{self, prelude::*},
+    process::Stdio,
+    sync::{atomic::AtomicU16, Arc},
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-use structopt::StructOpt;
-
-use std::time::Duration;
-#[cfg(windows)]
-use tokio::net::TcpStream;
-#[cfg(unix)]
 use tokio::net::UnixStream;
-use ya_runtime_vm::local_notification_handler::start_local_agent_communication;
-use ya_runtime_vm::local_spawn_vm::{prepare_mount_directories, prepare_tmp_path, spawn_vm};
-
-#[cfg(unix)]
-type PlatformStream = UnixStream;
-#[cfg(windows)]
-type PlatformStream = TcpStream;
+use tokio::{
+    process::{Child, Command},
+    sync,
+};
+use ya_runtime_sdk::runtime_api::server;
+use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
 
 const IDENTIFICATION: AtomicU16 = AtomicU16::new(42);
-const MTU: usize = 65535;
+const MTU: usize = 1400;
 const PREFIX_LEN: usize = 2;
 
+struct Notifications {
+    process_died: sync::Notify,
+    ga: Option<Arc<Mutex<GuestAgent>>>,
+}
+
+impl Notifications {
+    fn new() -> Self {
+        Notifications {
+            process_died: sync::Notify::new(),
+            ga: None,
+        }
+    }
+
+    fn set_ga(&mut self, ga: Arc<Mutex<GuestAgent>>) {
+        self.ga.replace(ga);
+    }
+
+    fn handle(&self, notification: Notification) {
+        match notification {
+            Notification::OutputAvailable { id, fd } => {
+                let ga = match self.ga.as_ref() {
+                    Some(ga) => ga.clone(),
+                    _ => return,
+                };
+
+                tokio::spawn(async move {
+                    match ga
+                        .lock()
+                        .await
+                        .query_output(id, fd as u8, 0u64, u64::MAX)
+                        .await
+                    {
+                        Ok(res) => match res {
+                            Ok(out) => while let Err(_) = io::stdout().write_all(&out[..]) {},
+                            Err(code) => eprintln!("Output query failed with: {}", code),
+                        },
+                        Err(code) => eprintln!("Output query failed with: {}", code),
+                    }
+                });
+            }
+            Notification::ProcessDied { id, reason } => {
+                eprintln!("Process {} died with {:?}", id, reason);
+                self.process_died.notify_waiters();
+            }
+        }
+    }
+}
+
+async fn run_process(ga: &mut GuestAgent, bin: &str, argv: &[&str]) -> io::Result<()> {
+    let id = ga
+        .run_process(
+            bin,
+            argv,
+            None,
+            0,
+            0,
+            &[
+                None,
+                Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
+                Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
+            ],
+            None,
+        )
+        .await?
+        .expect("Run process failed");
+    eprintln!("Spawned process with id: {}", id);
+    Ok(())
+}
+
+fn get_project_dir() -> PathBuf {
+    PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
+        .canonicalize()
+        .unwrap()
+}
+
+fn get_root_dir() -> PathBuf {
+    get_project_dir().join("..").canonicalize().unwrap()
+}
+
+fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
+    path.as_ref()
+        .join(file.to_string())
+        .canonicalize()
+        .unwrap()
+        .display()
+        .to_string()
+}
+
+fn spawn_vm<'a, P: AsRef<Path>>(temp_path: P) -> Child {
+    let root_dir = get_root_dir();
+    let project_dir = get_project_dir();
+    let runtime_dir = project_dir.join("poc").join("runtime");
+    let init_dir = project_dir.join("init-container");
+
+    let socket_path = temp_path.as_ref().join(format!("manager.sock"));
+    let socket_net_path = temp_path.as_ref().join(format!("net.sock"));
+
+    let chardev =
+        |name, path: &PathBuf| format!("socket,path={},server,nowait,id={}", path.display(), name);
+
+    let mut cmd = Command::new("vmrt");
+    cmd.current_dir(runtime_dir).args(&[
+        "-m",
+        "256m",
+        "-nographic",
+        "-vga",
+        "none",
+        "-kernel",
+        join_as_string(&init_dir, "vmlinuz-virt").as_str(),
+        "-initrd",
+        join_as_string(&init_dir, "initramfs.cpio.gz").as_str(),
+        "-no-reboot",
+        "-net",
+        "none",
+        "-enable-kvm",
+        "-cpu",
+        "host",
+        "-smp",
+        "1",
+        "-append",
+        "console=ttyS0 panic=1",
+        "-device",
+        "virtio-serial",
+        "-device",
+        "virtio-rng-pci",
+        "-chardev",
+        chardev("manager_cdev", &socket_path).as_str(),
+        "-chardev",
+        chardev("net_cdev", &socket_net_path).as_str(),
+        "-device",
+        "virtserialport,chardev=manager_cdev,name=manager_port",
+        "-device",
+        "virtserialport,chardev=net_cdev,name=net_port",
+        "-drive",
+        format!(
+            "file={},cache=none,readonly=on,format=raw,if=virtio",
+            root_dir.join("squashfs_drive").display()
+        )
+        .as_str(),
+    ]);
+    cmd.stdin(Stdio::null());
+    cmd.spawn().expect("failed to spawn VM")
+}
+
 async fn handle_net<P: AsRef<Path>>(path: P) -> anyhow::Result<()> {
-    let stream = PlatformStream::connect(path.as_ref().display().to_string()).await?;
+    let stream = UnixStream::connect(path.as_ref()).await?;
     let (mut read, mut write) = tokio::io::split(stream);
 
     let fut = async move {
-        let mut buf: [u8; MTU] = [0u8; MTU];
+        let mut buf: [u8; MTU + 32] = [0u8; MTU + 32];
         loop {
             let count = match read.read(&mut buf).await {
                 Err(_) | Ok(0) => break,
@@ -228,58 +370,41 @@ fn handle_ethernet_packet(data: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-#[derive(Debug, StructOpt)]
-#[structopt(name = "options", about = "Options for VM")]
-pub struct Opt {
-    /// Number of logical CPU cores
-    #[structopt(long, default_value = "1")]
-    cpu_cores: usize,
-    /// Amount of RAM [GiB]
-    #[structopt(long, default_value = "0.25")]
-    mem_gib: f64,
-    /// Amount of disk storage [GiB]
-    #[allow(unused)]
-    #[structopt(long, default_value = "0.25")]
-    storage_gib: f64,
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let opt: Opt = Opt::from_args();
-    env_logger::init();
+    let temp_dir = tempdir::TempDir::new("ya-vm-direct").expect("Failed to create temp dir");
+    let temp_path = temp_dir.path();
 
-    log::info!("Running example fs_benchmark...");
+    let notifications = Arc::new(Mutex::new(Notifications::new()));
+    let mut child = spawn_vm(&temp_path);
 
-    let temp_path = prepare_tmp_path();
-    let mount_args = prepare_mount_directories(&temp_path, 2);
-
-    let mut vm_runner = spawn_vm(&temp_path, opt.cpu_cores, opt.mem_gib, false).await?;
-
-    //let VM start before trying to connect p9 service
-    tokio::time::sleep(Duration::from_secs_f64(2.5)).await;
-
-    let (_p9streams, _muxer_handle) = vm_runner.start_9p_service(&temp_path, &mount_args).await?;
-
-    let comm = start_local_agent_communication(vm_runner.get_vm().get_manager_sock()).await?;
-
-    comm.run_mount(&mount_args).await?;
-
-    handle_net(vm_runner.get_vm().get_net_sock()).await?;
+    let ns = notifications.clone();
+    let ga_mutex = GuestAgent::connected(temp_path.join("manager.sock"), 10, move |n, _g| {
+        let notifications = ns.clone();
+        async move { notifications.clone().lock().await.handle(n) }.boxed()
+    })
+    .await?;
 
     {
+        notifications.clone().lock().await.set_ga(ga_mutex.clone());
+    };
+
+    handle_net(temp_path.join("net.sock")).await?;
+
+    {
+        let iface = server::NetworkInterface::Vpn as u16;
         let hosts = [("host0", "127.0.0.2"), ("host1", "127.0.0.3")]
             .iter()
             .map(|(h, i)| (h.to_string(), i.to_string()))
             .collect::<Vec<_>>();
 
-        let ga_mutex = comm.get_ga();
         let mut ga = ga_mutex.lock().await;
-        match ga.add_address("10.0.0.1", "255.255.255.0").await? {
+        match ga.add_address("10.0.0.1", "255.255.255.0", iface).await? {
             Ok(_) | Err(0) => (),
             Err(code) => anyhow::bail!("Unable to set address {}", code),
         }
         match ga
-            .create_network("10.0.0.0", "255.255.255.0", "10.0.0.1")
+            .create_network("10.0.0.0", "255.255.255.0", "10.0.0.1", iface)
             .await?
         {
             Ok(_) | Err(0) => (),
@@ -290,13 +415,19 @@ async fn main() -> anyhow::Result<()> {
             Err(code) => anyhow::bail!("Unable to add hosts {}", code),
         }
     }
-    comm.run_command("/bin/ping", &["ping", "-v", "-n", "-c", "3", "10.0.0.2"])
+    {
+        let mut ga = ga_mutex.lock().await;
+        run_process(
+            &mut ga,
+            "/bin/ping",
+            &["ping", "-v", "-n", "-D", "-c", "3", "10.0.0.2"],
+        )
         .await?;
+    }
 
-    vm_runner.stop_p9_service().await;
     /* VM should quit now. */
-    //let e = timeout(Duration::from_secs(5), vm_runner..wait()).await;
-    vm_runner.stop_vm(&Duration::from_secs(5), true).await?;
+    let e = child.wait().await.expect("failed to wait on child");
+    eprintln!("{:?}", e);
 
     Ok(())
 }

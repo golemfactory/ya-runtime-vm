@@ -23,12 +23,13 @@ RUN mkdir build && \
   --disable-parallels --disable-sheepdog --disable-vvfat --disable-qed --disable-vdi \
   --disable-qcow1 --disable-dmg --disable-cloop --disable-bochs --disable-bzip2 \
   --disable-guest-agent --disable-numa --disable-tcg --disable-vnc \
-   --disable-live-block-migration --enable-virtfs --enable-vhost-vsock \
+  --disable-live-block-migration --enable-virtfs --enable-vhost-vsock \
   --without-default-devices
 RUN echo CONFIG_PARALLEL=y >> build/config-host.mak
 RUN echo CONFIG_VIRTIO=y >> build/config-host.mak
 RUN echo CONFIG_VIRTIO_SERIAL=y >> build/config-host.mak
 RUN echo CONFIG_VIRTIO_PCI=y >> build/config-host.mak
+RUN echo CONFIG_VIRTIO_NET=y >> build/config-host.mak
 RUN echo CONFIG_VIRTIO_RNG=y >> build/config-host.mak
 RUN echo CONFIG_VIRTIO_MMIO=y >> build/config-host.mak
 RUN echo CONFIG_VIRTIO_SCSI=y >> build/config-host.mak
@@ -42,4 +43,3 @@ RUN cd build && make x86_64-softmmu/all V=1 CFLAGS+="-Os -flto" -j4 LIBS+="-flto
 #RUN cd build/x86_64-softmmu && -lmount -lblkid -luuid
 
 RUN cp /build/x86_64-softmmu/qemu-system-x86_64 vmrt 
-

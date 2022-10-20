@@ -75,8 +75,10 @@ enum SubMsgNetCtlType<'a> {
     SubMsgNetCtlMask(&'a [u8]),
     SubMsgNetCtlGateway(&'a [u8]),
     SubMsgNetCtlIfAddr(&'a [u8]),
+    SubMsgNetCtlIf(u16),
 }
 
+#[repr(u16)]
 enum SubMsgNetCtlFlags {
     #[allow(unused)]
     Empty = 0,
@@ -351,6 +353,10 @@ impl EncodeInto for SubMsgNetCtlType<'_> {
             SubMsgNetCtlType::SubMsgNetCtlIfAddr(addr) => {
                 5u8.encode_into(buf);
                 addr.encode_into(buf);
+            }
+            SubMsgNetCtlType::SubMsgNetCtlIf(iface) => {
+                6u8.encode_into(buf);
+                iface.encode_into(buf);
             }
         }
     }
@@ -722,6 +728,7 @@ impl GuestAgent {
         addr: &str,
         mask: &str,
         gateway: &str,
+        iface: u16,
     ) -> io::Result<RemoteCommandResult<()>> {
         let mut msg = Message::default();
         let msg_id = self.get_new_msg_id();
@@ -732,6 +739,7 @@ impl GuestAgent {
         msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlAddr(addr.as_bytes()));
         msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlMask(mask.as_bytes()));
         msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlGateway(gateway.as_bytes()));
+        msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlIf(iface));
         msg.append_submsg(&SubMsgNetCtlType::SubMsgEnd);
 
         self.stream.write_all(msg.as_ref()).await?;
@@ -742,6 +750,7 @@ impl GuestAgent {
         &mut self,
         if_addr: &str,
         mask: &str,
+        iface: u16,
     ) -> io::Result<RemoteCommandResult<()>> {
         let mut msg = Message::default();
         let msg_id = self.get_new_msg_id();
@@ -751,6 +760,7 @@ impl GuestAgent {
         msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlFlags(flags));
         msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlIfAddr(if_addr.as_bytes()));
         msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlMask(mask.as_bytes()));
+        msg.append_submsg(&SubMsgNetCtlType::SubMsgNetCtlIf(iface));
         msg.append_submsg(&SubMsgNetCtlType::SubMsgEnd);
 
         self.stream.write_all(msg.as_ref()).await?;

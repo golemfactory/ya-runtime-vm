@@ -173,9 +173,6 @@ int net_if_addr(const char *name, const char *ip, const char *mask) {
         goto end;
     }
 
-    if ((ret = net_if_mtu(ifr.ifr_name, MTU)) < 0) {
-        goto end;
-    }
 end:
     close(fd);
     return ret;
@@ -222,12 +219,54 @@ int net_if_addr6(const char *name, const char *ip6) {
     if ((ret = ioctl(fd, SIOCSIFFLAGS, &ifr)) < 0) {
         goto end;
     }
-
-    if ((ret = net_if_mtu(ifr.ifr_name, MTU)) < 0) {
-        goto end;
-    }
 end:
     close(fd);
+    return ret;
+}
+
+int net_if_addr_to_hw_addr(const char *ip, char *mac) {
+    struct ifreq ifr;
+    int ret = 0;
+
+    struct sockaddr_in* sa = (struct sockaddr_in*) &ifr.ifr_addr;
+    sa->sin_family = AF_INET;
+
+    if ((ret = inet_pton(AF_INET, ip, &sa->sin_addr)) < 0) {
+        goto end;
+    }
+
+    char *p = (char *)(void *) &sa->sin_addr;
+
+    mac[0] = 0x90;
+    mac[1] = 0x13;
+    mac[2] = p[0];
+    mac[3] = p[1];
+    mac[4] = p[2];
+    mac[5] = p[3];
+
+end:
+    return ret;
+}
+
+
+int net_if_addr6_to_hw_addr(const char *ip, char *mac) {
+    struct ifreq6_stub ifr6;
+    int ret = 0;
+
+    if ((ret = inet_pton(AF_INET6, ip, (void *) &ifr6.addr)) < 0) {
+        goto end;
+    }
+
+    char *p = ((char *)(void *) &ifr6.addr) + 12;
+
+    mac[0] = 0x90;
+    mac[1] = 0x13;
+    mac[2] = p[0];
+    mac[3] = p[1];
+    mac[4] = p[2];
+    mac[5] = p[3];
+
+end:
     return ret;
 }
 
@@ -264,7 +303,6 @@ int net_route(const char *name, const char *ip, const char *mask, const char *vi
     memset(&rt, 0, sizeof(rt));
 
     rt.rt_flags |= RTF_UP | RTF_GATEWAY;
-    rt.rt_metric = 101;
     rt.rt_dev = malloc(strlen(name) + 1);
     if (!rt.rt_dev) {
         ret = -ENOMEM;
@@ -278,11 +316,23 @@ int net_route(const char *name, const char *ip, const char *mask, const char *vi
 
     addr = (struct sockaddr_in*) &rt.rt_dst;
     addr->sin_family = AF_INET;
-    addr->sin_addr.s_addr = inet_addr(ip);
+
+    if (!ip) {
+        addr->sin_addr.s_addr = INADDR_ANY;
+        rt.rt_metric = 0;
+    } else {
+        addr->sin_addr.s_addr = inet_addr(ip);
+        rt.rt_metric = 101;
+    }
 
     addr = (struct sockaddr_in *) &rt.rt_genmask;
     addr->sin_family = AF_INET;
-    addr->sin_addr.s_addr = inet_addr(mask);
+
+    if (!mask) {
+        addr->sin_addr.s_addr = INADDR_ANY;
+    } else {
+        addr->sin_addr.s_addr = inet_addr(mask);
+    }
 
     if ((ret = ioctl(fd, SIOCADDRT, (void *) &rt)) < 0) {
         goto end;
@@ -308,6 +358,10 @@ int net_route6(const char *name, const char *ip6, const char *via) {
 
     memset(&rt, 0, sizeof(rt));
 
+    if (!ip6) {
+        ip6 = "0:0:0:0:0:0:0:0";
+    }
+
     if ((pl = parse_prefix_len(ip6)) < 0) {
         pl = 128;
     }
@@ -320,9 +374,11 @@ int net_route6(const char *name, const char *ip6, const char *via) {
     if ((ret = inet_pton(AF_INET6, via, (void *) &(rt.rtmsg_gateway))) < 0) {
         goto end;
     }
+
     if ((ret = inet_pton(AF_INET6, ip6, (void *) &(rt.rtmsg_dst))) < 0) {
         goto end;
     }
+
     if ((ret = ioctl(fd, SIOCADDRT, (void *) &rt)) < 0) {
         goto end;
     }
