@@ -54,6 +54,14 @@ $(SRC_DIR)/network.o: $(SRC_DIR)/network.c
 	    -I"$(CURDIR)/$(UNPACKED_HEADERS)/usr/include" \
 	    -o $@ -c $^
 
+$(SRC_DIR)/forward.o: uring $(SRC_DIR)/forward.c
+	$(QUIET_CC)$(CC) -O2 -Wall -Wextra -Werror -fPIE -pie \
+	    -I"$(CURDIR)/$(UNPACKED_HEADERS)/usr/include/" \
+        -I"$(CURDIR)/$(LIBURING_SUBMODULE)/src/include/" \
+        -Iinclude/ \
+        -lstdthreads \
+	    -o $@ -c $(wordlist 2, $(words $^), $^)
+
 %.o: %.c
 	$(QUIET_CC)$(CC) $(CFLAGS) -o $@ -c $^
 

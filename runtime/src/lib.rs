@@ -8,4 +8,4 @@ pub mod local_spawn_vm;
 mod response_parser;
 pub mod vm;
 pub mod vm_runner;
-pub mod vmrt;
+//pub mod vmrt;

@@ -1,10 +1,12 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
-use crate::vm::VMBuilder;
+use crate::vm::{RuntimeData, VMBuilder};
 use crate::vm_runner::VMRunner;
+use futures::lock::Mutex;
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 
 fn get_project_dir() -> PathBuf {
@@ -86,6 +88,8 @@ pub async fn spawn_vm(
         let _qcow2_file = qcow2_file.canonicalize()?;
     }
 
+    let runtime_data = Arc::new(Mutex::new(RuntimeData::default()));
+
     let vm = VMBuilder::new(
         cpu_cores,
         (mem_gib * 1024.0) as usize,
@@ -94,7 +98,8 @@ pub async fn spawn_vm(
     )
     .with_kernel_path(join_as_string(&init_dir, "vmlinuz-virt"))
     .with_ramfs_path(join_as_string(&init_dir, "initramfs.cpio.gz"))
-    .build();
+    .build(runtime_data)
+    .await?;
 
     let mut vm_runner = VMRunner::new(vm);
     vm_runner.run_vm(runtime_dir).await?;

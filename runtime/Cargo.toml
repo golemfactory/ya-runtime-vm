@@ -43,6 +43,7 @@ tokio = { version = "1.21.2", features = ["fs", "io-std", "io-util", "macros", "
 tokio-byteorder = "0.3"
 uuid = { version = "1.1", features = ["v4"] }
 url = "2.3"
+log4rs = "*"
 
 [dev-dependencies]
 env_logger = "0.9"

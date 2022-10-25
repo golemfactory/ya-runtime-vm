@@ -46,9 +46,9 @@
     }
 
 #define VPORT_CMD "/dev/vport0p1"
-#define VPORT_NET "/dev/vport0p2"
-#define VPORT_INET "/dev/vport0p3"
-#define VPORT_P9 "/dev/vport0p4"
+#define VPORT_P9 "/dev/vport0p2"
+#define VPORT_NET "/dev/vport0p3"
+#define VPORT_INET "/dev/vport0p4"
 #define DEV_VPN "eth0"
 #define DEV_INET "eth1"
 
@@ -1060,16 +1060,6 @@ out:
     } else {
         send_response_ok(msg_id);
     }
-}
-
-static uint32_t do_mount(const char* tag, char* path) {
-    if (create_dir_path(path) < 0) {
-        return errno;
-    }
-    if (mount(tag, path, "9p", 0, "trans=virtio,version=9p2000.L") < 0) {
-        return errno;
-    }
-    return 0;
 }
 
 static void handle_mount(msg_id_t msg_id) {

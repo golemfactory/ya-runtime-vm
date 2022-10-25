@@ -143,6 +143,7 @@ async fn test_parallel_write_big_chunk(
     );
 }
 
+#[allow(dead_code)]
 async fn test_fio(mount_args: Arc<Vec<ContainerVolume>>, comm: LocalAgentCommunication) {
     for ContainerVolume { name: _, path } in mount_args.iter() {
         // TODO: this is serialized

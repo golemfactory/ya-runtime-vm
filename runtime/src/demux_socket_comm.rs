@@ -97,7 +97,11 @@ pub fn start_demux_communication(
                             .write_all(&mut message_buffer[0..packet_size])
                             .await
                         {
-                            log::error!("Write to p9_writer failed on channel {}: {}", channel, err);
+                            log::error!(
+                                "Write to p9_writer failed on channel {}: {}",
+                                channel,
+                                err
+                            );
                             break;
                         }
                     } else {
@@ -109,7 +113,10 @@ pub fn start_demux_communication(
                             let time_sec = benchmark_start.unwrap().elapsed().as_secs_f64();
                             let benchmark_mbytes = 1.0E-6 * benchmark_bytes as f64;
                             let speed = benchmark_mbytes / time_sec;
-                            println!("Benchmark finished in {}, size {:.2}MB speed: {:.2}MB/s", time_sec, benchmark_mbytes, speed);
+                            println!(
+                                "Benchmark finished in {}, size {:.2}MB speed: {:.2}MB/s",
+                                time_sec, benchmark_mbytes, speed
+                            );
                             benchmark_start = None;
                             benchmark_bytes = 0;
                         }
