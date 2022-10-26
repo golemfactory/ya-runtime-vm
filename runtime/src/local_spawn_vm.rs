@@ -7,7 +7,7 @@ use std::{
 use crate::vm::{RuntimeData, VMBuilder};
 use crate::vm_runner::VMRunner;
 use futures::lock::Mutex;
-use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
+use ya_runtime_sdk::{runtime_api::deploy::ContainerVolume, server::ContainerEndpoint};
 
 fn get_project_dir() -> PathBuf {
     PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
@@ -25,7 +25,7 @@ fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
         joined
             // canonicalize checks existence of the file, it may failed, if does not exist
             .canonicalize()
-            .expect(&joined.display().to_string())
+            .unwrap_or_else(|_| panic!("{}", joined.display()))
             .as_path(),
     )
     .display()
@@ -44,10 +44,7 @@ pub fn prepare_tmp_path() -> PathBuf {
     temp_path
 }
 
-pub fn prepare_mount_directories(
-    base_path: &PathBuf,
-    number_of_drives: u64,
-) -> Vec<ContainerVolume> {
+pub fn prepare_mount_directories(base_path: &Path, number_of_drives: u64) -> Vec<ContainerVolume> {
     let mut mount_args = vec![];
 
     for id in 0..number_of_drives {
@@ -55,10 +52,12 @@ pub fn prepare_mount_directories(
 
         let inner_path = base_path.join(&name);
 
-        std::fs::create_dir_all(&inner_path).expect(&format!(
-            "Failed to create a dir {:?} inside temp dir",
-            inner_path.as_os_str()
-        ));
+        std::fs::create_dir_all(&inner_path).unwrap_or_else(|_| {
+            panic!(
+                "Failed to create a dir {:?} inside temp dir",
+                inner_path.as_os_str()
+            )
+        });
 
         mount_args.push(ContainerVolume {
             name,
@@ -88,7 +87,18 @@ pub async fn spawn_vm(
         let _qcow2_file = qcow2_file.canonicalize()?;
     }
 
-    let runtime_data = Arc::new(Mutex::new(RuntimeData::default()));
+    let addr = |port| {
+        ContainerEndpoint::UdpDatagram(std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
+            std::net::Ipv4Addr::new(127, 0, 0, 1),
+            port,
+        )))
+    };
+
+    let runtime_data = Arc::new(Mutex::new(RuntimeData {
+        vpn: Some(addr(7070)),
+        inet: Some(addr(7071)),
+        ..Default::default()
+    }));
 
     let vm = VMBuilder::new(
         cpu_cores,

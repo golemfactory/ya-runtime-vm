@@ -8,12 +8,12 @@ impl ArgsBuilder {
     }
 
     pub fn get_args_vector(&self) -> Vec<String> {
-        return self.arg_vec.clone();
+        self.arg_vec.clone()
     }
 
     pub fn get_args_string(&self) -> String {
-        return self.arg_vec.join(" ");
-    }
+        self.arg_vec.join(" ")
+}
 
     pub fn add_1(&mut self, arg: &str) {
         self.arg_vec.push(arg.to_string());

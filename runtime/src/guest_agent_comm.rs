@@ -15,6 +15,7 @@ use tokio::{
     spawn, time,
 };
 
+#[allow(clippy::enum_variant_names)]
 #[repr(u8)]
 enum MsgType {
     MsgQuit = 1,
@@ -36,6 +37,7 @@ enum SubMsgQuitType {
     SubMsgEnd,
 }
 
+#[allow(clippy::enum_variant_names)]
 enum SubMsgRunProcessType<'a> {
     SubMsgEnd,
     SubMsgRunProcessBin(&'a [u8]),
@@ -60,6 +62,7 @@ enum SubMsgMountVolumeType<'a> {
     SubMsgMountVolumePath(&'a [u8]),
 }
 
+#[allow(clippy::enum_variant_names)]
 enum SubMsgQueryOutputType {
     SubMsgEnd,
     SubMsgQueryOutputId(u64),
@@ -68,6 +71,7 @@ enum SubMsgQueryOutputType {
     SubMsgQueryOutputLen(u64),
 }
 
+#[allow(clippy::enum_variant_names)]
 enum SubMsgNetCtlType<'a> {
     SubMsgEnd,
     SubMsgNetCtlFlags(u16),
@@ -419,8 +423,7 @@ where
 {
     let (mut tx, rx) = mpsc::channel(8);
     spawn(async move {
-        let _ = rx
-            .for_each(|n| notification_handler(n, agent.clone()))
+        rx.for_each(|n| notification_handler(n, agent.clone()))
             .await;
     });
     async move {
@@ -572,6 +575,7 @@ impl GuestAgent {
         self.get_ok_response(msg_id).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn spawn_new_process(
         &mut self,
         bin: &str,
@@ -626,6 +630,7 @@ impl GuestAgent {
         self.get_u64_response(msg_id).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_process(
         &mut self,
         bin: &str,
@@ -642,6 +647,7 @@ impl GuestAgent {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_entrypoint(
         &mut self,
         bin: &str,
@@ -788,7 +794,6 @@ impl GuestAgent {
 
         self.stream.write_all(msg.as_ref()).await?;
 
-        let res = self.get_bytes_response(msg_id).await;
-        res
+        self.get_bytes_response(msg_id).await
     }
 }

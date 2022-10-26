@@ -1,5 +1,4 @@
 use futures::lock::Mutex;
-use std::convert::TryFrom;
 use std::path::Path;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
@@ -63,7 +62,7 @@ impl VMBuilder {
     pub fn new(
         cpu_cores: usize,
         mem_mib: usize,
-        task_package: &PathBuf,
+        task_package: &Path,
         rw_drive: Option<&PathBuf>,
     ) -> Self {
         Self {
@@ -94,7 +93,7 @@ impl VMBuilder {
 
         #[cfg(unix)]
         {
-            let uid = uuid::Uuid::new_v4().to_simple().to_string();
+            let uid = uuid::Uuid::new_v4().simple().to_string();
             manager_sock = std::env::temp_dir().join(format!("{}.sock", uid));
         }
 
@@ -115,8 +114,10 @@ impl VMBuilder {
 
         let acceleration = if cfg!(windows) { "whpx" } else { "kvm" };
 
-        let kernel_path = self.kernel_path.unwrap_or(FILE_VMLINUZ.to_string());
-        let ramfs_path = self.ramfs_path.unwrap_or(FILE_INITRAMFS.to_string());
+        let kernel_path = self.kernel_path.unwrap_or_else(|| FILE_VMLINUZ.to_string());
+        let ramfs_path = self
+            .ramfs_path
+            .unwrap_or_else(|| FILE_INITRAMFS.to_string());
 
         let temp_dir = std::env::temp_dir();
         let uid = uuid::Uuid::new_v4().simple().to_string();
@@ -135,7 +136,7 @@ impl VMBuilder {
             ab.add_2("-append", r#""console=ttyS0 panic=1""#);
             ab.add_2("-device", "virtio-serial");
             ab.add_2("-chardev", &chardev("manager_cdev", &manager_sock));
-            ab.add_2("-chardev", &chardev_9p("p9_cdev", &p9_sock));
+            ab.add_2("-chardev", &chardev_9p("p9_cdev", p9_sock));
             ab.add_2("-device", "virtserialport,chardev=manager_cdev,name=manager_port" );
             ab.add_2("-device", "virtserialport,chardev=p9_cdev,name=p9_port");
             ab.add_2("-drive", &format!("file={},cache=unsafe,readonly=on,format=raw,if=virtio", self.task_package));
@@ -173,19 +174,14 @@ impl VMBuilder {
         log::debug!("Arguments for VM array: {:?}", args);
         log::info!("VM runtime command line: {}", ab.get_args_string());
 
-        #[cfg(windows)]
-        return Ok(VM {
+        Ok(VM {
+            #[cfg(windows)]
             manager_sock: manager_sock.to_string(),
-            p9_sock: p9_sock.to_string(),
-            args,
-        });
-
-        #[cfg(unix)]
-        return Ok(VM {
+            #[cfg(unix)]
             manager_sock: manager_sock.display().to_string(),
             p9_sock: p9_sock.to_string(),
             args,
-        });
+        })
     }
 }
 
@@ -200,7 +196,7 @@ pub struct VM {
 
 impl VM {
     pub fn get_manager_sock(&self) -> &str {
-        &self.manager_sock.as_str()
+        &self.manager_sock
     }
 
     pub fn get_9p_sock(&self) -> &str {
@@ -380,5 +376,7 @@ fn configure_chardev_endpoint(
     return Ok(ContainerEndpoint::UnixStream(sock));
 
     #[cfg(windows)]
-    return Ok(ContainerEndpoint::TcpStream(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), id.1).into()));
+    return Ok(ContainerEndpoint::TcpStream(
+        SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), id.1).into(),
+    ));
 }

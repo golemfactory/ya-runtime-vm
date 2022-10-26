@@ -345,7 +345,7 @@ async fn run_command(
         )
         .await;
 
-    Ok(convert_result(result, "Running process")?)
+    convert_result(result, "Running process")
 }
 
 async fn kill_command(
@@ -505,10 +505,7 @@ async fn normalize_path<P: AsRef<Path>>(path: P) -> anyhow::Result<PathBuf> {
         .await?
         .components()
         .into_iter()
-        .filter(|c| match c {
-            Component::Prefix(_) => false,
-            _ => true,
-        })
+        .filter(|c| matches!(c, Component::Prefix(_)))
         .collect::<PathBuf>())
 }
 

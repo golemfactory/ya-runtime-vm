@@ -94,7 +94,7 @@ pub fn start_demux_communication(
                     if !is_benchmark_packet {
                         //check above guarantees that index will succeeded
                         if let Err(err) = p9_writers[channel]
-                            .write_all(&mut message_buffer[0..packet_size])
+                            .write_all(&message_buffer[0..packet_size])
                             .await
                         {
                             log::error!(
@@ -161,22 +161,20 @@ pub fn start_demux_communication(
                             let mut vm_write_guard = vm_write_part.lock().await;
 
                             let channel_u8 = channel as u8;
-                            let mut channel_bytes = channel_u8.to_le_bytes();
-                            if let Err(err) = vm_write_guard
-                                .borrow_mut()
-                                .write_all(&mut channel_bytes)
-                                .await
+                            let channel_bytes = channel_u8.to_le_bytes();
+                            if let Err(err) =
+                                vm_write_guard.borrow_mut().write_all(&channel_bytes).await
                             {
                                 log::error!("Write to vm_write_part failed: {}", err);
                                 break;
                             }
 
                             let bytes_read_u32 = bytes_read as u32;
-                            let mut packet_size_bytes = bytes_read_u32.to_le_bytes();
+                            let packet_size_bytes = bytes_read_u32.to_le_bytes();
 
                             if let Err(err) = vm_write_guard
                                 .borrow_mut()
-                                .write_all(&mut packet_size_bytes)
+                                .write_all(&packet_size_bytes)
                                 .await
                             {
                                 log::error!("Write to vm_write_part failed: {}", err);
@@ -185,7 +183,7 @@ pub fn start_demux_communication(
 
                             if let Err(err) = vm_write_guard
                                 .borrow_mut()
-                                .write_all(&mut message_buffer[0..bytes_read])
+                                .write_all(&message_buffer[0..bytes_read])
                                 .await
                             {
                                 log::error!("Write to vm_write_part failed: {}", err);
@@ -216,7 +214,7 @@ pub fn start_demux_communication(
     Ok(DemuxSocketHandle {
         join_handle_reader: vm_to_p9_splitter,
         abort_handle_reader: abort_handle,
-        join_handle_writers: join_handle_writers,
+        join_handle_writers,
         abort_handle_writers: abort_handles,
     })
 }

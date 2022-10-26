@@ -11,6 +11,7 @@ use std::time::Duration;
 use tokio::join;
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 
+#[derive(Default)]
 pub struct LocalNotifications {
     process_died: Mutex<HashMap<u64, Arc<sync::Notify>>>,
     output_available: Mutex<HashMap<u64, Arc<sync::Notify>>>,
@@ -18,17 +19,14 @@ pub struct LocalNotifications {
 
 impl LocalNotifications {
     pub fn new() -> Self {
-        LocalNotifications {
-            process_died: Mutex::new(HashMap::new()),
-            output_available: Mutex::new(HashMap::new()),
-        }
+        Self::default()
     }
 
     pub async fn get_process_died_notification(&self, id: u64) -> Arc<sync::Notify> {
         let notif = {
             let mut lock = self.process_died.lock().await;
             lock.entry(id)
-                .or_insert(Arc::new(sync::Notify::new()))
+                .or_insert_with(|| Arc::new(sync::Notify::new()))
                 .clone()
         };
 
@@ -39,7 +37,7 @@ impl LocalNotifications {
         let notif = {
             let mut lock = self.output_available.lock().await;
             lock.entry(id)
-                .or_insert(Arc::new(sync::Notify::new()))
+                .or_insert_with(|| Arc::new(sync::Notify::new()))
                 .clone()
         };
 
@@ -130,7 +128,7 @@ impl LocalAgentCommunication {
     }
 
     pub async fn run_bash_command(&self, cmd: &str) -> io::Result<()> {
-        let argv = ["bash", "-c", &cmd];
+        let argv = ["bash", "-c", cmd];
         self.run_command("/bin/bash", &argv).await
     }
 
@@ -162,7 +160,7 @@ impl LocalAgentCommunication {
         let future1 = read_streams(common.clone(), id, self.ga.clone());
         let common = common.clone();
         let future2 = async move {
-            let _process_finished = died.notified().await;
+            died.notified().await;
             let mut val = common.lock().await;
             *val = 1;
         };

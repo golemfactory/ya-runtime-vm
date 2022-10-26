@@ -30,16 +30,16 @@ pub enum ReaderOutputType {
 
 impl VMRunner {
     pub fn new(vm: VM) -> Self {
-        return VMRunner {
+        VMRunner {
             instance: None,
             vm,
             demux_handle: None,
             file_servers: None,
-        };
+        }
     }
 
     pub fn get_vm(&self) -> &VM {
-        return &self.vm;
+        &self.vm
     }
 
     pub async fn run_vm(&mut self, runtime_dir: PathBuf) -> anyhow::Result<()> {
@@ -57,8 +57,14 @@ impl VMRunner {
             .kill_on_drop(true)
             .spawn()?;
 
-        let stdout = instance.stdout.take().ok_or(anyhow!("stdout take error"))?;
-        let stderr = instance.stderr.take().ok_or(anyhow!("stdout take error"))?;
+        let stdout = instance
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("stdout take error"))?;
+        let stderr = instance
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow!("stdout take error"))?;
         spawn(VMRunner::reader_to_log(stdout, ReaderOutputType::StdOutput));
         spawn(VMRunner::reader_to_log(stderr, ReaderOutputType::StdError));
 
@@ -125,7 +131,7 @@ impl VMRunner {
             let mount_point_host = work_dir
                 .join(&volume.name)
                 .to_str()
-                .ok_or(anyhow!("cannot resolve 9P mount point"))?
+                .ok_or_else(|| anyhow!("cannot resolve 9P mount point"))?
                 .to_string();
 
             log::debug!("Creating inproc 9p server with mount point {mount_point_host}");

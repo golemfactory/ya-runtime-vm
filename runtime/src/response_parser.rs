@@ -90,27 +90,27 @@ pub async fn parse_one_response<T: AsyncRead + Unpin>(
     let typ = recv_u8(stream).await?;
     match typ {
         0 => Ok(GuestAgentMessage::Response(ResponseWithId {
-            id: id,
+            id,
             resp: Response::Ok,
         })),
         1 => {
             let val = recv_u64(stream).await?;
             Ok(GuestAgentMessage::Response(ResponseWithId {
-                id: id,
+                id,
                 resp: Response::OkU64(val),
             }))
         }
         2 => {
             let buf = recv_bytes(stream).await?;
             Ok(GuestAgentMessage::Response(ResponseWithId {
-                id: id,
+                id,
                 resp: Response::OkBytes(buf),
             }))
         }
         3 => {
             let code = recv_u32(stream).await?;
             Ok(GuestAgentMessage::Response(ResponseWithId {
-                id: id,
+                id,
                 resp: Response::Err(code),
             }))
         }
@@ -119,10 +119,7 @@ pub async fn parse_one_response<T: AsyncRead + Unpin>(
                 let proc_id = recv_u64(stream).await?;
                 let fd = recv_u32(stream).await?;
                 Ok(GuestAgentMessage::Notification(
-                    Notification::OutputAvailable {
-                        id: proc_id,
-                        fd: fd,
-                    },
+                    Notification::OutputAvailable { id: proc_id, fd },
                 ))
             } else {
                 Err(io::Error::new(
@@ -138,10 +135,7 @@ pub async fn parse_one_response<T: AsyncRead + Unpin>(
                 let type_ = ExitType::try_from(recv_u8(stream).await?)?;
                 Ok(GuestAgentMessage::Notification(Notification::ProcessDied {
                     id: proc_id,
-                    reason: ExitReason {
-                        status: status,
-                        type_: type_,
-                    },
+                    reason: ExitReason { status, type_ },
                 }))
             } else {
                 Err(io::Error::new(
