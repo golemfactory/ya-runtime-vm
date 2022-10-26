@@ -2,6 +2,7 @@ use std::convert::TryFrom;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
+use bollard_stubs::models::ContainerConfig;
 use futures::future::FutureExt;
 use futures::lock::Mutex;
 use futures::TryFutureExt;
@@ -96,8 +97,22 @@ impl ya_runtime_sdk::Runtime for Runtime {
         let vpn_endpoint = ctx.cli.runtime.vpn_endpoint.clone();
         let inet_endpoint = ctx.cli.runtime.inet_endpoint.clone();
 
-        log::info!("VPN endpoint: {:?}", vpn_endpoint);
-        log::info!("INET endpoint: {:?}", inet_endpoint);
+        log::info!("VPN endpoint: {vpn_endpoint:?}");
+        log::info!("INET endpoint: {inet_endpoint:?}");
+
+        let cmd_args = ctx.cli.command.args();
+        log::debug!("Start command parameters: {cmd_args:?}");
+
+        let entrypoint = if cmd_args.iter().any(|arg| *arg == "start_entrypoint") {
+            match extract_entrypoint(&deployment.config) {
+                None => return async {
+                            Err(Error::from_string("'start_entrypoint' flag is set but the container does not define an entrypoint!"))
+                        }.boxed_local(),
+                entrypoint => entrypoint,
+            }
+        } else {
+            None
+        };
 
         let data = self.data.clone();
         async move {
@@ -117,9 +132,14 @@ impl ya_runtime_sdk::Runtime for Runtime {
 
                 data.deployment.replace(deployment);
             }
-            start(workdir, data, emitter).await
+
+            let start_response = start(workdir, data.clone(), emitter).await?;
+
+            Ok(match entrypoint {
+                Some(entrypoint) => Some(run_entrypoint(start_response, entrypoint, data).await?),
+                None => start_response,
+            })
         }
-        .map_err(Into::into)
         .boxed_local()
     }
 
@@ -435,6 +455,54 @@ fn convert_result<T>(
             msg, error
         ))),
     }
+}
+
+fn extract_entrypoint(config: &ContainerConfig) -> Option<Vec<String>> {
+    let entrypoint = config
+        .entrypoint
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .chain(config.cmd.clone().unwrap_or_default())
+        .collect::<Vec<_>>();
+    if entrypoint.is_empty() {
+        None
+    } else {
+        Some(entrypoint)
+    }
+}
+
+async fn run_entrypoint(
+    start_response: Option<serde_json::Value>,
+    entrypoint: Vec<String>,
+    data: Arc<Mutex<RuntimeData>>,
+) -> Result<serde_json::Value, server::ErrorResponse> {
+    log::debug!("Starting container entrypoint: {entrypoint:?}");
+    let mut args = entrypoint.clone();
+    let bin_name = Path::new(&args[0])
+        .file_name()
+        .ok_or_else(|| Error::from_string("Invalid binary name for container entrypoint"))?
+        .to_string_lossy()
+        .to_string();
+    let bin = std::mem::replace(&mut args[0], bin_name);
+
+    run_command(
+        data,
+        server::RunProcess {
+            bin,
+            args,
+            ..Default::default()
+        },
+    )
+    .await
+    .map(|pid| {
+        use serde_json::json;
+
+        json!({
+            "start": start_response.unwrap_or(json!(null)),
+            "entrypoint": json!({ "pid": json!(pid), "command": json!(entrypoint)}),
+        })
+    })
 }
 
 #[tokio::main]
