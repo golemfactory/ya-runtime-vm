@@ -1236,7 +1236,7 @@ static void handle_query_output(msg_id_t msg_id) {
             }
             bool was_full = cyclic_buffer_free_size(&proc_desc->redirs[fd].buffer.cb) == 0;
             send_response_cyclic_buffer(msg_id, &proc_desc->redirs[fd].buffer.cb, len);
-            if (was_full && proc_desc->redirs[fd].type != REDIRECT_FD_PIPE_CYCLIC) {
+            if (was_full) {
                 if (add_epoll_fd_desc(&proc_desc->redirs[fd],
                                       proc_desc->redirs[fd].buffer.fds[0],
                                       fd,
@@ -1278,12 +1278,6 @@ static void handle_output_available(struct epoll_fd_desc** epoll_fd_desc_ptr) {
     size_t to_read = cyclic_buffer_free_size(cb);
     bool needs_notification = cyclic_buffer_data_size(cb) == 0;
 
-    if (epoll_fd_desc->data->type == REDIRECT_FD_PIPE_CYCLIC) {
-        /* Since fd is marked as non-blocking, it will return EAGAIN once we
-         * drain all available data. */
-        to_read = SIZE_MAX;
-    }
-
     if (to_read == 0) {
         /* Buffer is full, deregister `epoll_fd_desc` untill it get's emptied. */
         CHECK(del_epoll_fd_desc(epoll_fd_desc));
@@ -1302,8 +1296,8 @@ static void handle_output_available(struct epoll_fd_desc** epoll_fd_desc_ptr) {
         }
     } else if (ret == 0) {
         /* EOF. This actually cannot happen, since if we came here, there must
-         * have been some output available. Maybe just print an error and die()
-         * here? */
+         * have been some output available and space in the buffer. Maybe just
+         * print an error and die() here? */
         CHECK(del_epoll_fd_desc(epoll_fd_desc));
         *epoll_fd_desc_ptr = NULL;
     }
