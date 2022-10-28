@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <stdio.h>
 
 #include "cyclic_buffer.h"
 
@@ -56,16 +57,16 @@ static size_t min(size_t a, size_t b) {
 
 ssize_t cyclic_buffer_read(int fd, struct cyclic_buffer* cb, size_t count) {
     ssize_t got = 0;
-    size_t orig_cb_size = cyclic_buffer_data_size(cb);
+    size_t free_space = cyclic_buffer_free_size(cb);
 
-    while (count) {
+    while (count && free_space) {
         bool fixup_end = false;
         if (cb->end == cb->buf + cb->size) {
             cb->end = cb->buf;
             fixup_end = true;
         }
 
-        size_t this_read_size = min(cb->buf + cb->size - cb->end, count);
+        size_t this_read_size = min(free_space, min(cb->buf + cb->size - cb->end, count));
         ssize_t ret = read(fd, cb->end, this_read_size);
         if (ret <= 0) {
             if (fixup_end) {
@@ -89,23 +90,11 @@ ssize_t cyclic_buffer_read(int fd, struct cyclic_buffer* cb, size_t count) {
         cb->end += ret;
         count -= ret;
         got += ret;
+        free_space = cyclic_buffer_free_size(cb);
 
         if ((size_t)ret < this_read_size) {
             /* Not enough data to fill the whole request. */
             break;
-        }
-    }
-
-    if (got > 0) {
-        size_t x = orig_cb_size + got;
-        if (x > cb->size) {
-            x = cb->size;
-        }
-
-        if (cb->buf + x <= cb->end) {
-            cb->begin = cb->end - x;
-        } else {
-            cb->begin = cb->end + (cb->size - x);
         }
     }
 
@@ -114,12 +103,10 @@ ssize_t cyclic_buffer_read(int fd, struct cyclic_buffer* cb, size_t count) {
 
 ssize_t cyclic_buffer_write(int fd, struct cyclic_buffer* cb, size_t count) {
     ssize_t wrote = 0;
-    size_t orig_cb_size = cyclic_buffer_data_size(cb);
+    size_t available_data = cyclic_buffer_data_size(cb);
 
-    count = min(count, orig_cb_size);
-
-    while (count) {
-        size_t this_write_size = min(cb->buf + cb->size - cb->begin, count);
+    while (count && available_data) {
+        size_t this_write_size = min(available_data, min(cb->buf + cb->size - cb->begin, count));
         ssize_t ret = write(fd, cb->begin, this_write_size);
         if (ret < 0) {
             if (errno == EINTR) {
@@ -137,22 +124,21 @@ ssize_t cyclic_buffer_write(int fd, struct cyclic_buffer* cb, size_t count) {
         }
 
         cb->begin += ret;
-        if (cb->begin == cb->buf + cb->size) {
+        if (cb->begin == cb->end) {
+            // buffer is empty
+            cb->begin = cb->buf;
+            cb->end = cb->buf;
+        } else if (cb->begin == cb->buf + cb->size) {
             cb->begin = cb->buf;
         }
         count -= ret;
         wrote += ret;
+        available_data = cyclic_buffer_data_size(cb);
 
         if ((size_t)ret < this_write_size) {
             /* Short write. */
             break;
         }
-    }
-
-    if (wrote >= 0 && (size_t)wrote == orig_cb_size) {
-        /* The buffer is empty. */
-        cb->begin = cb->buf;
-        cb->end = cb->buf;
     }
 
     return wrote;
