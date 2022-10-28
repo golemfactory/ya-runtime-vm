@@ -1,6 +1,7 @@
 CC := musl-gcc
 CXX := /bin/false
-CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror -fPIE -pie -Iinclude/
+# -MMD to create dependency files (*.d) on first compilation
+CFLAGS := -MMD -std=c11 -O2 -Wall -Wextra -Werror -fPIE -pie -Iinclude/
 
 ifneq ($(DEBUG), "")
 CFLAGS += -DNDEBUG
@@ -28,6 +29,11 @@ TEST_DIR ?= tests
 OBJECTS = $(addprefix $(SRC_DIR)/,init.o communication.o process_bookkeeping.o cyclic_buffer.o)
 OBJECTS_EXT = $(addprefix $(SRC_DIR)/,network.o forward.o)
 
+# Add headers to object dependencies for conditional recompilation on header change
+SOURCES = $(wildcard $(SRC_DIR)/*.c)
+DEPS = $(SOURCES:%.c=%.d)
+-include $(DEPS)
+
 # Below are the steps performed by this Makefile:
 # - download the kernel && kernel headers apk packages
 # - verify checksums of the downloaded packages
@@ -46,18 +52,18 @@ all: vmlinuz-virt initramfs.cpio.gz
 $(SRC_DIR)/network.o: $(SRC_DIR)/network.c
 	$(QUIET_CC)$(CC) $(CFLAGS) \
 	    -I"$(CURDIR)/$(UNPACKED_HEADERS)/usr/include" \
-	    -o $@ -c $^
+	    -o $@ -c $<
 
-$(SRC_DIR)/forward.o: uring $(SRC_DIR)/forward.c
-	$(QUIET_CC)$(CC) -O2 -Wall -Wextra -Werror -fPIE -pie \
+$(SRC_DIR)/forward.o: $(SRC_DIR)/forward.c uring
+	$(QUIET_CC)$(CC) -MMD -O2 -Wall -Wextra -Werror -fPIE -pie \
 	    -I"$(CURDIR)/$(UNPACKED_HEADERS)/usr/include/" \
         -I"$(CURDIR)/$(LIBURING_SUBMODULE)/src/include/" \
         -Iinclude/ \
         -lstdthreads \
-	    -o $@ -c $(wordlist 2, $(words $^), $^)
+	    -o $@ -c $<
 
 %.o: %.c
-	$(QUIET_CC)$(CC) $(CFLAGS) -o $@ -c $^
+	$(QUIET_CC)$(CC) $(CFLAGS) -o $@ -c $<
 
 init: $(UNPACKED_HEADERS) uring $(OBJECTS) $(OBJECTS_EXT)
 	@echo init
