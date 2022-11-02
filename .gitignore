@@ -1,6 +1,7 @@
 /target
 *.swp
 *.o
+*.d
 /.idea/
 /.vscode/
 /tmp
