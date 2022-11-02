@@ -1,10 +1,6 @@
 use futures::future::FutureExt;
 use futures::lock::Mutex;
 use futures::TryFutureExt;
-use log::LevelFilter;
-use log4rs::append::file::FileAppender;
-use log4rs::config::{Appender, Config, Root};
-use log4rs::encode::pattern::PatternEncoder;
 use std::convert::TryFrom;
 use std::path::{Component, Path, PathBuf};
 use url::Url;
@@ -249,17 +245,6 @@ async fn start(
 
     let mut data = runtime_data.lock().await;
 
-    /* let mut cmd = vm.get_cmd(runtime_dir.join(FILE_RUNTIME));
-
-    cmd.current_dir(&runtime_dir);
-
-    log::debug!(
-        "Running VM in runtime directory: {}\nCommand: {} {}\n",
-        runtime_dir.to_str().unwrap_or("???"),
-        FILE_RUNTIME,
-        vm.get_args().join(" ")
-    );*/
-
     let mut vm_runner = VMRunner::new(vm);
     vm_runner.run_vm(runtime_dir).await?;
 
@@ -501,11 +486,11 @@ async fn join_network(
 }
 
 async fn normalize_path<P: AsRef<Path>>(path: P) -> anyhow::Result<PathBuf> {
-    Ok(fs::canonicalize(path)
+    Ok(fs::canonicalize(path.as_ref())
         .await?
         .components()
         .into_iter()
-        .filter(|c| matches!(c, Component::Prefix(_)))
+        .filter(|c| !matches!(c, Component::Prefix(_)))
         .collect::<PathBuf>())
 }
 
@@ -589,19 +574,6 @@ fn runtime_dir() -> io::Result<PathBuf> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let logfile = FileAppender::builder()
-        .encoder(Box::new(PatternEncoder::new("{d} {l} {t} - {m}{n}")))
-        .build(r#"logs/ya-runtime-vm.log"#)?;
-
-    let config = Config::builder()
-        .appender(Appender::builder().build("logfile", Box::new(logfile)))
-        .build(
-            Root::builder()
-                .appender("logfile")
-                .build(LevelFilter::Debug),
-        )?;
-
-    log4rs::init_config(config)?;
     log::debug!("Runtime VM starting - log level debug message ...");
     log::info!("Runtime VM starting - log level info message ...");
     ya_runtime_sdk::run::<Runtime>().await
