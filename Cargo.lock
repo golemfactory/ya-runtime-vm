@@ -2895,7 +2895,6 @@ dependencies = [
  "env_logger",
  "futures",
  "log",
- "log4rs",
  "pnet",
  "rand 0.8.5",
  "raw-cpuid",
