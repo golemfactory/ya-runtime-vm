@@ -23,6 +23,8 @@
 #include <unistd.h>
 
 #include "communication.h"
+#include "communication_win_p9.h"
+
 #include "cyclic_buffer.h"
 #include "network.h"
 #include "process_bookkeeping.h"
@@ -44,9 +46,9 @@
     }
 
 #define VPORT_CMD "/dev/vport0p1"
-#define VPORT_NET "/dev/vport0p2"
-#define VPORT_INET "/dev/vport0p3"
-
+#define VPORT_P9 "/dev/vport0p2"
+#define VPORT_NET "/dev/vport0p3"
+#define VPORT_INET "/dev/vport0p4"
 #define DEV_VPN "eth0"
 #define DEV_INET "eth1"
 
@@ -103,6 +105,7 @@ static noreturn void die(void) {
     sync();
     (void)close(g_epoll_fd);
     (void)close(g_sig_fd);
+    (void)close(g_p9_fd);
     (void)close(g_inet_fd);
     (void)close(g_vpn_fd);
     (void)close(g_cmds_fd);
@@ -123,6 +126,7 @@ static noreturn void die(void) {
 })
 
 static void load_module(const char* path) {
+    fprintf(stderr, "Loading module %s\n", path);
     int fd = CHECK(open(path, O_RDONLY | O_CLOEXEC));
     CHECK(syscall(SYS_finit_module, fd, "", 0));
     CHECK(close(fd));
@@ -1059,20 +1063,11 @@ out:
     }
 }
 
-static uint32_t do_mount(const char* tag, char* path) {
-    if (create_dir_path(path) < 0) {
-        return errno;
-    }
-    if (mount(tag, path, "9p", 0, "trans=virtio,version=9p2000.L") < 0) {
-        return errno;
-    }
-    return 0;
-}
-
 static void handle_mount(msg_id_t msg_id) {
     bool done = false;
     uint32_t ret = 0;
     char* tag = NULL;
+    uint32_t max_p9_message_size = 0;
     char* path = NULL;
 
     while (!done) {
@@ -1086,6 +1081,9 @@ static void handle_mount(msg_id_t msg_id) {
                 break;
             case SUB_MSG_MOUNT_VOLUME_TAG:
                 CHECK(recv_bytes(g_cmds_fd, &tag, NULL, /*is_cstring=*/true));
+                break;
+            case SUB_MSG_MOUNT_VOLUME_MAX_P9_MESSAGE_SIZE:
+                CHECK(recv_u32(g_cmds_fd, &max_p9_message_size));
                 break;
             case SUB_MSG_MOUNT_VOLUME_PATH:
                 CHECK(recv_bytes(g_cmds_fd, &path, NULL, /*is_cstring=*/true));
@@ -1102,7 +1100,12 @@ static void handle_mount(msg_id_t msg_id) {
         goto out;
     }
 
-    ret = do_mount(tag, path);
+    if (create_dir_path(path) < 0) {
+        ret = errno;
+        goto out;
+    }
+    ret = do_mount_win_p9(tag, g_p9_current_channel, max_p9_message_size, path);
+    g_p9_current_channel += 1;
 
 out:
     free(path);
@@ -1667,11 +1670,20 @@ int main(void) {
     load_module("/9pnet.ko");
     load_module("/9pnet_virtio.ko");
     load_module("/9p.ko");
+    load_module("/crc16.ko");
+    load_module("/crc32c_generic.ko");
+    load_module("/libcrc32c.ko");
+    load_module("/mbcache.ko");
+    load_module("/jbd2.ko");
+    load_module("/ext4.ko");
+
 
     g_cmds_fd = CHECK(open(VPORT_CMD, O_RDWR | O_CLOEXEC));
+    g_p9_fd = CHECK(open(VPORT_P9, O_RDWR | O_CLOEXEC));
 
     CHECK(mkdir("/mnt", S_IRWXU));
     CHECK(mkdir("/mnt/image", S_IRWXU));
+
     CHECK(mkdir("/mnt/overlay", S_IRWXU));
     CHECK(mkdir("/mnt/newroot", DEFAULT_DIR_PERMS));
 
@@ -1683,9 +1695,16 @@ int main(void) {
     CHECK(mkdir("/mnt/overlay/upper", S_IRWXU));
     CHECK(mkdir("/mnt/overlay/work", S_IRWXU));
 
-    CHECK(mount("/dev/vda", "/mnt/image", "squashfs", MS_RDONLY, ""));
+
+
+
+    CHECK(mount("/dev/vda", "/mnt/image", "squashfs", MS_RDONLY, NULL));
+
+
     CHECK(mount("overlay", "/mnt/newroot", "overlay", 0,
                 "lowerdir=/mnt/image,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work"));
+
+
 
     CHECK(umount2("/dev", MNT_DETACH));
 
@@ -1695,6 +1714,7 @@ int main(void) {
     CHECK(chdir("/"));
 
     create_dir("/dev", DEFAULT_DIR_PERMS);
+    create_dir("/dev2", DEFAULT_DIR_PERMS);
     create_dir("/tmp", DEFAULT_DIR_PERMS);
 
     CHECK(mount("proc", "/proc", "proc",
@@ -1731,11 +1751,18 @@ int main(void) {
                     makedev(5, 2)));
     }
 
+    if (access("/dev/vdb", F_OK) == 0) {
+        CHECK(mkdir("/mnt/internal", S_IRWXU));
+        CHECK(mount("/dev/vdb", "/mnt/internal", "ext4", 0, NULL));
+    }
+
     setup_network();
     setup_agent_directories();
 
     block_signals();
     setup_sigfd();
+
+    //make sure to create threads after blocking signals, not before. Otherwise signals are blocked.
 
     main_loop();
     stop_network();

@@ -97,7 +97,13 @@ async fn main() -> anyhow::Result<()> {
     let temp_dir = tempdir::TempDir::new("ya-runtime-vm")?;
 
     let temp_dir_string = temp_dir.path().display().to_string();
-    let drive_path_string = root_dir.join("squashfs_drive").display().to_string();
+    let drive_path_string = root_dir
+        .join("runtime")
+        .join("poc")
+        .join("squashfs")
+        .join("ubuntu.gvmi")
+        .display()
+        .to_string();
 
     let args = [
         "--task-package",
@@ -106,6 +112,7 @@ async fn main() -> anyhow::Result<()> {
         temp_dir_string.as_str(),
     ];
 
+    //TODO - this seems to be hardcoded too much. How can it work on Win?
     let runtime_path = PathBuf::from("/usr/lib/yagna/plugins/ya-runtime-vm/ya-runtime-vm");
 
     let mut cmd = Command::new(&runtime_path);

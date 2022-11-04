@@ -1,11 +1,17 @@
 CC := musl-gcc
 CXX := /bin/false
 # -MMD to create dependency files (*.d) on first compilation
+ifdef IGNORE_WARNINGS
+CFLAGS := -MMD -std=c11 -O2 -fPIE -pie -Iinclude/
+else
 CFLAGS := -MMD -std=c11 -O2 -Wall -Wextra -Werror -fPIE -pie -Iinclude/
+endif
 
 ifneq ($(DEBUG), "")
 CFLAGS += -DNDEBUG
 endif
+
+CFLAGS += -DWIN_P9_EXTRA_DEBUG_INFO=0
 
 ifneq ($(findstring $(MAKEFLAGS),s),s)
 ifndef V
@@ -26,7 +32,7 @@ LIBURING_SUBMODULE ?= liburing
 SRC_DIR ?= src
 TEST_DIR ?= tests
 
-OBJECTS = $(addprefix $(SRC_DIR)/,init.o communication.o process_bookkeeping.o cyclic_buffer.o)
+OBJECTS = $(addprefix $(SRC_DIR)/,init.o communication.o communication_win_p9.o process_bookkeeping.o cyclic_buffer.o)
 OBJECTS_EXT = $(addprefix $(SRC_DIR)/,network.o forward.o)
 
 # Add headers to object dependencies for conditional recompilation on header change
@@ -66,7 +72,7 @@ $(SRC_DIR)/forward.o: $(SRC_DIR)/forward.c uring
 	$(QUIET_CC)$(CC) $(CFLAGS) -o $@ -c $<
 
 init: $(UNPACKED_HEADERS) uring $(OBJECTS) $(OBJECTS_EXT)
-	@echo init
+	@echo "Compile params for init:" $(CC) $(CFLAGS)
 	$(QUIET_CC)$(CC) $(CFLAGS) -static -o $@ $(wordlist 3, $(words $^), $^) "$(CURDIR)/$(LIBURING_SUBMODULE)/src/liburing.a"
 	@# default musl libs on some distros have debug symbols, lets strip them (and everything else)
 	strip $@
@@ -109,6 +115,12 @@ initramfs.cpio.gz: init $(UNPACKED_KERNEL)
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/drivers/net/net_failover.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/drivers/net/virtio_net.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/9p/9p.ko initramfs
+	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/ext4/ext4.ko initramfs
+	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/mbcache.ko initramfs
+	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/jbd2/jbd2.ko initramfs
+	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/lib/crc16.ko initramfs
+	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/crypto/crc32c_generic.ko initramfs
+	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/lib/libcrc32c.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/squashfs/squashfs.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/overlayfs/overlay.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/fscache/fscache.ko initramfs
@@ -117,7 +129,7 @@ initramfs.cpio.gz: init $(UNPACKED_KERNEL)
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/core/failover.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/ipv6/ipv6.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/packet/af_packet.ko initramfs
-	cd initramfs && find . | cpio --quiet -o -H newc -R 0:0 | gzip -9 > ../$@
+	cd initramfs && find . | cpio -v -o -H newc -R 0:0 | gzip -9 > ../$@
 	$(RM) -rf initramfs
 
 TESTS_NAMES := cyclic_buffer
@@ -134,7 +146,7 @@ test: $(TESTS)
 
 .PHONY: clean
 clean:
-	$(RM) init $(SRC_DIR)/*.o $(TEST_DIR)/*.o *.o $(TESTS)
+	$(RM) init $(SRC_DIR)/*.o $(SRC_DIR)/*.d $(TEST_DIR)/*.o *.o $(TESTS)
 	$(RM) vmlinuz-virt initramfs.cpio.gz
 	$(MAKE) -s -C $(LIBURING_SUBMODULE) clean
 

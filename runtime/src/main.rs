@@ -1,19 +1,24 @@
 use std::convert::TryFrom;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
+
 
 use bollard_stubs::models::ContainerConfig;
 use futures::future::FutureExt;
 use futures::lock::Mutex;
 use futures::TryFutureExt;
+use url::Url;
+use ya_runtime_sdk::server::ContainerEndpoint;
+
 use structopt::StructOpt;
+use ya_runtime_vm::demux_socket_comm::MAX_P9_PACKET_SIZE;
+use ya_runtime_vm::vm::VMBuilder;
+
 use tokio::{
     fs,
     io::{self, AsyncWriteExt},
 };
-use url::Url;
-
-use ya_runtime_sdk::runtime_api::deploy::ContainerEndpoint;
 use ya_runtime_sdk::{
     runtime_api::{
         deploy::{DeployResult, StartMode},
@@ -21,30 +26,34 @@ use ya_runtime_sdk::{
     },
     serialize,
     server::Server,
-    Context, EmptyResponse, EndpointResponse, Error, ErrorExt, EventEmitter, OutputResponse,
-    ProcessId, ProcessIdResponse, RuntimeMode,
+    Context, EmptyResponse, EndpointResponse, Error, EventEmitter, OutputResponse, ProcessId,
+    ProcessIdResponse, RuntimeMode,
 };
+
 use ya_runtime_vm::{
     cpu::CpuInfo,
     deploy::Deployment,
-    guest_agent_comm::{RedirectFdType, RemoteCommandResult},
-    vmrt::{runtime_dir, start_vmrt, RuntimeData},
+    guest_agent_comm::{GuestAgent, Notification, RedirectFdType, RemoteCommandResult},
 };
 
-const FILE_TEST_IMAGE: &'static str = "self-test.gvmi";
-const FILE_DEPLOYMENT: &'static str = "deployment.json";
-const DEFAULT_CWD: &'static str = "/";
+use ya_runtime_vm::vm::RuntimeData;
+use ya_runtime_vm::vm_runner::VMRunner;
+
+const DIR_RUNTIME: &str = "runtime";
+const FILE_TEST_IMAGE: &str = "self-test.gvmi";
+const FILE_DEPLOYMENT: &str = "deployment.json";
+const DEFAULT_CWD: &str = "/";
 
 #[derive(StructOpt, Clone, Default)]
 #[structopt(rename_all = "kebab-case")]
 pub struct Cli {
     /// GVMI image path
     #[structopt(short, long, required_ifs(
-        &[
-            ("command", "deploy"),
-            ("command", "start"),
-            ("command", "run")
-        ])
+    &[
+    ("command", "deploy"),
+    ("command", "start"),
+    ("command", "run")
+    ])
     )]
     task_package: Option<PathBuf>,
     /// Number of logical CPU cores
@@ -80,19 +89,22 @@ impl ya_runtime_sdk::Runtime for Runtime {
     }
 
     fn start<'a>(&mut self, ctx: &mut Context<Self>) -> OutputResponse<'a> {
+        log::info!("ya_runtime_sdk::Runtime - start");
+
         let emitter = ctx
             .emitter
             .clone()
-            .expect("Service not running in Server mode");
-
+            .expect("Service is not running in Server mode");
         let workdir = ctx.cli.workdir.clone().expect("Workdir not provided");
 
         let deployment_file = std::fs::File::open(workdir.join(FILE_DEPLOYMENT))
-            .expect("Unable to open the deployment file");
+        .expect("Unable to open the deployment file");
         let deployment: Deployment = serialize::json::from_reader(deployment_file)
             .expect("Failed to read the deployment file");
 
         log::debug!("Deployment: {deployment:?}");
+
+        let data = self.data.clone();
 
         let vpn_endpoint = ctx.cli.runtime.vpn_endpoint.clone();
         let inet_endpoint = ctx.cli.runtime.inet_endpoint.clone();
@@ -114,7 +126,6 @@ impl ya_runtime_sdk::Runtime for Runtime {
             None
         };
 
-        let data = self.data.clone();
         async move {
             {
                 let mut data = data.lock().await;
@@ -194,7 +205,7 @@ impl ya_runtime_sdk::Runtime for Runtime {
 }
 
 async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<Option<serialize::json::Value>> {
-    let work_dir = normalize_path(&workdir).await?;
+    let workdir = normalize_path(&workdir).await?;
     let package_path = normalize_path(&cli.task_package.unwrap()).await?;
     let package_file = fs::File::open(&package_path).await?;
 
@@ -205,17 +216,16 @@ async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<Option<serialize::
         package_path,
     )
     .await
-    .or_err("Error reading package metadata")?;
+    .expect("Error reading package metadata");
 
     for vol in &deployment.volumes {
-        fs::create_dir_all(work_dir.join(&vol.name)).await?;
+        fs::create_dir_all(workdir.join(&vol.name)).await?;
     }
-
     fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
-        .open(work_dir.join(FILE_DEPLOYMENT))
+        .open(workdir.join(FILE_DEPLOYMENT))
         .await?
         .write_all(serde_json::to_string(&deployment)?.as_bytes())
         .await?;
@@ -232,7 +242,65 @@ async fn start(
     runtime_data: Arc<Mutex<RuntimeData>>,
     emitter: EventEmitter,
 ) -> anyhow::Result<Option<serialize::json::Value>> {
-    start_vmrt(work_dir, runtime_data, emitter).await
+    let runtime_dir = runtime_dir().expect("Unable to resolve current directory");
+
+    let deployment = runtime_data
+        .lock()
+        .await
+        .deployment()
+        .expect("Missing deployment data")
+        .clone();
+
+    let vm = VMBuilder::new(
+        deployment.cpu_cores,
+        deployment.mem_mib,
+        &deployment.task_package,
+        None,
+    )
+    .build(runtime_data.clone())
+    .await?;
+
+    let mut data = runtime_data.lock().await;
+
+    let mut vm_runner = VMRunner::new(vm);
+    vm_runner.run_vm(runtime_dir).await?;
+
+    vm_runner
+        .start_9p_service(&work_dir, &deployment.volumes)
+        .await?;
+
+    let ga = GuestAgent::connected(
+        vm_runner.get_vm().get_manager_sock(),
+        10,
+        move |notification, ga| {
+            let mut emitter = emitter.clone();
+            async move {
+                let status = notification_into_status(notification, ga).await;
+                emitter.emit(status).await;
+            }
+            .boxed()
+        },
+    )
+    .await?;
+
+    {
+        let mut ga = ga.lock().await;
+        for (idx, volume) in deployment.volumes.iter().enumerate() {
+            let max_p9_packet_size = u32::try_from(MAX_P9_PACKET_SIZE).unwrap();
+            ga.mount(
+                format!("mnt{}", idx).as_str(),
+                max_p9_packet_size,
+                volume.path.as_str(),
+            )
+            .await?
+            .expect("Mount failed");
+        }
+    }
+
+    data.vm_runner.replace(vm_runner);
+    data.ga.replace(ga);
+
+    Ok(None)
 }
 
 async fn run_command(
@@ -279,7 +347,7 @@ async fn run_command(
         )
         .await;
 
-    Ok(convert_result(result, "Running process")?)
+    convert_result(result, "Running process")
 }
 
 async fn kill_command(
@@ -298,7 +366,10 @@ async fn kill_command(
 async fn stop(runtime_data: Arc<Mutex<RuntimeData>>) -> Result<(), server::ErrorResponse> {
     log::debug!("got shutdown");
     let mut data = runtime_data.lock().await;
-    let mut runtime = data.runtime().unwrap();
+
+    let mut vm_runner = data.vm_runner.take().unwrap();
+
+    vm_runner.stop_p9_service().await;
 
     {
         let mutex = data.ga().unwrap();
@@ -306,8 +377,8 @@ async fn stop(runtime_data: Arc<Mutex<RuntimeData>>) -> Result<(), server::Error
         convert_result(ga.quit().await, "Sending quit")?;
     }
 
-    runtime
-        .wait()
+    vm_runner
+        .stop_vm(&Duration::from_secs(5), false)
         .await
         .expect("Waiting for runtime stop failed");
     Ok(())
@@ -326,7 +397,7 @@ fn offer() -> anyhow::Result<Option<serde_json::Value>> {
             "golem.inf.cpu.brand": cpu.model.brand,
             "golem.inf.cpu.model": model,
             "golem.inf.cpu.capabilities": cpu.capabilities,
-            "golem.runtime.capabilities": ["inet", "vpn", "manifest-support"]
+            "golem.runtime.capabilities": ["vpn"]
         },
         "constraints": ""
     })))
@@ -340,9 +411,8 @@ async fn test() -> anyhow::Result<()> {
             .join(FILE_TEST_IMAGE)
             .canonicalize()
             .expect("Test image not found");
-        println!("Task package: {}", task_package.display());
 
-        let work_dir = std::env::temp_dir();
+        log::debug!("Task package: {}", task_package.display());
         let runtime_data = RuntimeData {
             deployment: Some(Deployment {
                 cpu_cores: 1,
@@ -357,9 +427,13 @@ async fn test() -> anyhow::Result<()> {
         };
 
         println!("Starting runtime");
-        start(work_dir, runtime.data.clone(), EventEmitter::spawn(e))
-            .await
-            .expect("Failed to start runtime");
+        start(
+            std::env::temp_dir(),
+            runtime.data.clone(),
+            EventEmitter::spawn(e),
+        )
+        .await
+        .expect("Failed to start runtime");
 
         println!("Stopping runtime");
         stop(runtime.data.clone())
@@ -429,14 +503,11 @@ async fn join_network(
 }
 
 async fn normalize_path<P: AsRef<Path>>(path: P) -> anyhow::Result<PathBuf> {
-    Ok(fs::canonicalize(path)
+    Ok(fs::canonicalize(path.as_ref())
         .await?
         .components()
         .into_iter()
-        .filter(|c| match c {
-            Component::Prefix(_) => false,
-            _ => true,
-        })
+        .filter(|c| !matches!(c, Component::Prefix(_)))
         .collect::<PathBuf>())
 }
 
@@ -505,7 +576,70 @@ async fn run_entrypoint(
     })
 }
 
+async fn notification_into_status(
+    notification: Notification,
+    ga: Arc<Mutex<GuestAgent>>,
+) -> server::ProcessStatus {
+    match notification {
+        Notification::OutputAvailable { id, fd } => {
+            log::debug!("Process {} has output available on fd {}", id, fd);
+
+            let output = {
+                let result = {
+                    let mut guard = ga.lock().await;
+                    guard.query_output(id, fd as u8, 0, u64::MAX).await
+                };
+                match result {
+                    Ok(Ok(vec)) => vec,
+                    Ok(Err(e)) => {
+                        log::error!("Remote error while querying output: {:?}", e);
+                        Vec::new()
+                    }
+                    Err(e) => {
+                        log::error!("Error querying output: {:?}", e);
+                        Vec::new()
+                    }
+                }
+            };
+            let (stdout, stderr) = match fd {
+                1 => (output, Vec::new()),
+                _ => (Vec::new(), output),
+            };
+
+            server::ProcessStatus {
+                pid: id,
+                running: true,
+                return_code: 0,
+                stdout,
+                stderr,
+            }
+        }
+        Notification::ProcessDied { id, reason } => {
+            log::debug!("Process {} died with {:?}", id, reason);
+
+            // TODO: reason._type ?
+            server::ProcessStatus {
+                pid: id,
+                running: false,
+                return_code: reason.status as i32,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            }
+        }
+    }
+}
+
+fn runtime_dir() -> io::Result<PathBuf> {
+    Ok(std::env::current_exe()?
+        .parent()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?
+        .to_path_buf()
+        .join(DIR_RUNTIME))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    log::debug!("Runtime VM starting - log level debug message ...");
+    log::info!("Runtime VM starting - log level info message ...");
     ya_runtime_sdk::run::<Runtime>().await
 }

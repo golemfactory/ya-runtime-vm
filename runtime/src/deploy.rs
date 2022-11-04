@@ -3,10 +3,10 @@ use std::io::SeekFrom;
 use std::path::PathBuf;
 
 use bollard_stubs::models::ContainerConfig;
-use crc::crc32;
+use crc::{Crc, CRC_32_ISO_HDLC};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
-use tokio_byteorder::LittleEndian;
+use tokio_byteorder::{AsyncReadBytesExt, LittleEndian};
 use uuid::Uuid;
 
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
@@ -32,7 +32,7 @@ impl Deployment {
         task_package: PathBuf,
     ) -> Result<Self, anyhow::Error>
     where
-        Input: AsyncRead + AsyncSeek + Unpin,
+        Input: AsyncRead + AsyncReadBytesExt + AsyncSeek + Unpin,
     {
         let json_len: u32 = {
             let mut buf = [0; 8];
@@ -47,13 +47,15 @@ impl Deployment {
         };
         let json = {
             let mut buf = String::new();
-            let pos = -1 * (json_len + 8) as i64;
+            let pos = -(json_len as i64 + 8);
             input.seek(SeekFrom::End(pos)).await?;
             input.take(json_len as u64).read_to_string(&mut buf).await?;
             buf
         };
 
-        if crc32::checksum_ieee(json.as_bytes()) != crc {
+        let crc32 = Crc::<u32>::new(&CRC_32_ISO_HDLC);
+
+        if crc32.checksum(json.as_bytes()) != crc {
             return Err(anyhow::anyhow!("Invalid ContainerConfig crc32 sum"));
         }
 
@@ -81,7 +83,7 @@ fn parse_user(user: Option<&String>) -> anyhow::Result<(u32, u32)> {
     let user = user
         .map(|s| s.trim())
         .ok_or_else(|| anyhow::anyhow!("User field missing"))?;
-    let mut split = user.splitn(2, ":");
+    let mut split = user.splitn(2, ':');
     let uid: u32 = split
         .next()
         .ok_or_else(|| anyhow::anyhow!("Missing UID"))?

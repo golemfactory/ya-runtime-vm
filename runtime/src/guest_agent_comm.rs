@@ -1,19 +1,21 @@
+pub use crate::response_parser::Notification;
+use crate::response_parser::{parse_one_response, GuestAgentMessage, Response, ResponseWithId};
 use futures::channel::mpsc;
 use futures::future::{BoxFuture, FutureExt};
 use futures::lock::Mutex;
 use futures::{SinkExt, StreamExt};
-use std::path::Path;
 use std::sync::Arc;
 use std::{io, marker::PhantomData};
+#[cfg(windows)]
+use tokio::net::TcpStream;
+#[cfg(unix)]
+use tokio::net::UnixStream;
 use tokio::{
     io::{split, AsyncWriteExt, ReadHalf, WriteHalf},
-    net::UnixStream,
     spawn, time,
 };
 
-pub use crate::response_parser::Notification;
-use crate::response_parser::{parse_one_response, GuestAgentMessage, Response, ResponseWithId};
-
+#[allow(clippy::enum_variant_names)]
 #[repr(u8)]
 enum MsgType {
     MsgQuit = 1,
@@ -35,6 +37,7 @@ enum SubMsgQuitType {
     SubMsgEnd,
 }
 
+#[allow(clippy::enum_variant_names)]
 enum SubMsgRunProcessType<'a> {
     SubMsgEnd,
     SubMsgRunProcessBin(&'a [u8]),
@@ -55,9 +58,11 @@ enum SubMsgKillProcessType {
 enum SubMsgMountVolumeType<'a> {
     SubMsgEnd,
     SubMsgMountVolumeTag(&'a [u8]),
+    SubMsgMountVolumeMaxP9MessageSize(u32),
     SubMsgMountVolumePath(&'a [u8]),
 }
 
+#[allow(clippy::enum_variant_names)]
 enum SubMsgQueryOutputType {
     SubMsgEnd,
     SubMsgQueryOutputId(u64),
@@ -66,6 +71,7 @@ enum SubMsgQueryOutputType {
     SubMsgQueryOutputLen(u64),
 }
 
+#[allow(clippy::enum_variant_names)]
 enum SubMsgNetCtlType<'a> {
     SubMsgEnd,
     SubMsgNetCtlFlags(u16),
@@ -99,8 +105,23 @@ struct Message<T> {
     phantom: PhantomData<T>,
 }
 
+#[cfg(unix)]
+type PlatformStream = UnixStream;
+#[cfg(windows)]
+type PlatformStream = TcpStream;
+
+/*
+#[cfg(unix)]
+type PlatformAddr = Path;
+#[cfg(windows)]
+type PlatformAddr = SocketAddr;
+*/
+
+type OutputStream = WriteHalf<PlatformStream>;
+type InputStream = ReadHalf<PlatformStream>;
+
 pub struct GuestAgent {
-    stream: WriteHalf<UnixStream>,
+    stream: OutputStream,
     last_msg_id: u64,
     responses: mpsc::Receiver<ResponseWithId>,
     responses_reader_handle: Option<tokio::task::JoinHandle<io::Error>>,
@@ -273,8 +294,12 @@ impl EncodeInto for SubMsgMountVolumeType<'_> {
                 1u8.encode_into(buf);
                 tag.encode_into(buf);
             }
-            SubMsgMountVolumeType::SubMsgMountVolumePath(path) => {
+            SubMsgMountVolumeType::SubMsgMountVolumeMaxP9MessageSize(tag) => {
                 2u8.encode_into(buf);
+                tag.encode_into(buf);
+            }
+            SubMsgMountVolumeType::SubMsgMountVolumePath(path) => {
+                3u8.encode_into(buf);
                 path.encode_into(buf);
             }
         }
@@ -389,7 +414,7 @@ pub type RemoteCommandResult<T> = Result<T, /* exit code */ u32>;
 
 fn reader<'f, F>(
     agent: Arc<Mutex<GuestAgent>>,
-    mut stream: ReadHalf<UnixStream>,
+    mut stream: InputStream,
     mut notification_handler: F,
     mut responses: mpsc::Sender<ResponseWithId>,
 ) -> BoxFuture<'f, io::Error>
@@ -398,8 +423,7 @@ where
 {
     let (mut tx, rx) = mpsc::channel(8);
     spawn(async move {
-        let _ = rx
-            .for_each(|n| notification_handler(n, agent.clone()))
+        rx.for_each(|n| notification_handler(n, agent.clone()))
             .await;
     });
     async move {
@@ -421,18 +445,17 @@ where
 }
 
 impl GuestAgent {
-    pub async fn connected<F, P>(
-        path: P,
+    pub async fn connected<F>(
+        path: &str,
         timeout: u32,
         notification_handler: F,
     ) -> io::Result<Arc<Mutex<GuestAgent>>>
     where
         F: FnMut(Notification, Arc<Mutex<GuestAgent>>) -> BoxFuture<'static, ()> + Send + 'static,
-        P: AsRef<Path>,
     {
         let mut timeout_remaining = timeout;
         loop {
-            match UnixStream::connect(&path).await {
+            match PlatformStream::connect(path).await {
                 Ok(s) => {
                     let (stream_read, stream_write) = split(s);
                     let (response_send, response_receive) = mpsc::channel(10);
@@ -552,6 +575,7 @@ impl GuestAgent {
         self.get_ok_response(msg_id).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn spawn_new_process(
         &mut self,
         bin: &str,
@@ -606,6 +630,7 @@ impl GuestAgent {
         self.get_u64_response(msg_id).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_process(
         &mut self,
         bin: &str,
@@ -622,6 +647,7 @@ impl GuestAgent {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_entrypoint(
         &mut self,
         bin: &str,
@@ -653,13 +679,22 @@ impl GuestAgent {
         self.get_ok_response(msg_id).await
     }
 
-    pub async fn mount(&mut self, tag: &str, path: &str) -> io::Result<RemoteCommandResult<()>> {
+    pub async fn mount(
+        &mut self,
+        tag: &str,
+        p9_max_msg_size: u32,
+        path: &str,
+    ) -> io::Result<RemoteCommandResult<()>> {
         let mut msg = Message::default();
         let msg_id = self.get_new_msg_id();
 
         msg.create_header(msg_id);
 
         msg.append_submsg(&SubMsgMountVolumeType::SubMsgMountVolumeTag(tag.as_bytes()));
+
+        msg.append_submsg(&SubMsgMountVolumeType::SubMsgMountVolumeMaxP9MessageSize(
+            p9_max_msg_size,
+        ));
 
         msg.append_submsg(&SubMsgMountVolumeType::SubMsgMountVolumePath(
             path.as_bytes(),
