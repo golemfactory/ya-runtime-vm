@@ -103,7 +103,7 @@ impl ya_runtime_sdk::Runtime for Runtime {
         let cmd_args = ctx.cli.command.args();
         log::debug!("Start command parameters: {cmd_args:?}");
 
-        let entrypoint = if cmd_args.iter().any(|arg| *arg == "start_entrypoint") {
+        let entrypoint = if cmd_args.iter().any(|arg| *arg == "start-entrypoint") {
             match extract_entrypoint(&deployment.config) {
                 None => return async {
                             Err(Error::from_string("'start_entrypoint' flag is set but the container does not define an entrypoint!"))
@@ -326,7 +326,7 @@ fn offer() -> anyhow::Result<Option<serde_json::Value>> {
             "golem.inf.cpu.brand": cpu.model.brand,
             "golem.inf.cpu.model": model,
             "golem.inf.cpu.capabilities": cpu.capabilities,
-            "golem.runtime.capabilities": ["inet", "vpn", "manifest-support"]
+            "golem.runtime.capabilities": ["inet", "vpn", "manifest-support", "start-entrypoint"]
         },
         "constraints": ""
     })))
