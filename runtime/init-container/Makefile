@@ -134,7 +134,7 @@ test: $(TESTS)
 
 .PHONY: clean
 clean:
-	$(RM) init $(SRC_DIR)/*.o $(TEST_DIR)/*.o *.o $(TESTS)
+	$(RM) init $(SRC_DIR)/*.o $(SRC_DIR)/*.d $(TEST_DIR)/*.o *.o $(TESTS)
 	$(RM) vmlinuz-virt initramfs.cpio.gz
 	$(MAKE) -s -C $(LIBURING_SUBMODULE) clean
 
