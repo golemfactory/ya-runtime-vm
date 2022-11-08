@@ -17,9 +17,6 @@ struct redir_fd_desc {
         struct {
             struct cyclic_buffer cb;
             int fds[2];
-            bool closed;
-            // needed to send notification
-            uint64_t process_desc_id;
         } buffer;
     };
 };
@@ -28,8 +25,6 @@ struct process_desc {
     uint64_t id;
     pid_t pid;
     bool is_alive;
-    int32_t ssi_status;
-    int32_t ssi_code;
     struct redir_fd_desc redirs[3];
     struct process_desc* prev;
     struct process_desc* next;
