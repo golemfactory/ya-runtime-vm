@@ -26,6 +26,7 @@ use ya_runtime_sdk::{
 };
 use ya_runtime_vm::{
     cpu::CpuInfo,
+    gpu::GpuInfo,
     deploy::Deployment,
     guest_agent_comm::{RedirectFdType, RemoteCommandResult},
     vmrt::{runtime_dir, start_vmrt, RuntimeData},
@@ -314,11 +315,20 @@ async fn stop(runtime_data: Arc<Mutex<RuntimeData>>) -> Result<(), server::Error
 }
 
 fn offer() -> anyhow::Result<Option<serde_json::Value>> {
+    let gpu = GpuInfo::try_new()?;
     let cpu = CpuInfo::try_new()?;
     let model = format!(
         "Stepping {} Family {} Model {}",
         cpu.model.stepping, cpu.model.family, cpu.model.model
     );
+
+    let mut capabilities = vec!["inet", "vpn", "manifest-support", "start-entrypoint"];
+    let cuda_cap;
+
+    if gpu.name != "None" {
+        cuda_cap = format!("cuda, {}", gpu.name);
+        capabilities.push(&cuda_cap);
+    }
 
     Ok(Some(serde_json::json!({
         "properties": {
@@ -326,7 +336,7 @@ fn offer() -> anyhow::Result<Option<serde_json::Value>> {
             "golem.inf.cpu.brand": cpu.model.brand,
             "golem.inf.cpu.model": model,
             "golem.inf.cpu.capabilities": cpu.capabilities,
-            "golem.runtime.capabilities": ["inet", "vpn", "manifest-support", "start-entrypoint"]
+            "golem.runtime.capabilities": capabilities
         },
         "constraints": ""
     })))

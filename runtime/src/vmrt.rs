@@ -74,8 +74,6 @@ pub async fn start_vmrt(
         "-m",
         format!("{}M", deployment.mem_mib).as_str(),
         "-nographic",
-        "-vga",
-        "none",
         "-kernel",
         FILE_VMLINUZ,
         "-initrd",
@@ -107,6 +105,19 @@ pub async fn start_vmrt(
         .as_str(),
         "-no-reboot",
     ]);
+
+    match std::env::var("GPU_PCI") {
+        Ok(val) => {
+            if val != "no" {
+                cmd.arg("-device");
+                cmd.arg(format!("vfio-pci,host={}", val).as_str());
+            }
+        },
+        Err(_e) => {
+            cmd.arg("-vga");
+            cmd.arg("none");
+        }
+    }
 
     let (vpn, inet) =
     // backward-compatibility mode
