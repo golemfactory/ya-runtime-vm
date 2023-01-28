@@ -328,6 +328,8 @@ fn offer() -> anyhow::Result<Option<serde_json::Value>> {
     if gpu.name != "None" {
         cuda_cap = format!("cuda, {}", gpu.name);
         capabilities.push(&cuda_cap);
+        capabilities.push(&"cuda");
+        capabilities.push(&"gpu");
     }
 
     Ok(Some(serde_json::json!({
