@@ -1,6 +1,4 @@
-use std::convert::TryFrom;
-
-use raw_cpuid::CpuId;
+use raw_cpuid::{CpuId, CpuIdReader};
 
 pub struct CpuInfo {
     pub model: CpuModel,
@@ -10,7 +8,7 @@ pub struct CpuInfo {
 impl CpuInfo {
     pub fn try_new() -> anyhow::Result<CpuInfo> {
         let info = raw_cpuid::CpuId::new();
-        let model = CpuModel::try_from(&info)?;
+        let model = from_cpu_id(&info)?;
         let capabilities = cpu_features(&info)?;
 
         Ok(CpuInfo {
@@ -28,28 +26,24 @@ pub struct CpuModel {
     pub model: u16,
 }
 
-impl<'a> TryFrom<&'a CpuId> for CpuModel {
-    type Error = anyhow::Error;
+fn from_cpu_id<R: CpuIdReader>(info: &CpuId<R>) -> Result<CpuModel, anyhow::Error> {
+    let brand = info
+        .get_processor_brand_string()
+        .ok_or_else(|| anyhow::anyhow!("Unable to read CPU brand"))?;
+    let vendor = info
+        .get_vendor_info()
+        .ok_or_else(|| anyhow::anyhow!("Unable to read CPU vendor info"))?;
+    let features = info
+        .get_feature_info()
+        .ok_or_else(|| anyhow::anyhow!("Unable to read CPU features"))?;
 
-    fn try_from(info: &'a CpuId) -> Result<Self, Self::Error> {
-        let brand = info
-            .get_processor_brand_string()
-            .ok_or_else(|| anyhow::anyhow!("Unable to read CPU brand"))?;
-        let vendor = info
-            .get_vendor_info()
-            .ok_or_else(|| anyhow::anyhow!("Unable to read CPU vendor info"))?;
-        let features = info
-            .get_feature_info()
-            .ok_or_else(|| anyhow::anyhow!("Unable to read CPU features"))?;
-
-        Ok(CpuModel {
-            brand: brand.as_str().to_string(),
-            vendor: vendor.to_string(),
-            stepping: features.stepping_id(),
-            family: (features.extended_family_id() as u16) + (features.family_id() as u16),
-            model: ((features.extended_model_id() as u16) << 4) + (features.model_id() as u16),
-        })
-    }
+    Ok(CpuModel {
+        brand: brand.as_str().to_string(),
+        vendor: vendor.to_string(),
+        stepping: features.stepping_id(),
+        family: (features.extended_family_id() as u16) + (features.family_id() as u16),
+        model: ((features.extended_model_id() as u16) << 4) + (features.model_id() as u16),
+    })
 }
 
 macro_rules! flags {
@@ -62,7 +56,7 @@ macro_rules! flags {
     }}
 }
 
-fn cpu_features(info: &CpuId) -> anyhow::Result<Vec<String>> {
+fn cpu_features<R: CpuIdReader>(info: &CpuId<R>) -> anyhow::Result<Vec<String>> {
     let features = info
         .get_feature_info()
         .ok_or_else(|| anyhow::anyhow!("Unable to read CPU features"))?;
