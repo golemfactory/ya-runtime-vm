@@ -423,7 +423,6 @@ async fn join_network(
                 net.gateway, net_addr, iface
             ),
         )?;
-
     }
 
     Ok(endpoint)
