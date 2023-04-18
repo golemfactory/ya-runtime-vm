@@ -407,7 +407,7 @@ async fn join_network(
 
     for net in networks {
         let (net_addr, net_mask) = match iface {
-            server::NetworkInterface::Vpn => Default::default(), /*(net.addr, net.mask.clone())*/
+            server::NetworkInterface::Vpn => ("".to_string(), "".to_string()),
             server::NetworkInterface::Inet => Default::default(),
         };
 
@@ -423,6 +423,7 @@ async fn join_network(
                 net.gateway, net_addr, iface
             ),
         )?;
+
     }
 
     Ok(endpoint)
