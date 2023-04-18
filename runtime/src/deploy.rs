@@ -53,7 +53,6 @@ impl Deployment {
             buf
         };
 
-
         let crc32 = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 
         if crc32.checksum(json.as_bytes()) != crc {
