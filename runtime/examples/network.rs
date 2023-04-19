@@ -404,7 +404,7 @@ async fn main() -> anyhow::Result<()> {
             Err(code) => anyhow::bail!("Unable to set address {}", code),
         }
         match ga
-            .create_network("10.0.0.0", "255.255.255.0", "10.0.0.1", iface)
+            .network_add_route("10.0.0.0", "255.255.255.0", "10.0.0.1", iface)
             .await?
         {
             Ok(_) | Err(0) => (),

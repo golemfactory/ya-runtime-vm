@@ -694,7 +694,7 @@ impl GuestAgent {
         self.get_ok_response(msg_id).await
     }
 
-    pub async fn create_network(
+    pub async fn network_add_route(
         &mut self,
         addr: &str,
         mask: &str,

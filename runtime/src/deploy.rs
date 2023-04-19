@@ -3,7 +3,7 @@ use std::io::SeekFrom;
 use std::path::PathBuf;
 
 use bollard_stubs::models::ContainerConfig;
-use crc::crc32;
+use crc::{Crc, CRC_32_ISO_HDLC};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 use tokio_byteorder::LittleEndian;
@@ -53,7 +53,9 @@ impl Deployment {
             buf
         };
 
-        if crc32::checksum_ieee(json.as_bytes()) != crc {
+        let crc32 = Crc::<u32>::new(&CRC_32_ISO_HDLC);
+
+        if crc32.checksum(json.as_bytes()) != crc {
             return Err(anyhow::anyhow!("Invalid ContainerConfig crc32 sum"));
         }
 

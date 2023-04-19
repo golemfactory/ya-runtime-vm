@@ -406,23 +406,29 @@ async fn join_network(
     convert_result(ga.add_hosts(hosts.iter()).await, "Updating network hosts")?;
 
     for net in networks {
-        let (net_addr, net_mask) = match iface {
-            server::NetworkInterface::Vpn => (net.addr, net.mask.clone()),
-            server::NetworkInterface::Inet => Default::default(),
-        };
-
         convert_result(
             ga.add_address(&net.if_addr, &net.mask, iface as u16).await,
-            &format!("Adding interface address {} {}", net.if_addr, net.gateway),
+            &format!("Adding interface address {}", net.if_addr),
         )?;
-        convert_result(
-            ga.create_network(&net_addr, &net_mask, &net.gateway, iface as u16)
-                .await,
-            &format!(
-                "Creating route via {} for {} ({:?})",
-                net.gateway, net_addr, iface
-            ),
-        )?;
+
+        if net.gateway.is_empty() {
+            log::info!(
+                "No default gateway set. Skipping route creation for {}",
+                &net.if_addr
+            );
+        } else {
+            log::info!("Setting default gateway via {}", &net.gateway);
+            let net_addr = "0.0.0.0";
+            let net_mask = "0.0.0.0";
+            convert_result(
+                ga.network_add_route(&net_addr, &net_mask, &net.gateway, iface as u16)
+                    .await,
+                &format!(
+                    "Creating route via {} for {} ({:?})",
+                    net.gateway, net_addr, iface
+                ),
+            )?;
+        }
     }
 
     Ok(endpoint)
