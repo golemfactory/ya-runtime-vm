@@ -4,10 +4,6 @@ members = [
     "gvmkit",
 ]
 
-[patch.crates-io]
-ya-runtime-sdk = { git = "https://github.com/golemfactory/ya-runtime-sdk.git", rev = "f542b9219f163a52b9783c2c8c42e3da6dd3eb39" }
-ya-runtime-api = { git = "https://github.com/golemfactory/yagna.git", rev = "2222cadeed58ecc44295092fcb0bc9ffba8a3722"}
-
 [profile.release]
 codegen-units = 1
 lto = "fat"
