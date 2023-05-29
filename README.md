@@ -29,6 +29,15 @@ Prerequisites:
        sudo apt install musl musl-tools
     ```
 
+Git checkout:
+
+Init `runtime/init-container/liburing` submodule.
+
+```bash
+git submodule init
+git submodule update
+```
+
 Building:
 
 ```bash
@@ -97,4 +106,3 @@ SUBCOMMANDS:
     of those directories will appear as empty during execution.
     
     If you need to place static assets inside the image, try not to use the `VOLUME` command for that directory.
-
