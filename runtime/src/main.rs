@@ -14,11 +14,10 @@ use tokio::{
 };
 use url::Url;
 
-use ya_runtime_sdk::runtime_api::server::RuntimeHandler;
-use ya_runtime_sdk::{ProcessStatus, RuntimeStatus};
-use ya_runtime_sdk::runtime_api::deploy::ContainerEndpoint;
-use ya_runtime_sdk::runtime_api::server::proto::Output;
+use ya_runtime_sdk::runtime_api::deploy::{ContainerEndpoint, ContainerVolume};
 use ya_runtime_sdk::runtime_api::server::proto::output::Type;
+use ya_runtime_sdk::runtime_api::server::proto::Output;
+use ya_runtime_sdk::runtime_api::server::RuntimeHandler;
 use ya_runtime_sdk::{
     runtime_api::{
         deploy::{DeployResult, StartMode},
@@ -29,6 +28,7 @@ use ya_runtime_sdk::{
     Context, EmptyResponse, EndpointResponse, Error, ErrorExt, EventEmitter, OutputResponse,
     ProcessId, ProcessIdResponse, RuntimeMode,
 };
+use ya_runtime_sdk::{ProcessStatus, RuntimeStatus};
 use ya_runtime_vm::{
     cpu::CpuInfo,
     deploy::Deployment,
@@ -338,242 +338,212 @@ fn offer() -> anyhow::Result<Option<serde_json::Value>> {
 }
 
 async fn test() -> Result<Option<serde_json::Value>, server::ErrorResponse> {
-        let work_dir = std::env::temp_dir();
-        
-        let task_package = runtime_dir()
-            .expect("Runtime directory not found")
-            .join(FILE_TEST_IMAGE)
-            .canonicalize()
-            .expect("Test image not found");
+    let work_dir = std::env::temp_dir();
 
-        log::info!("Task package: {}", task_package.display());
+    let package_path = runtime_dir()
+        .expect("Runtime directory not found")
+        .join(FILE_TEST_IMAGE)
+        .canonicalize()
+        .expect("Test image not found");
 
-        let runtime_data = RuntimeData {
-            deployment: Some(Deployment {
-                cpu_cores: 1,
-                mem_mib: 128,
-                task_package,
+    log::info!("Task package: {}", package_path.display());
+
+    let package_file = fs::File::open(package_path.clone())
+        .await
+        .or_err("Error reading package file")?;
+    let deployment = Deployment::try_from_input(package_file, 1, 125, package_path.clone())
+        .await
+        .or_err("Error reading package metadata")?;
+    
+    for vol in &deployment.volumes {
+        let vol_dir = work_dir.join(&vol.name);
+        log::debug!("Creating volume dir: {vol_dir:?} for path {}", vol.path);
+        fs::create_dir_all(vol_dir).await.or_err("Failed to create volume dir")?;
+    }
+    let runtime_data = RuntimeData {
+        deployment: Some(deployment),
+        ..Default::default()
+    };
+    let runtime = Runtime {
+        data: Arc::new(Mutex::new(runtime_data)),
+    };
+
+    // let (tx, mut rx) = futures::channel::mpsc::channel::<serde_json::Value>(1);
+
+    server::run_async(|e| async {
+        let ctx = Context::try_new().expect("Failed to initialize context");
+
+        log::info!("Starting");
+        let emitter = EventEmitter::spawn(e);
+        // let emitter = EventEmitter::spawn(MyHandler { e: Box::new(e) });
+        let start_response = start(work_dir, runtime.data.clone(), emitter.clone())
+            .await
+            .expect("Failed to start runtime");
+        log::info!("Response {:?}", start_response);
+
+        {
+            let run: ya_runtime_sdk::RunProcess = server::RunProcess {
+                // bin: "ls".into(),
+                bin: "/bin/ya-self-test".into(),
+                args: vec![
+                    "ya-self-test".into(),
+                    ],
+                // stdout: Some(),
+                work_dir: "/data".into(),
                 ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        // let (tx, mut rx) = futures::channel::mpsc::channel::<serde_json::Value>(1);
-        
-        server::run_async(|e| async {
-
-            let ctx = Context::try_new().expect("Failed to initialize context");
-            // ctx.emitter.unwrap().
-            let runtime = Runtime {
-                data: Arc::new(Mutex::new(runtime_data)),
             };
-            log::info!("Starting");
-            // let emitter = EventEmitter::spawn(e);
-            // let emitter = MyHandler {};
-            let emitter = EventEmitter::spawn(MyHandler { e: Box::new(e) });
-            let start_response = start(work_dir, runtime.data.clone(), emitter.clone()).await
-                .expect("Failed to start runtime");
-            log::info!("Response {:?}", start_response);
-            
+
+            // let run: ya_runtime_sdk::RunProcess = server::RunProcess {
+            //     // bin: "ls".into(),
+            //     bin: "/bin/sh".into(),
+            //     args: vec![
+            //         "sh".into(),
+            //         "-c".into(),
+            //         "ya-self-test".into(),
+            //         ">".into(),
+            //         "/data/self-test.json".into(),
+            //         ],
+            //     // stdout: Some(),
+            //     // work_dir: "/".into(),
+            //     ..Default::default()
+            // };
+
+            // let run: ya_runtime_sdk::RunProcess =  server::RunProcess {
+            //     // bin: "ls".into(),
+            //     bin: "/bin/sh".into(),
+            //     args: vec![
+            //         "sh".into(),
+            //         "-c".into(),
+            //         "date".into(),
+            //         // "sleep 5;".into(),
+            //         // "ya-self-test".into()
+            //         ],
+            //     // stdout: Some(),
+            //     // work_dir: "/".into(),
+            //     ..Default::default()
+            // };
+
+            // log::info!("Running ya-self-test");
+
+            // let resp = run_command(
+            //     runtime.data.clone(),
+            //     run,
+            // )
+            // .await
+            // .map(|pid| {
+            //     use serde_json::json;
+
+            //     json!({
+            //         "start": start_response.unwrap_or(json!(null)),
+            //         "entrypoint": json!({ "pid": json!(pid) }),
+            //     })
+            // });
+            // log::info!("ya-self-test output {:?}", resp);
+
             {
-                // // Output::
-                // let run: ya_runtime_sdk::RunProcess =  server::RunProcess {
-                //     // bin: "ls".into(),
-                //     bin: "/usr/local/bin/ya-self-test".into(),
-                //     args: vec!["ya-self-test".into()],
-                //     // stdout: Some(),
-                //     // work_dir: "/".into(),
-                //     ..Default::default()
-                // };
+                let res = run_command(
+                    runtime.data.clone(),
+                    run,
+                )
+                .await;
+                log::info!("Result: {res:?}");
 
-                let run: ya_runtime_sdk::RunProcess =  server::RunProcess {
-                    // bin: "ls".into(),
-                    bin: "/bin/sh".into(),
-                    args: vec![
-                        "sh".into(),
-                        "-c".into(),  
-                        "date".into(),
-                        // "sleep 5;".into(),
-                        // "ya-self-test".into()
-                        ],
-                    // stdout: Some(),
-                    // work_dir: "/".into(),
-                    ..Default::default()
-                };
-                
-                // log::info!("Running ya-self-test");
+                // ///////////////////
+                // let runtime_data = runtime.data.clone();
+                // let data = runtime_data.lock().await;
+                // let deployment = data.deployment().expect("Runtime not started");
 
-                // let resp = run_command(
-                //     runtime.data.clone(),
-                //     run,
-                // )
-                // .await
-                // .map(|pid| {
-                //     use serde_json::json;
+                // let (uid, gid) = deployment.user;
+                // let env = deployment.env();
+                // let cwd = deployment
+                //     .config
+                //     .working_dir
+                //     .as_ref()
+                //     .filter(|s| !s.trim().is_empty())
+                //     .map(|s| s.as_str())
+                //     .unwrap_or_else(|| DEFAULT_CWD);
 
-                //     json!({
-                //         "start": start_response.unwrap_or(json!(null)),
-                //         "entrypoint": json!({ "pid": json!(pid) }),
-                //     })
-                // });
-                // log::info!("ya-self-test output {:?}", resp);
+                // log::debug!("got run process: {:?}", run);
+                // log::debug!("work dir: {:?}", deployment.config.working_dir);
 
-                {
-                    ///////////////////
-                    let runtime_data = runtime.data.clone();
-                    let data = runtime_data.lock().await;
-                    let deployment = data.deployment().expect("Runtime not started");
-
-                    let (uid, gid) = deployment.user;
-                    let env = deployment.env();
-                    let cwd = deployment
-                        .config
-                        .working_dir
-                        .as_ref()
-                        .filter(|s| !s.trim().is_empty())
-                        .map(|s| s.as_str())
-                        .unwrap_or_else(|| DEFAULT_CWD);
-
-                    log::debug!("got run process: {:?}", run);
-                    log::debug!("work dir: {:?}", deployment.config.working_dir);
-
-                    // data.ga().unwrap().lock().
-                    // emitter.
-                    // e.
-
-                    let result = data
-                        .ga()
-                        .unwrap()
-                        .lock()
-                        .await
-                        .run_process(
-                            &run.bin,
-                            run.args
-                                .iter()
-                                .map(|s| s.as_ref())
-                                .collect::<Vec<&str>>()
-                                .as_slice(),
-                            Some(&env[..]),
-                            uid,
-                            gid,
-                            &[
-                                None,
-                                // Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
-                                // Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
-                                Some(RedirectFdType::RedirectFdPipeCyclic(0x1000)),
-                                Some(RedirectFdType::RedirectFdPipeCyclic(0x1000)),
-                            ],
-                            Some(cwd),
-                        )
-                        .await;
-                    
-
-
-                        let run_sleep: ya_runtime_sdk::RunProcess =  server::RunProcess {
-                            // bin: "ls".into(),
-                            bin: "/bin/sh".into(),
-                            args: vec![
-                                "sh".into(),
-                                "-c".into(),  
-                                // "date".into(),
-                                "sleep 10s".into(),
-                                // "ya-self-test".into()
-                                ],
-                            // stdout: Some(),
-                            // work_dir: "/".into(),
-                            ..Default::default()
-                        };
-
-                        
-                    let sleep_result = data
-                    .ga()
-                    .unwrap()
-                    .lock()
-                    .await
-                    .run_process(
-                        &run_sleep.bin,
-                        run_sleep.args
-                            .iter()
-                            .map(|s| s.as_ref())
-                            .collect::<Vec<&str>>()
-                            .as_slice(),
-                        Some(&env[..]),
-                        uid,
-                        gid,
-                        &[
-                            None,
-                            // Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
-                            // Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
-                            Some(RedirectFdType::RedirectFdPipeCyclic(0x1000)),
-                            Some(RedirectFdType::RedirectFdPipeCyclic(0x1000)),
-                        ],
-                        Some(cwd),
-                    )
-                    .await;
-
-
-                    // match ga.query_output(id, 1, 0, u64::MAX).await? {
-                    //     Ok(out) => {
-                    //         println!("Output:");
-                    //         io::stdout().write_all(&out)?;
-                    //     }
-                    //     Err(code) => println!("Output query failed with: {}", code),
-                    // }
-
-
-
-                }
+                // let result = data
+                //     .ga()
+                //     .unwrap()
+                //     .lock()
+                //     .await
+                //     .run_process(
+                //         &run.bin,
+                //         run.args
+                //             .iter()
+                //             .map(|s| s.as_ref())
+                //             .collect::<Vec<&str>>()
+                //             .as_slice(),
+                //         Some(&env[..]),
+                //         uid,
+                //         gid,
+                //         &[
+                //             None,
+                //             // Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
+                //             // Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
+                //             Some(RedirectFdType::RedirectFdPipeCyclic(0x1000)),
+                //             Some(RedirectFdType::RedirectFdPipeCyclic(0x1000)),
+                //         ],
+                //         Some(cwd),
+                //     )
+                //     .await;
             }
+        }
 
-            println!("Stopping runtime");
-            stop(runtime.data.clone())
-                .await
-                .expect("Failed to stop runtime");
-    
-            tokio::spawn(async move {
-                // the server refuses to stop by itself; force quit
-                std::process::exit(0);
-            });
-    
-            Server::new(runtime, ctx)
-        }).await;
+        println!("Stopping runtime");
+        stop(runtime.data.clone())
+            .await
+            .expect("Failed to stop runtime");
 
-//     log::info!("Running self-test cmd");
+        tokio::spawn(async move {
+            // the server refuses to stop by itself; force quit
+            std::process::exit(0);
+        });
 
-//     let bin = "ya-self-test".into();
-//     let args = vec![];
-//     let code = run_command(
-//         runtime.data,
-//         server::RunProcess {
-//             bin,
-//             args,
-//             work_dir,
-//             // output?
-//             ..Default::default()
-//         },
-//     )
-//     .await.unwrap_or(13);
+        Server::new(runtime, ctx)
+    })
+    .await;
 
-//     //TODO
+    //     log::info!("Running self-test cmd");
+
+    //     let bin = "ya-self-test".into();
+    //     let args = vec![];
+    //     let code = run_command(
+    //         runtime.data,
+    //         server::RunProcess {
+    //             bin,
+    //             args,
+    //             work_dir,
+    //             // output?
+    //             ..Default::default()
+    //         },
+    //     )
+    //     .await.unwrap_or(13);
+
+    //     //TODO
     Ok(Some(serde_json::json!({ "code": 00000 })))
 }
 
-struct MyHandler {
-    e: Box<dyn RuntimeHandler + 'static>,
-}
+// struct MyHandler {
+//     e: Box<dyn RuntimeHandler + 'static>,
+// }
 
-impl RuntimeHandler for MyHandler {
-    fn on_process_status<'a>(&self, status: ProcessStatus) -> futures::future::BoxFuture<'a, ()> {
-        println!("YYYYYYYYYYYYYYYY ProcessStatus: {:?}", status);
-        // async {}.boxed()
-        self.e.on_process_status(status)
-    }
+// impl RuntimeHandler for MyHandler {
+//     fn on_process_status<'a>(&self, status: ProcessStatus) -> futures::future::BoxFuture<'a, ()> {
+//         println!("YYYYYYYYYYYYYYYY ProcessStatus: {:?}", status);
+//         // async {}.boxed()
+//         self.e.on_process_status(status)
+//     }
 
-    fn on_runtime_status<'a>(&self, status: RuntimeStatus) -> futures::future::BoxFuture<'a, ()> {
-        println!("XXXXXXXXXXXXXXXX RuntimeStatus: {:?}", status);
-        self.e.on_runtime_status(status)
-    }
-}
+//     fn on_runtime_status<'a>(&self, status: RuntimeStatus) -> futures::future::BoxFuture<'a, ()> {
+//         println!("XXXXXXXXXXXXXXXX RuntimeStatus: {:?}", status);
+//         self.e.on_runtime_status(status)
+//     }
+// }
 
 async fn join_network(
     runtime_data: Arc<Mutex<RuntimeData>>,
