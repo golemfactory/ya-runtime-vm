@@ -1,6 +1,7 @@
 use std::convert::TryFrom;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use bollard_stubs::models::ContainerConfig;
 use futures::future::FutureExt;
@@ -8,6 +9,7 @@ use futures::lock::Mutex;
 use futures::TryFutureExt;
 use serde::__private::de;
 use structopt::StructOpt;
+use tokio::time::sleep;
 use tokio::{
     fs,
     io::{self, AsyncWriteExt},
@@ -441,12 +443,18 @@ async fn test() -> Result<Option<serde_json::Value>, server::ErrorResponse> {
             // log::info!("ya-self-test output {:?}", resp);
 
             {
+                sleep(Duration::from_secs(3)).await;
+                log::debug!("Starting. Runtime: {:?}", runtime.data);
+                log::debug!("Run: {run:?}");
+
                 let res = run_command(
                     runtime.data.clone(),
                     run,
                 )
                 .await;
                 log::info!("Result: {res:?}");
+
+                sleep(Duration::from_secs(3)).await;
 
                 // ///////////////////
                 // let runtime_data = runtime.data.clone();
