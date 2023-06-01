@@ -1,19 +1,27 @@
 use std::convert::TryFrom;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
+use std::time::Duration;
 
 use bollard_stubs::models::ContainerConfig;
 use futures::future::FutureExt;
 use futures::lock::Mutex;
 use futures::TryFutureExt;
+use serde::__private::de;
+use serde_json::Value;
 use structopt::StructOpt;
+use tokio::time::sleep;
 use tokio::{
     fs,
     io::{self, AsyncWriteExt},
 };
 use url::Url;
 
-use ya_runtime_sdk::runtime_api::deploy::ContainerEndpoint;
+use ya_runtime_sdk::runtime_api::deploy::{ContainerEndpoint, ContainerVolume};
+use ya_runtime_sdk::runtime_api::server::proto::output::Type;
+use ya_runtime_sdk::runtime_api::server::proto::Output;
+use ya_runtime_sdk::runtime_api::server::RuntimeHandler;
 use ya_runtime_sdk::{
     runtime_api::{
         deploy::{DeployResult, StartMode},
@@ -24,6 +32,8 @@ use ya_runtime_sdk::{
     Context, EmptyResponse, EndpointResponse, Error, ErrorExt, EventEmitter, OutputResponse,
     ProcessId, ProcessIdResponse, RuntimeMode,
 };
+use ya_runtime_sdk::{ProcessStatus, RuntimeStatus};
+use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification};
 use ya_runtime_vm::{
     cpu::CpuInfo,
     deploy::Deployment,
@@ -178,7 +188,7 @@ impl ya_runtime_sdk::Runtime for Runtime {
         async move { Ok(offer()?) }.boxed_local()
     }
 
-    fn test<'a>(&mut self, _: &mut Context<Self>) -> EmptyResponse<'a> {
+    fn test<'a>(&mut self, ctx: &mut Context<Self>) -> EmptyResponse<'a> {
         test().map_err(Into::into).boxed_local()
     }
 
@@ -333,35 +343,79 @@ fn offer() -> anyhow::Result<Option<serde_json::Value>> {
 }
 
 async fn test() -> anyhow::Result<()> {
+    let work_dir = std::env::temp_dir();
+
+    let package_path = runtime_dir()
+        .expect("Runtime directory not found")
+        .join(FILE_TEST_IMAGE)
+        .canonicalize()
+        .expect("Test image not found");
+
+    log::info!("Task package: {}", package_path.display());
+
+    let package_file = fs::File::open(package_path.clone())
+        .await
+        .or_err("Error reading package file")?;
+    let deployment = Deployment::try_from_input(package_file, 1, 125, package_path.clone())
+        .await
+        .or_err("Error reading package metadata")?;
+
+    for vol in &deployment.volumes {
+        let vol_dir = work_dir.join(&vol.name);
+        log::debug!("Creating volume dir: {vol_dir:?} for path {}", vol.path);
+        fs::create_dir_all(vol_dir)
+            .await
+            .or_err("Failed to create volume dir")?;
+    }
+    let runtime_data = RuntimeData {
+        deployment: Some(deployment),
+        ..Default::default()
+    };
+    let runtime = Runtime {
+        data: Arc::new(Mutex::new(runtime_data)),
+    };
+
+    let mut status: Option<ProcessStatus> = None;
     server::run_async(|e| async {
         let ctx = Context::try_new().expect("Failed to initialize context");
-        let task_package = runtime_dir()
-            .expect("Runtime directory not found")
-            .join(FILE_TEST_IMAGE)
-            .canonicalize()
-            .expect("Test image not found");
-        println!("Task package: {}", task_package.display());
 
-        let work_dir = std::env::temp_dir();
-        let runtime_data = RuntimeData {
-            deployment: Some(Deployment {
-                cpu_cores: 1,
-                mem_mib: 128,
-                task_package,
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let runtime = Runtime {
-            data: Arc::new(Mutex::new(runtime_data)),
-        };
-
-        println!("Starting runtime");
-        start(work_dir, runtime.data.clone(), EventEmitter::spawn(e))
+        log::info!("Starting");
+        let (status_sender, mut status_receiver) = mpsc::channel();
+        let emitter = EventEmitter::spawn(ProcessOutputHandler {
+            handler: Box::new(e),
+            status_sender,
+        });
+        let start_response = start(work_dir.clone(), runtime.data.clone(), emitter.clone())
             .await
             .expect("Failed to start runtime");
+        log::info!("Response {:?}", start_response);
 
-        println!("Stopping runtime");
+        let run: ya_runtime_sdk::RunProcess = server::RunProcess {
+            bin: "/ya-self-test".into(),
+            args: vec!["ya-self-test".into()],
+            work_dir: "/data".into(),
+            ..Default::default()
+        };
+
+        log::debug!("Starting. Runtime: {:?}", runtime.data);
+        log::debug!("Run: {run:?}");
+
+        let pid = run_command(runtime.data.clone(), run)
+            .await
+            .expect("Can run command");
+
+        let (final_status_sender, final_status_receiver) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let status = async {
+                listen_process_status(&mut status_receiver, pid).expect("Can listen on process")
+            }
+            .await;
+            final_status_sender.send(status)
+        });
+        status = Some(final_status_receiver.await.expect("Got status"));
+        log::info!("Process finished: {status:?}");
+
+        log::info!("Stopping runtime");
         stop(runtime.data.clone())
             .await
             .expect("Failed to stop runtime");
@@ -371,10 +425,68 @@ async fn test() -> anyhow::Result<()> {
             std::process::exit(0);
         });
 
+        let status = status.expect("Failed to run self test process");
+        if status.return_code == 0 {
+            let response: Value = serde_json::from_slice(&status.stdout)
+                .expect("Cannot serialize self test stdout to json.");
+            println!("{}", response.to_string())
+        } else {
+            let err_message = std::str::from_utf8(&status.stderr)
+                .expect("Can read stderr as string.")
+                .to_string();
+            eprintln!("self test process failed: {err_message}");
+        }
+
         Server::new(runtime, ctx)
     })
     .await;
     Ok(())
+}
+struct ProcessOutputHandler {
+    status_sender: mpsc::Sender<ProcessStatus>,
+    handler: Box<dyn RuntimeHandler + 'static>,
+}
+
+impl RuntimeHandler for ProcessOutputHandler {
+    fn on_process_status<'a>(&self, status: ProcessStatus) -> futures::future::BoxFuture<'a, ()> {
+        if let Err(err) = self.status_sender.send(status.clone()) {
+            log::error!("Failed to send process status {err}");
+        }
+        self.handler.on_process_status(status)
+    }
+
+    fn on_runtime_status<'a>(&self, status: RuntimeStatus) -> futures::future::BoxFuture<'a, ()> {
+        self.handler.on_runtime_status(status)
+    }
+}
+
+fn listen_process_status(
+    status_receiver: &mut mpsc::Receiver<ProcessStatus>,
+    pid: u64,
+) -> anyhow::Result<ProcessStatus> {
+    log::debug!("Start listening on process: {pid}");
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut return_code = 0;
+    while let Ok(status) = status_receiver.recv() {
+        if status.pid != pid {
+            continue;
+        }
+        stdout.append(&mut status.stdout.clone());
+        stderr.append(&mut status.stderr.clone());
+        return_code = status.return_code;
+        if !status.running {
+            break;
+        }
+    }
+    let running = false;
+    Ok(ProcessStatus {
+        pid,
+        running,
+        return_code,
+        stdout,
+        stderr,
+    })
 }
 
 async fn join_network(

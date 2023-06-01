@@ -5,5 +5,5 @@ members = [
 ]
 
 [patch.crates-io]
-ya-runtime-sdk = { git = "https://github.com/golemfactory/ya-runtime-sdk.git", rev = "f542b9219f163a52b9783c2c8c42e3da6dd3eb39" }
+ya-runtime-sdk = { git = "https://github.com/golemfactory/ya-runtime-sdk.git", rev = "0395b0c704ef644d7f0554ac41e319f03b11c068" }
 ya-runtime-api = { git = "https://github.com/golemfactory/yagna.git", rev = "2222cadeed58ecc44295092fcb0bc9ffba8a3722"}
