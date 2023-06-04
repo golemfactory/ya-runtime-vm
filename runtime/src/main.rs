@@ -1,7 +1,7 @@
 use std::convert::TryFrom;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, mpsc};
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 use bollard_stubs::models::ContainerConfig;
@@ -9,6 +9,7 @@ use futures::future::FutureExt;
 use futures::lock::Mutex;
 use futures::TryFutureExt;
 use serde::__private::de;
+use serde_json::Value;
 use structopt::StructOpt;
 use tokio::time::sleep;
 use tokio::{
@@ -187,7 +188,7 @@ impl ya_runtime_sdk::Runtime for Runtime {
         async move { Ok(offer()?) }.boxed_local()
     }
 
-    fn test<'a>(&mut self, ctx: &mut Context<Self>) -> OutputResponse<'a> {
+    fn test<'a>(&mut self, ctx: &mut Context<Self>) -> EmptyResponse<'a> {
         test().map_err(Into::into).boxed_local()
     }
 
@@ -341,7 +342,7 @@ fn offer() -> anyhow::Result<Option<serde_json::Value>> {
     })))
 }
 
-async fn test() -> Result<Option<serde_json::Value>, server::ErrorResponse> {
+async fn test() -> anyhow::Result<()> {
     let work_dir = std::env::temp_dir();
 
     let package_path = runtime_dir()
@@ -374,6 +375,7 @@ async fn test() -> Result<Option<serde_json::Value>, server::ErrorResponse> {
         data: Arc::new(Mutex::new(runtime_data)),
     };
 
+    let mut status: Option<ProcessStatus> = None;
     server::run_async(|e| async {
         let ctx = Context::try_new().expect("Failed to initialize context");
 
@@ -388,37 +390,32 @@ async fn test() -> Result<Option<serde_json::Value>, server::ErrorResponse> {
             .expect("Failed to start runtime");
         log::info!("Response {:?}", start_response);
 
-        {
-            let run: ya_runtime_sdk::RunProcess = server::RunProcess {
-                bin: "/bin/ya-self-test".into(),
-                args: vec!["ya-self-test".into()],
-                work_dir: "/data".into(),
-                ..Default::default()
-            };
+        let run: ya_runtime_sdk::RunProcess = server::RunProcess {
+            bin: "/bin/ya-self-test".into(),
+            args: vec!["ya-self-test".into()],
+            work_dir: "/data".into(),
+            ..Default::default()
+        };
 
-            {
-                log::debug!("Starting. Runtime: {:?}", runtime.data);
-                log::debug!("Run: {run:?}");
+        log::debug!("Starting. Runtime: {:?}", runtime.data);
+        log::debug!("Run: {run:?}");
 
-                let pid = run_command(runtime.data.clone(), run)
-                    .await
-                    .expect("Can run command");
+        let pid = run_command(runtime.data.clone(), run)
+            .await
+            .expect("Can run command");
 
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                tokio::spawn(async move {
-                    let status = async {
-                        listen_process_status(&mut status_receiver, pid)
-                        .expect("Can listen on process")
-                    }.await;
-                    tx.send(status)
-                });
-                let status = rx.await.expect("Got status");
-                log::info!("Process finished: {status:?}");
+        let (final_status_sender, final_status_receiver) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let status = async {
+                listen_process_status(&mut status_receiver, pid).expect("Can listen on process")
             }
-        }
+            .await;
+            final_status_sender.send(status)
+        });
+        status = Some(final_status_receiver.await.expect("Got status"));
+        log::info!("Process finished: {status:?}");
 
-
-        println!("Stopping runtime");
+        log::info!("Stopping runtime");
         stop(runtime.data.clone())
             .await
             .expect("Failed to stop runtime");
@@ -428,11 +425,22 @@ async fn test() -> Result<Option<serde_json::Value>, server::ErrorResponse> {
             std::process::exit(0);
         });
 
+        let status = status.expect("Failed to run self test process");
+        if status.return_code == 0 {
+            let response: Value = serde_json::from_slice(&status.stdout)
+                .expect("Cannot serialize self test stdout to json.");
+            println!("{}", response.to_string())
+        } else {
+            let err_message = std::str::from_utf8(&status.stderr)
+                .expect("Can read stderr as string.")
+                .to_string();
+            eprintln!("self test process failed: {err_message}");
+        }
+
         Server::new(runtime, ctx)
     })
     .await;
-
-    Ok(Some(serde_json::json!({ "code": 00000 })))
+    Ok(())
 }
 struct ProcessOutputHandler {
     status_sender: mpsc::Sender<ProcessStatus>,
@@ -441,7 +449,6 @@ struct ProcessOutputHandler {
 
 impl RuntimeHandler for ProcessOutputHandler {
     fn on_process_status<'a>(&self, status: ProcessStatus) -> futures::future::BoxFuture<'a, ()> {
-        println!("YYYYYYYYYYYYYYYY ProcessStatus: {:?}", status);
         if let Err(err) = self.status_sender.send(status.clone()) {
             log::error!("Failed to send process status {err}");
         }
@@ -449,7 +456,6 @@ impl RuntimeHandler for ProcessOutputHandler {
     }
 
     fn on_runtime_status<'a>(&self, status: RuntimeStatus) -> futures::future::BoxFuture<'a, ()> {
-        println!("XXXXXXXXXXXXXXXX RuntimeStatus: {:?}", status);
         self.handler.on_runtime_status(status)
     }
 }
@@ -458,12 +464,11 @@ fn listen_process_status(
     status_receiver: &mut mpsc::Receiver<ProcessStatus>,
     pid: u64,
 ) -> anyhow::Result<ProcessStatus> {
-    println!("Start listening on process: {pid}");
+    log::debug!("Start listening on process: {pid}");
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let mut return_code = 0;
     while let Ok(status) = status_receiver.recv() {
-        println!("ZZZZZZZZZZZZZZZZZZZZ ProcessStatus: {:?}", status);
         if status.pid != pid {
             continue;
         }
