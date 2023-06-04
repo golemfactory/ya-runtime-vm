@@ -1,6 +1,7 @@
 use std::convert::TryFrom;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use bollard_stubs::models::ContainerConfig;
@@ -31,6 +32,7 @@ use ya_runtime_sdk::{
     ProcessId, ProcessIdResponse, RuntimeMode,
 };
 use ya_runtime_sdk::{ProcessStatus, RuntimeStatus};
+use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification};
 use ya_runtime_vm::{
     cpu::CpuInfo,
     deploy::Deployment,
@@ -356,11 +358,13 @@ async fn test() -> Result<Option<serde_json::Value>, server::ErrorResponse> {
     let deployment = Deployment::try_from_input(package_file, 1, 125, package_path.clone())
         .await
         .or_err("Error reading package metadata")?;
-    
+
     for vol in &deployment.volumes {
         let vol_dir = work_dir.join(&vol.name);
         log::debug!("Creating volume dir: {vol_dir:?} for path {}", vol.path);
-        fs::create_dir_all(vol_dir).await.or_err("Failed to create volume dir")?;
+        fs::create_dir_all(vol_dir)
+            .await
+            .or_err("Failed to create volume dir")?;
     }
     let runtime_data = RuntimeData {
         deployment: Some(deployment),
@@ -370,137 +374,49 @@ async fn test() -> Result<Option<serde_json::Value>, server::ErrorResponse> {
         data: Arc::new(Mutex::new(runtime_data)),
     };
 
-    // let (tx, mut rx) = futures::channel::mpsc::channel::<serde_json::Value>(1);
-
     server::run_async(|e| async {
         let ctx = Context::try_new().expect("Failed to initialize context");
 
         log::info!("Starting");
-        let emitter = EventEmitter::spawn(e);
-        // let emitter = EventEmitter::spawn(MyHandler { e: Box::new(e) });
-        let start_response = start(work_dir, runtime.data.clone(), emitter.clone())
+        let (status_sender, mut status_receiver) = mpsc::channel();
+        let emitter = EventEmitter::spawn(ProcessOutputHandler {
+            handler: Box::new(e),
+            status_sender,
+        });
+        let start_response = start(work_dir.clone(), runtime.data.clone(), emitter.clone())
             .await
             .expect("Failed to start runtime");
         log::info!("Response {:?}", start_response);
 
         {
             let run: ya_runtime_sdk::RunProcess = server::RunProcess {
-                // bin: "ls".into(),
                 bin: "/bin/ya-self-test".into(),
-                args: vec![
-                    "ya-self-test".into(),
-                    ],
-                // stdout: Some(),
+                args: vec!["ya-self-test".into()],
                 work_dir: "/data".into(),
                 ..Default::default()
             };
 
-            // let run: ya_runtime_sdk::RunProcess = server::RunProcess {
-            //     // bin: "ls".into(),
-            //     bin: "/bin/sh".into(),
-            //     args: vec![
-            //         "sh".into(),
-            //         "-c".into(),
-            //         "ya-self-test".into(),
-            //         ">".into(),
-            //         "/data/self-test.json".into(),
-            //         ],
-            //     // stdout: Some(),
-            //     // work_dir: "/".into(),
-            //     ..Default::default()
-            // };
-
-            // let run: ya_runtime_sdk::RunProcess =  server::RunProcess {
-            //     // bin: "ls".into(),
-            //     bin: "/bin/sh".into(),
-            //     args: vec![
-            //         "sh".into(),
-            //         "-c".into(),
-            //         "date".into(),
-            //         // "sleep 5;".into(),
-            //         // "ya-self-test".into()
-            //         ],
-            //     // stdout: Some(),
-            //     // work_dir: "/".into(),
-            //     ..Default::default()
-            // };
-
-            // log::info!("Running ya-self-test");
-
-            // let resp = run_command(
-            //     runtime.data.clone(),
-            //     run,
-            // )
-            // .await
-            // .map(|pid| {
-            //     use serde_json::json;
-
-            //     json!({
-            //         "start": start_response.unwrap_or(json!(null)),
-            //         "entrypoint": json!({ "pid": json!(pid) }),
-            //     })
-            // });
-            // log::info!("ya-self-test output {:?}", resp);
-
             {
-                sleep(Duration::from_secs(3)).await;
                 log::debug!("Starting. Runtime: {:?}", runtime.data);
                 log::debug!("Run: {run:?}");
 
-                let res = run_command(
-                    runtime.data.clone(),
-                    run,
-                )
-                .await;
-                log::info!("Result: {res:?}");
+                let pid = run_command(runtime.data.clone(), run)
+                    .await
+                    .expect("Can run command");
 
-                sleep(Duration::from_secs(3)).await;
-
-                // ///////////////////
-                // let runtime_data = runtime.data.clone();
-                // let data = runtime_data.lock().await;
-                // let deployment = data.deployment().expect("Runtime not started");
-
-                // let (uid, gid) = deployment.user;
-                // let env = deployment.env();
-                // let cwd = deployment
-                //     .config
-                //     .working_dir
-                //     .as_ref()
-                //     .filter(|s| !s.trim().is_empty())
-                //     .map(|s| s.as_str())
-                //     .unwrap_or_else(|| DEFAULT_CWD);
-
-                // log::debug!("got run process: {:?}", run);
-                // log::debug!("work dir: {:?}", deployment.config.working_dir);
-
-                // let result = data
-                //     .ga()
-                //     .unwrap()
-                //     .lock()
-                //     .await
-                //     .run_process(
-                //         &run.bin,
-                //         run.args
-                //             .iter()
-                //             .map(|s| s.as_ref())
-                //             .collect::<Vec<&str>>()
-                //             .as_slice(),
-                //         Some(&env[..]),
-                //         uid,
-                //         gid,
-                //         &[
-                //             None,
-                //             // Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
-                //             // Some(RedirectFdType::RedirectFdPipeBlocking(0x1000)),
-                //             Some(RedirectFdType::RedirectFdPipeCyclic(0x1000)),
-                //             Some(RedirectFdType::RedirectFdPipeCyclic(0x1000)),
-                //         ],
-                //         Some(cwd),
-                //     )
-                //     .await;
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                tokio::spawn(async move {
+                    let status = async {
+                        listen_process_status(&mut status_receiver, pid)
+                        .expect("Can listen on process")
+                    }.await;
+                    tx.send(status)
+                });
+                let status = rx.await.expect("Got status");
+                log::info!("Process finished: {status:?}");
             }
         }
+
 
         println!("Stopping runtime");
         stop(runtime.data.clone())
@@ -516,42 +432,57 @@ async fn test() -> Result<Option<serde_json::Value>, server::ErrorResponse> {
     })
     .await;
 
-    //     log::info!("Running self-test cmd");
-
-    //     let bin = "ya-self-test".into();
-    //     let args = vec![];
-    //     let code = run_command(
-    //         runtime.data,
-    //         server::RunProcess {
-    //             bin,
-    //             args,
-    //             work_dir,
-    //             // output?
-    //             ..Default::default()
-    //         },
-    //     )
-    //     .await.unwrap_or(13);
-
-    //     //TODO
     Ok(Some(serde_json::json!({ "code": 00000 })))
 }
+struct ProcessOutputHandler {
+    status_sender: mpsc::Sender<ProcessStatus>,
+    handler: Box<dyn RuntimeHandler + 'static>,
+}
 
-// struct MyHandler {
-//     e: Box<dyn RuntimeHandler + 'static>,
-// }
+impl RuntimeHandler for ProcessOutputHandler {
+    fn on_process_status<'a>(&self, status: ProcessStatus) -> futures::future::BoxFuture<'a, ()> {
+        println!("YYYYYYYYYYYYYYYY ProcessStatus: {:?}", status);
+        if let Err(err) = self.status_sender.send(status.clone()) {
+            log::error!("Failed to send process status {err}");
+        }
+        self.handler.on_process_status(status)
+    }
 
-// impl RuntimeHandler for MyHandler {
-//     fn on_process_status<'a>(&self, status: ProcessStatus) -> futures::future::BoxFuture<'a, ()> {
-//         println!("YYYYYYYYYYYYYYYY ProcessStatus: {:?}", status);
-//         // async {}.boxed()
-//         self.e.on_process_status(status)
-//     }
+    fn on_runtime_status<'a>(&self, status: RuntimeStatus) -> futures::future::BoxFuture<'a, ()> {
+        println!("XXXXXXXXXXXXXXXX RuntimeStatus: {:?}", status);
+        self.handler.on_runtime_status(status)
+    }
+}
 
-//     fn on_runtime_status<'a>(&self, status: RuntimeStatus) -> futures::future::BoxFuture<'a, ()> {
-//         println!("XXXXXXXXXXXXXXXX RuntimeStatus: {:?}", status);
-//         self.e.on_runtime_status(status)
-//     }
-// }
+fn listen_process_status(
+    status_receiver: &mut mpsc::Receiver<ProcessStatus>,
+    pid: u64,
+) -> anyhow::Result<ProcessStatus> {
+    println!("Start listening on process: {pid}");
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut return_code = 0;
+    while let Ok(status) = status_receiver.recv() {
+        println!("ZZZZZZZZZZZZZZZZZZZZ ProcessStatus: {:?}", status);
+        if status.pid != pid {
+            continue;
+        }
+        stdout.append(&mut status.stdout.clone());
+        stderr.append(&mut status.stderr.clone());
+        return_code = status.return_code;
+        if !status.running {
+            break;
+        }
+    }
+    let running = false;
+    Ok(ProcessStatus {
+        pid,
+        running,
+        return_code,
+        stdout,
+        stderr,
+    })
+}
 
 async fn join_network(
     runtime_data: Arc<Mutex<RuntimeData>>,
