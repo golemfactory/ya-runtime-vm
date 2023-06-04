@@ -391,7 +391,7 @@ async fn test() -> anyhow::Result<()> {
         log::info!("Response {:?}", start_response);
 
         let run: ya_runtime_sdk::RunProcess = server::RunProcess {
-            bin: "/bin/ya-self-test".into(),
+            bin: "/ya-self-test".into(),
             args: vec!["ya-self-test".into()],
             work_dir: "/data".into(),
             ..Default::default()
