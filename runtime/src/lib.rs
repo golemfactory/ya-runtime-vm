@@ -10,6 +10,7 @@ use futures::future::FutureExt;
 use futures::lock::Mutex;
 use futures::TryFutureExt;
 use std::convert::TryFrom;
+use std::env;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use structopt::StructOpt;
@@ -18,6 +19,7 @@ use tokio::{
     io::{self, AsyncWriteExt},
 };
 use url::Url;
+use ya_runtime_sdk::ProcessStatus;
 
 use crate::{
     cpu::CpuInfo,
@@ -179,11 +181,19 @@ impl ya_runtime_sdk::Runtime for Runtime {
     }
 
     fn offer<'a>(&mut self, _: &mut Context<Self>) -> OutputResponse<'a> {
-        async move { Ok(offer()?) }.boxed_local()
+        self_test::run_self_test(|self_test_result| {
+            self_test::verify_status(self_test_result)
+                .and_then(|self_test_result| Ok(serde_json::from_str(&self_test_result)?))
+                .and_then(offer)
+                .and_then(|offer| Ok(serde_json::Value::to_string(&offer)))
+        })
+        // Dead code. ya_runtime_api::server::run_async requires killing the process to stop app
+        .map(|_| Ok(None))
+        .boxed_local()
     }
 
     fn test<'a>(&mut self, _ctx: &mut Context<Self>) -> EmptyResponse<'a> {
-        crate::self_test::test().map_err(Into::into).boxed_local()
+        self_test::test().boxed_local()
     }
 
     fn join_network<'a>(
@@ -319,24 +329,35 @@ pub(crate) async fn stop(
     Ok(())
 }
 
-fn offer() -> anyhow::Result<Option<serde_json::Value>> {
+fn offer(self_test_result: serde_json::Value) -> anyhow::Result<serde_json::Value> {
     let cpu = CpuInfo::try_new()?;
     let model = format!(
         "Stepping {} Family {} Model {}",
         cpu.model.stepping, cpu.model.family, cpu.model.model
     );
 
-    // TODO add capabilities if GPU supported
-    Ok(Some(serde_json::json!({
+    let mut runtime_capabilities = vec!["inet", "vpn", "manifest-support", "start-entrypoint"];
+    if is_gpu_supported(&self_test_result) {
+        runtime_capabilities.push("!exp:gpu");
+    }
+
+    Ok(serde_json::json!({
         "properties": {
             "golem.inf.cpu.vendor": cpu.model.vendor,
             "golem.inf.cpu.brand": cpu.model.brand,
             "golem.inf.cpu.model": model,
             "golem.inf.cpu.capabilities": cpu.capabilities,
-            "golem.runtime.capabilities": ["inet", "vpn", "manifest-support", "start-entrypoint"]
+            "golem.runtime.capabilities": runtime_capabilities,
+            "golem.runtime.!exp.inf": self_test_result,
         },
         "constraints": ""
-    })))
+    }))
+}
+
+#[allow(unused_variables)]
+fn is_gpu_supported(self_test_result: &serde_json::Value) -> bool {
+    // NYI
+    false
 }
 
 async fn join_network(
