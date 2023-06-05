@@ -19,7 +19,6 @@ use tokio::{
     io::{self, AsyncWriteExt},
 };
 use url::Url;
-use ya_runtime_sdk::ProcessStatus;
 
 use crate::{
     cpu::CpuInfo,

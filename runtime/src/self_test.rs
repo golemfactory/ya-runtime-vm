@@ -1,16 +1,11 @@
 use anyhow::bail;
 use futures::lock::Mutex;
-use futures::FutureExt;
-use rand::distributions::uniform::SampleRange;
-use serde::de::IntoDeserializer;
-use serde_json::Value;
-use std::fmt::Display;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
 use tokio::fs;
-use ya_runtime_sdk::runtime_api::server::{proto, RuntimeHandler};
+use ya_runtime_sdk::runtime_api::server::RuntimeHandler;
 use ya_runtime_sdk::{runtime_api::server, server::Server, Context, ErrorExt, EventEmitter};
-use ya_runtime_sdk::{Error, EventKind, ProcessStatus, RuntimeState, RuntimeStatus};
+use ya_runtime_sdk::{Error, ProcessStatus, RuntimeStatus};
 
 use crate::deploy::Deployment;
 use crate::vmrt::{runtime_dir, RuntimeData};
