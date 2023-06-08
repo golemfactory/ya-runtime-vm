@@ -5,6 +5,10 @@ on:
       - v*
       - pre-rel-*
 
+env:
+  self-test-img_tag: pre-rel-v0.1.0
+  self-test-img_repository: golemfactory/ya-self-test-img
+
 jobs:
   create-release:
     name: "Create Release"
@@ -80,6 +84,15 @@ jobs:
       - run: |
           ls -R
           test -f runtime/init-container/initramfs.cpio.gz
+      - name: Download self-test image
+        uses: robinraju/release-downloader@v1.8
+        with:
+          repository: ${{ env.self-test-img_repository }}
+          tag: ${{ env.self-test-img_tag }}
+          fileName: self-test.gvmi
+          out-file-path: runtime/image/
+          tarBall: false
+          zipBall: false
       - name: Install Musl
         run: |
           sudo apt-get install -y musl-tools musl
@@ -173,6 +186,15 @@ jobs:
           path: runtime/init-container/
       - run: |
           test -f runtime/init-container/initramfs.cpio.gz
+      - name: Download self-test image
+        uses: robinraju/release-downloader@v1.8
+        with:
+          repository: ${{ env.self-test-img_repository }}
+          tag: ${{ env.self-test-img_tag }}
+          fileName: self-test.gvmi
+          out-file-path: runtime/image/
+          tarBall: false
+          zipBall: false
       - name: Extract Version
         id: version
         shell: bash
