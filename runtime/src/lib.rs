@@ -37,8 +37,8 @@ use ya_runtime_sdk::{
     OutputResponse, ProcessId, ProcessIdResponse, RuntimeMode,
 };
 
-const FILE_DEPLOYMENT: &'static str = "deployment.json";
-const DEFAULT_CWD: &'static str = "/";
+const FILE_DEPLOYMENT: &str = "deployment.json";
+const DEFAULT_CWD: &str = "/";
 
 #[derive(StructOpt, Clone, Default)]
 #[structopt(rename_all = "kebab-case")]
@@ -184,7 +184,7 @@ impl ya_runtime_sdk::Runtime for Runtime {
             self_test::verify_status(self_test_result)
                 .and_then(|self_test_result| Ok(serde_json::from_str(&self_test_result)?))
                 .and_then(offer)
-                .and_then(|offer| Ok(serde_json::Value::to_string(&offer)))
+                .map(|offer| serde_json::Value::to_string(&offer))
         })
         // Dead code. ya_runtime_api::server::run_async requires killing the process to stop app
         .map(|_| Ok(None))
@@ -292,7 +292,7 @@ pub(crate) async fn run_command(
         )
         .await;
 
-    Ok(convert_result(result, "Running process")?)
+    convert_result(result, "Running process")
 }
 
 async fn kill_command(
@@ -414,11 +414,7 @@ async fn normalize_path<P: AsRef<Path>>(path: P) -> anyhow::Result<PathBuf> {
     Ok(fs::canonicalize(path)
         .await?
         .components()
-        .into_iter()
-        .filter(|c| match c {
-            Component::Prefix(_) => false,
-            _ => true,
-        })
+        .filter(|c| !matches!(c, Component::Prefix(_)))
         .collect::<PathBuf>())
 }
 

@@ -6,23 +6,23 @@ use std::fmt::Debug;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::sync::Mutex;
 
-const PROGRESS_SIMPLE: &'static str =
+const PROGRESS_SIMPLE: &str =
     "{spinner:.white} {prefix:.bold.dim} {msg} [{elapsed_precise}] [{bar:40.grey}] {percent}%";
-const PROGRESS_ETA: &'static str =
+const PROGRESS_ETA: &str =
     "{spinner:.white} {prefix:.bold.dim} {msg} [{elapsed_precise}] [{bar:40.grey}] {bytes}/{total_bytes} ({eta})";
-const PROGRESS_OK: &'static str =
+const PROGRESS_OK: &str =
     "{spinner:.green} {prefix:.bold.dim} {msg} [{elapsed_precise}] [{bar:40.green}]";
-const PROGRESS_ERR: &'static str = "{spinner:.red} {prefix:.bold.dim} {msg:.red}";
+const PROGRESS_ERR: &str = "{spinner:.red} {prefix:.bold.dim} {msg:.red}";
 
-const SPINNER: &'static str = "{spinner:.white} {prefix:.bold.dim} {msg}";
-const SPINNER_OK: &'static str = "{spinner:.green} {prefix:.bold.dim} {msg}";
-const SPINNER_ERR: &'static str = "{spinner:.red} {prefix:.bold.dim} {msg}";
+const SPINNER: &str = "{spinner:.white} {prefix:.bold.dim} {msg}";
+const SPINNER_OK: &str = "{spinner:.green} {prefix:.bold.dim} {msg}";
+const SPINNER_ERR: &str = "{spinner:.red} {prefix:.bold.dim} {msg}";
 
 const REFRESH_MS: u64 = 500;
 
-static SPINNER_TICKS: &'static [&'static str] = &["∙∙∙", "●∙∙", "∙●∙", "∙∙●", "∙∙∙"];
-static OK_TICK: &'static [&'static str] = &[" ✓ "];
-static ERR_TICK: &'static [&'static str] = &[" ✗ "];
+static SPINNER_TICKS: &[&str] = &["∙∙∙", "●∙∙", "∙●∙", "∙∙●", "∙∙∙"];
+static OK_TICK: &[&str] = &[" ✓ "];
+static ERR_TICK: &[&str] = &[" ✗ "];
 
 static STEP_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
@@ -45,15 +45,15 @@ lazy_static::lazy_static! {
 
     static ref SPINNER_STYLE: ProgressStyle = ProgressStyle::default_spinner()
             .tick_strings(SPINNER_TICKS)
-            .template(SPINNER.clone());
+            .template(SPINNER);
 
     static ref SPINNER_OK_STYLE: ProgressStyle = ProgressStyle::default_spinner()
             .tick_strings(OK_TICK)
-            .template(SPINNER_OK.clone());
+            .template(SPINNER_OK);
 
     static ref SPINNER_ERR_STYLE: ProgressStyle = ProgressStyle::default_spinner()
             .tick_strings(ERR_TICK)
-            .template(SPINNER_ERR.clone());
+            .template(SPINNER_ERR);
 
     static ref TOTAL_STEPS: Mutex<usize> = Mutex::new(0);
     static ref PERCENT_REGEX: Regex = Regex::new(r"\d+%").unwrap();
@@ -67,8 +67,7 @@ pub(crate) fn from_progress_output<S: AsRef<str>>(src: S) -> Option<usize> {
     (*PERCENT_REGEX)
         .find(src.as_ref())
         .map(|m| src.as_ref()[m.start()..m.end()].trim_end_matches('%'))
-        .map(|s| s.parse().ok())
-        .flatten()
+        .and_then(|s| s.parse().ok())
 }
 
 pub(crate) struct Progress {

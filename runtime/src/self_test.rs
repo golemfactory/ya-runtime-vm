@@ -1,6 +1,6 @@
 use anyhow::bail;
 use futures::lock::Mutex;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::{mpsc, Arc};
 use tokio::fs;
 use ya_runtime_sdk::runtime_api::server::RuntimeHandler;
@@ -11,7 +11,7 @@ use crate::deploy::Deployment;
 use crate::vmrt::{runtime_dir, RuntimeData};
 use crate::Runtime;
 
-const FILE_TEST_IMAGE: &'static str = "self-test.gvmi";
+const FILE_TEST_IMAGE: &str = "self-test.gvmi";
 
 pub(crate) async fn test() -> Result<(), Error> {
     run_self_test(verify_status).await;
@@ -116,7 +116,7 @@ where
     .await;
 }
 
-async fn self_test_deployment(work_dir: &PathBuf) -> anyhow::Result<Deployment> {
+async fn self_test_deployment(work_dir: &Path) -> anyhow::Result<Deployment> {
     let package_path = runtime_dir()
         .expect("Runtime directory not found")
         .join(FILE_TEST_IMAGE)
