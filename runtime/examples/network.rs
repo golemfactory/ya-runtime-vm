@@ -25,6 +25,7 @@ use tokio::{
 use ya_runtime_sdk::runtime_api::server;
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
 
+#[allow(clippy::declare_interior_mutable_const)]
 const IDENTIFICATION: AtomicU16 = AtomicU16::new(42);
 const MTU: usize = 1400;
 const PREFIX_LEN: usize = 2;
@@ -62,7 +63,7 @@ impl Notifications {
                         .await
                     {
                         Ok(res) => match res {
-                            Ok(out) => while let Err(_) = io::stdout().write_all(&out[..]) {},
+                            Ok(out) => while io::stdout().write_all(&out[..]).is_err() {},
                             Err(code) => eprintln!("Output query failed with: {}", code),
                         },
                         Err(code) => eprintln!("Output query failed with: {}", code),
@@ -117,20 +118,20 @@ fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
         .to_string()
 }
 
-fn spawn_vm<'a, P: AsRef<Path>>(temp_path: P) -> Child {
+fn spawn_vm<P: AsRef<Path>>(temp_path: P) -> Child {
     let root_dir = get_root_dir();
     let project_dir = get_project_dir();
     let runtime_dir = project_dir.join("poc").join("runtime");
     let init_dir = project_dir.join("init-container");
 
-    let socket_path = temp_path.as_ref().join(format!("manager.sock"));
-    let socket_net_path = temp_path.as_ref().join(format!("net.sock"));
+    let socket_path = temp_path.as_ref().join("manager.sock");
+    let socket_net_path = temp_path.as_ref().join("net.sock");
 
     let chardev =
         |name, path: &PathBuf| format!("socket,path={},server,nowait,id={}", path.display(), name);
 
     let mut cmd = Command::new("vmrt");
-    cmd.current_dir(runtime_dir).args(&[
+    cmd.current_dir(runtime_dir).args([
         "-m",
         "256m",
         "-nographic",
@@ -271,70 +272,64 @@ fn handle_transport(
 }
 
 fn handle_ipv4_packet(data: &[u8]) -> Option<Vec<u8>> {
-    match Ipv4Packet::new(data) {
-        Some(ip) => {
-            let reply = handle_transport(
-                IpAddr::V4(ip.get_source()),
-                IpAddr::V4(ip.get_destination()),
-                ip.get_next_level_protocol(),
-                ip.payload(),
-            );
+    if let Some(ip) = Ipv4Packet::new(data) {
+        let reply = handle_transport(
+            IpAddr::V4(ip.get_source()),
+            IpAddr::V4(ip.get_destination()),
+            ip.get_next_level_protocol(),
+            ip.payload(),
+        );
 
-            reply.map(move |payload| {
-                let mut data: Vec<u8> = vec![0u8; MTU];
-                let reply_len = 20 + payload.len();
+        reply.map(move |payload| {
+            let mut data: Vec<u8> = vec![0u8; MTU];
+            let reply_len = 20 + payload.len();
 
-                let mut reply = MutableIpv4Packet::new(&mut data[..reply_len]).unwrap();
-                reply.set_version(4);
-                reply.set_header_length(5);
-                reply.set_total_length(reply_len as u16);
-                reply.set_identification(IDENTIFICATION.fetch_add(1, Relaxed));
-                reply.set_flags(pnet::packet::ipv4::Ipv4Flags::DontFragment);
-                reply.set_fragment_offset(0);
-                reply.set_ttl(ip.get_ttl() - 1);
-                reply.set_payload(&payload[..]);
-                reply.set_dscp(ip.get_dscp());
-                reply.set_ecn(ip.get_ecn());
-                reply.set_next_level_protocol(ip.get_next_level_protocol());
-                reply.set_source(ip.get_destination());
-                reply.set_destination(ip.get_source());
+            let mut reply = MutableIpv4Packet::new(&mut data[..reply_len]).unwrap();
+            reply.set_version(4);
+            reply.set_header_length(5);
+            reply.set_total_length(reply_len as u16);
+            #[allow(clippy::borrow_interior_mutable_const)]
+            reply.set_identification(IDENTIFICATION.fetch_add(1, Relaxed));
+            reply.set_flags(pnet::packet::ipv4::Ipv4Flags::DontFragment);
+            reply.set_fragment_offset(0);
+            reply.set_ttl(ip.get_ttl() - 1);
+            reply.set_payload(&payload[..]);
+            reply.set_dscp(ip.get_dscp());
+            reply.set_ecn(ip.get_ecn());
+            reply.set_next_level_protocol(ip.get_next_level_protocol());
+            reply.set_source(ip.get_destination());
+            reply.set_destination(ip.get_source());
 
-                reply.set_checksum(pnet::packet::ipv4::checksum(&reply.to_immutable()));
-                reply.packet().to_vec()
-            })
-        }
-        _ => {
-            eprintln!("Malformed IPv4 Packet");
-            None
-        }
+            reply.set_checksum(pnet::packet::ipv4::checksum(&reply.to_immutable()));
+            reply.packet().to_vec()
+        })
+    } else {
+        eprintln!("Malformed IPv4 Packet");
+        None
     }
 }
 
 fn handle_arp_packet(data: &[u8]) -> Option<Vec<u8>> {
-    match ArpPacket::new(data) {
-        Some(arp) => match arp.get_operation() {
-            ArpOperations::Request => {
-                let mut buffer = [0u8; 28];
-                let mut reply = MutableArpPacket::new(&mut buffer).unwrap();
+    if let Some(arp) = ArpPacket::new(data) {
+        if arp.get_operation() == ArpOperations::Request {
+            let mut buffer = [0u8; 28];
+            let mut reply = MutableArpPacket::new(&mut buffer).unwrap();
 
-                reply.set_hardware_type(arp.get_hardware_type());
-                reply.set_protocol_type(arp.get_protocol_type());
-                reply.set_hw_addr_len(arp.get_hw_addr_len());
-                reply.set_proto_addr_len(arp.get_proto_addr_len());
-                reply.set_operation(ArpOperations::Reply);
-                reply.set_sender_hw_addr(MacAddr(1, 2, 3, 4, 5, 6));
-                reply.set_sender_proto_addr(arp.get_target_proto_addr());
-                reply.set_target_hw_addr(arp.get_sender_hw_addr());
-                reply.set_target_proto_addr(arp.get_sender_proto_addr());
+            reply.set_hardware_type(arp.get_hardware_type());
+            reply.set_protocol_type(arp.get_protocol_type());
+            reply.set_hw_addr_len(arp.get_hw_addr_len());
+            reply.set_proto_addr_len(arp.get_proto_addr_len());
+            reply.set_operation(ArpOperations::Reply);
+            reply.set_sender_hw_addr(MacAddr(1, 2, 3, 4, 5, 6));
+            reply.set_sender_proto_addr(arp.get_target_proto_addr());
+            reply.set_target_hw_addr(arp.get_sender_hw_addr());
+            reply.set_target_proto_addr(arp.get_sender_proto_addr());
 
-                return Some(reply.packet().to_vec());
-            }
-            _ => (),
-        },
-        _ => {
-            eprintln!("Malformed ARP Packet");
+            return Some(reply.packet().to_vec());
         }
-    };
+    } else {
+        eprintln!("Malformed ARP Packet");
+    }
     None
 }
 
@@ -376,7 +371,7 @@ async fn main() -> anyhow::Result<()> {
     let temp_path = temp_dir.path();
 
     let notifications = Arc::new(Mutex::new(Notifications::new()));
-    let mut child = spawn_vm(&temp_path);
+    let mut child = spawn_vm(temp_path);
 
     let ns = notifications.clone();
     let ga_mutex = GuestAgent::connected(temp_path.join("manager.sock"), 10, move |n, _g| {

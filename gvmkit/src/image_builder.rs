@@ -134,9 +134,9 @@ fn add_metadata_outside(image_path: &Path, config: &ContainerConfig) -> anyhow::
     let crc32 = Crc::<u32>::new(&CRC_32_ISO_HDLC);
     let crc = crc32.checksum(&json_buf.bytes);
     log::debug!("Image metadata checksum: 0x{:x}", crc);
-    file.write(&crc.to_le_bytes())?;
-    file.write(&json_buf.bytes)?;
-    file.write(format!("{:08}", meta_size).as_bytes())?;
+    file.write_all(&crc.to_le_bytes())?;
+    file.write_all(&json_buf.bytes)?;
+    file.write_all(format!("{:08}", meta_size).as_bytes())?;
     Ok(())
 }
 
@@ -181,7 +181,7 @@ async fn repack(
     let pre_run_progress = progress.position();
     let on_output = |s: String| {
         for s in s.split('\n').filter(|s| s.trim_end().ends_with('%')) {
-            if let Some(v) = from_progress_output(&s) {
+            if let Some(v) = from_progress_output(s) {
                 let delta = v as u64 - (progress.position() - pre_run_progress);
                 progress.inc(delta);
             }
@@ -243,8 +243,8 @@ fn tar_from_bytes(bytes: &Bytes) -> anyhow::Result<tar::Builder<RWBuffer>> {
         let hdr = tar::Header::from_byte_slice(&bytes[offset..offset + 0x200]);
         let entry_size = hdr.entry_size()? as usize;
         offset += 0x200;
-        tar.append(&hdr, &bytes[offset..offset + entry_size])?;
-        offset = offset + entry_size;
+        tar.append(hdr, &bytes[offset..offset + entry_size])?;
+        offset += entry_size;
         if entry_size > 0 && entry_size % 0x200 != 0 {
             // round up to chunk size
             offset |= 0x1ff;

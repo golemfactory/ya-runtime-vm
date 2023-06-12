@@ -30,28 +30,25 @@ fn main() -> anyhow::Result<()> {
     }
 
     println!(
-        "{}",
-        format!(
-            r#"
-        {rerun}={root}/Makefile
-        {rerun}={include}/communication.h
-        {rerun}={include}/cyclic_buffer.h
-        {rerun}={include}/forward.h
-        {rerun}={include}/network.h
-        {rerun}={include}/process_bookkeeping.h
-        {rerun}={include}/proto.h
-        {rerun}={src}/communication.c
-        {rerun}={src}/cyclic_buffer.c
-        {rerun}={src}/forward.c
-        {rerun}={src}/network.c
-        {rerun}={src}/process_bookkeeping.c
-        {rerun}={src}/init.c
-        "#,
-            rerun = RERUN_IF_CHANGED,
-            root = init_dir.display(),
-            include = include_dir.display(),
-            src = src_dir.display(),
-        )
+        r#"
+    {rerun}={root}/Makefile
+    {rerun}={include}/communication.h
+    {rerun}={include}/cyclic_buffer.h
+    {rerun}={include}/forward.h
+    {rerun}={include}/network.h
+    {rerun}={include}/process_bookkeeping.h
+    {rerun}={include}/proto.h
+    {rerun}={src}/communication.c
+    {rerun}={src}/cyclic_buffer.c
+    {rerun}={src}/forward.c
+    {rerun}={src}/network.c
+    {rerun}={src}/process_bookkeeping.c
+    {rerun}={src}/init.c
+    "#,
+        rerun = RERUN_IF_CHANGED,
+        root = init_dir.display(),
+        include = include_dir.display(),
+        src = src_dir.display(),
     );
     Ok(())
 }

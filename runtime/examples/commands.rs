@@ -109,12 +109,12 @@ async fn main() -> anyhow::Result<()> {
     let runtime_path = PathBuf::from("/usr/lib/yagna/plugins/ya-runtime-vm/ya-runtime-vm");
 
     let mut cmd = Command::new(&runtime_path);
-    cmd.env("RUST_LOG", "debug").args(&args).arg("deploy");
+    cmd.env("RUST_LOG", "debug").args(args).arg("deploy");
     let mut child = cmd.spawn()?;
     child.wait().await?;
 
     let mut cmd = Command::new(&runtime_path);
-    cmd.env("RUST_LOG", "debug").args(&args).arg("start");
+    cmd.env("RUST_LOG", "debug").args(args).arg("start");
 
     let events = Events::new();
 
@@ -166,7 +166,7 @@ async fn main() -> anyhow::Result<()> {
         log::info!("pid: {}", pid);
 
         c.kill_process(server::KillProcess {
-            pid: pid,
+            pid,
             signal: 0, // TODO
         });
         events.process_died(pid).notified().await;
