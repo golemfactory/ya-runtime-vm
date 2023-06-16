@@ -14,6 +14,7 @@ use tokio::{
 pub use crate::response_parser::Notification;
 use crate::response_parser::{parse_one_response, GuestAgentMessage, Response, ResponseWithId};
 
+#[allow(clippy::enum_variant_names)]
 #[repr(u8)]
 enum MsgType {
     MsgQuit = 1,
@@ -31,10 +32,12 @@ enum MsgType {
     MsgNetHost,
 }
 
+#[allow(clippy::enum_variant_names)]
 enum SubMsgQuitType {
     SubMsgEnd,
 }
 
+#[allow(clippy::enum_variant_names)]
 enum SubMsgRunProcessType<'a> {
     SubMsgEnd,
     SubMsgRunProcessBin(&'a [u8]),
@@ -47,17 +50,20 @@ enum SubMsgRunProcessType<'a> {
     SubMsgRunProcessEnt,
 }
 
+#[allow(clippy::enum_variant_names)]
 enum SubMsgKillProcessType {
     SubMsgEnd,
     SubMsgKillProcessId(u64),
 }
 
+#[allow(clippy::enum_variant_names)]
 enum SubMsgMountVolumeType<'a> {
     SubMsgEnd,
     SubMsgMountVolumeTag(&'a [u8]),
     SubMsgMountVolumePath(&'a [u8]),
 }
 
+#[allow(clippy::enum_variant_names)]
 enum SubMsgQueryOutputType {
     SubMsgEnd,
     SubMsgQueryOutputId(u64),
@@ -66,6 +72,7 @@ enum SubMsgQueryOutputType {
     SubMsgQueryOutputLen(u64),
 }
 
+#[allow(clippy::enum_variant_names)]
 enum SubMsgNetCtlType<'a> {
     SubMsgEnd,
     SubMsgNetCtlFlags(u16),
@@ -83,11 +90,13 @@ enum SubMsgNetCtlFlags {
     Add,
 }
 
+#[allow(clippy::enum_variant_names)]
 enum SubMsgNetHostType<'a> {
     SubMsgEnd,
     SubMsgNetHostEntry(&'a [u8], &'a [u8]),
 }
 
+#[allow(clippy::enum_variant_names)]
 pub enum RedirectFdType<'a> {
     RedirectFdFile(&'a [u8]),
     RedirectFdPipeBlocking(u64),
@@ -398,8 +407,7 @@ where
 {
     let (mut tx, rx) = mpsc::channel(8);
     spawn(async move {
-        let _ = rx
-            .for_each(|n| notification_handler(n, agent.clone()))
+        rx.for_each(|n| notification_handler(n, agent.clone()))
             .await;
     });
     async move {
@@ -552,6 +560,7 @@ impl GuestAgent {
         self.get_ok_response(msg_id).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn spawn_new_process(
         &mut self,
         bin: &str,
@@ -606,6 +615,7 @@ impl GuestAgent {
         self.get_u64_response(msg_id).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_process(
         &mut self,
         bin: &str,
@@ -622,6 +632,7 @@ impl GuestAgent {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_entrypoint(
         &mut self,
         bin: &str,

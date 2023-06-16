@@ -47,7 +47,7 @@ impl Deployment {
         };
         let json = {
             let mut buf = String::new();
-            let pos = -1 * (json_len + 8) as i64;
+            let pos = -((json_len + 8) as i64);
             input.seek(SeekFrom::End(pos)).await?;
             input.take(json_len as u64).read_to_string(&mut buf).await?;
             buf
@@ -81,7 +81,7 @@ fn parse_user(user: Option<&String>) -> anyhow::Result<(u32, u32)> {
     let user = user
         .map(|s| s.trim())
         .ok_or_else(|| anyhow::anyhow!("User field missing"))?;
-    let mut split = user.splitn(2, ":");
+    let mut split = user.splitn(2, ':');
     let uid: u32 = split
         .next()
         .ok_or_else(|| anyhow::anyhow!("Missing UID"))?

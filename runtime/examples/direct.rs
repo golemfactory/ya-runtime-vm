@@ -100,7 +100,7 @@ fn spawn_vm<'a, P: AsRef<Path>>(temp_path: P, mount_args: &'a [(&'a str, impl To
     let init_dir = project_dir.join("init-container");
 
     let mut cmd = Command::new("vmrt");
-    cmd.current_dir(runtime_dir).args(&[
+    cmd.current_dir(runtime_dir).args([
         "-m",
         "256m",
         "-nographic",
@@ -140,7 +140,7 @@ fn spawn_vm<'a, P: AsRef<Path>>(temp_path: P, mount_args: &'a [(&'a str, impl To
         .as_str(),
     ]);
     for (tag, path) in mount_args.iter() {
-        cmd.args(&[
+        cmd.args([
             "-virtfs",
             &format!(
                 "local,id={tag},path={path},security_model=none,mount_tag={tag}",
@@ -166,7 +166,7 @@ async fn main() -> io::Result<()> {
         ("tag0", temp_path.display()),
         ("tag1", inner_path.display()),
     ];
-    let mut child = spawn_vm(&temp_path, &mount_args);
+    let mut child = spawn_vm(temp_path, &mount_args);
 
     let ns = notifications.clone();
     let ga_mutex = GuestAgent::connected(temp_path.join("manager.sock"), 10, move |n, _g| {

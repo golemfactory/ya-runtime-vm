@@ -6,7 +6,6 @@ pub struct GpuInfo {
 
 impl GpuInfo {
     pub fn try_new() -> anyhow::Result<GpuInfo> {
-
         let mut gpu_name = String::from("None");
         let nvidia_vendor_id = String::from("10de");
 
@@ -16,14 +15,12 @@ impl GpuInfo {
                     let gpu_pci_id = String::from(val);
                     gpu_name = detect_pci::detect_pci(gpu_pci_id, nvidia_vendor_id);
                 }
-            },
+            }
             Err(_e) => {}
         }
 
         Ok(GpuInfo {
             name: gpu_name.to_string(),
         })
-
     }
 }
-

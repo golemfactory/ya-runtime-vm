@@ -17,10 +17,10 @@ use ya_runtime_sdk::{serialize, ErrorExt, EventEmitter};
 use crate::deploy::Deployment;
 use crate::guest_agent_comm::{GuestAgent, Notification};
 
-const DIR_RUNTIME: &'static str = "runtime";
-const FILE_RUNTIME: &'static str = "vmrt";
-const FILE_VMLINUZ: &'static str = "vmlinuz-virt";
-const FILE_INITRAMFS: &'static str = "initramfs.cpio.gz";
+const DIR_RUNTIME: &str = "runtime";
+const FILE_RUNTIME: &str = "vmrt";
+const FILE_VMLINUZ: &str = "vmlinuz-virt";
+const FILE_INITRAMFS: &str = "initramfs.cpio.gz";
 
 #[derive(Default)]
 pub struct RuntimeData {
@@ -70,7 +70,7 @@ pub async fn start_vmrt(
 
     let mut cmd = process::Command::new(runtime_dir.join(FILE_RUNTIME));
     cmd.current_dir(&runtime_dir);
-    cmd.args(&[
+    cmd.args([
         "-m",
         format!("{}M", deployment.mem_mib).as_str(),
         "-nographic",
@@ -112,7 +112,7 @@ pub async fn start_vmrt(
                 cmd.arg("-device");
                 cmd.arg(format!("vfio-pci,host={}", val).as_str());
             }
-        },
+        }
         Err(_e) => {
             cmd.arg("-vga");
             cmd.arg("none");
@@ -211,14 +211,14 @@ impl Default for SocketPairConf {
 impl SocketPairConf {
     // FIXME: TOC/TOU
     async fn probe(&mut self) -> anyhow::Result<()> {
-        let first = std::net::UdpSocket::bind(&(self.first.ip, self.first.udp))?;
-        let second = std::net::UdpSocket::bind(&(self.second.ip, self.second.udp))?;
+        let first = std::net::UdpSocket::bind((self.first.ip, self.first.udp))?;
+        let second = std::net::UdpSocket::bind((self.second.ip, self.second.udp))?;
 
         self.first.udp = first.local_addr()?.port();
         self.second.udp = second.local_addr()?.port();
 
-        let first = std::net::TcpListener::bind(&(self.first.ip, self.first.tcp))?;
-        let second = std::net::TcpListener::bind(&(self.second.ip, self.second.tcp))?;
+        let first = std::net::TcpListener::bind((self.first.ip, self.first.tcp))?;
+        let second = std::net::TcpListener::bind((self.second.ip, self.second.tcp))?;
 
         self.first.tcp = first.local_addr()?.port();
         self.second.tcp = second.local_addr()?.port();
