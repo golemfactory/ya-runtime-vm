@@ -13,8 +13,8 @@ use crate::Runtime;
 
 const FILE_TEST_IMAGE: &str = "self-test.gvmi";
 
-pub(crate) async fn test() -> Result<(), Error> {
-    run_self_test(verify_status).await;
+pub(crate) async fn test(pci_device_id: Option<String>) -> Result<(), Error> {
+    run_self_test(verify_status, pci_device_id).await;
     // Dead code. ya_runtime_api::server::run_async requires killing a process to stop
     Ok(())
 }
@@ -40,7 +40,7 @@ pub(crate) fn verify_status(status: anyhow::Result<ProcessStatus>) -> anyhow::Re
     }
 }
 
-pub(crate) async fn run_self_test<HANDLER>(handle_result: HANDLER)
+pub(crate) async fn run_self_test<HANDLER>(handle_result: HANDLER, pci_device_id: Option<String>)
 where
     HANDLER: Fn(anyhow::Result<ProcessStatus>) -> anyhow::Result<String>,
 {
@@ -52,6 +52,7 @@ where
 
     let runtime_data = RuntimeData {
         deployment: Some(deployment),
+        pci_device_id,
         ..Default::default()
     };
     let runtime = Runtime {

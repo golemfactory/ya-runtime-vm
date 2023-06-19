@@ -29,6 +29,7 @@ pub struct RuntimeData {
     pub inet: Option<ContainerEndpoint>,
     pub deployment: Option<Deployment>,
     pub ga: Option<Arc<Mutex<GuestAgent>>>,
+    pub pci_device_id: Option<String>,
 }
 
 impl RuntimeData {
@@ -106,17 +107,12 @@ pub async fn start_vmrt(
         "-no-reboot",
     ]);
 
-    match std::env::var("GPU_PCI") {
-        Ok(val) => {
-            if val != "no" {
-                cmd.arg("-device");
-                cmd.arg(format!("vfio-pci,host={}", val).as_str());
-            }
-        }
-        Err(_e) => {
-            cmd.arg("-vga");
-            cmd.arg("none");
-        }
+    if let Some(pci_device_id) = &data.pci_device_id {
+        cmd.arg("-device");
+        cmd.arg(format!("vfio-pci,host={}", pci_device_id).as_str());
+    } else {
+        cmd.arg("-vga");
+        cmd.arg("none");
     }
 
     let (vpn, inet) =

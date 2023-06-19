@@ -68,6 +68,9 @@ pub struct Cli {
     /// INET endpoint address
     #[structopt(long)]
     inet_endpoint: Option<Url>,
+    #[structopt(long)]
+    /// PCI device identifier
+    pci_device: Option<String>,
 }
 
 #[derive(ya_runtime_sdk::RuntimeDef, Default)]
@@ -101,6 +104,7 @@ impl ya_runtime_sdk::Runtime for Runtime {
 
         let vpn_endpoint = ctx.cli.runtime.vpn_endpoint.clone();
         let inet_endpoint = ctx.cli.runtime.inet_endpoint.clone();
+        let pci_device_id = ctx.cli.runtime.pci_device.clone();
 
         log::info!("VPN endpoint: {vpn_endpoint:?}");
         log::info!("INET endpoint: {inet_endpoint:?}");
@@ -123,7 +127,9 @@ impl ya_runtime_sdk::Runtime for Runtime {
         async move {
             {
                 let mut data = data.lock().await;
-
+                if let Some(pci_device_id) = pci_device_id {
+                    data.pci_device_id.replace(pci_device_id);
+                }
                 if let Some(vpn_endpoint) = vpn_endpoint {
                     let endpoint =
                         ContainerEndpoint::try_from(vpn_endpoint).map_err(Error::from)?;
@@ -156,17 +162,24 @@ impl ya_runtime_sdk::Runtime for Runtime {
         &mut self,
         command: server::RunProcess,
         mode: RuntimeMode,
-        _: &mut Context<Self>,
+        ctx: &mut Context<Self>,
     ) -> ProcessIdResponse<'a> {
         if let RuntimeMode::Command = mode {
             return async move { Err(anyhow::anyhow!("CLI `run` is not supported")) }
                 .map_err(Into::into)
                 .boxed_local();
         }
-
-        run_command(self.data.clone(), command)
-            .map_err(Into::into)
-            .boxed_local()
+        let pci_device_id = ctx.cli.runtime.pci_device.clone();
+        let data = self.data.clone();
+        async move {
+            let mut runtime_data = data.lock().await;
+            if let Some(pci_device_id) = pci_device_id {
+                runtime_data.pci_device_id.replace(pci_device_id);
+            }
+            run_command(data.clone(), command).await
+        }
+        .map_err(Into::into)
+        .boxed_local()
     }
 
     fn kill_command<'a>(
@@ -179,20 +192,25 @@ impl ya_runtime_sdk::Runtime for Runtime {
             .boxed_local()
     }
 
-    fn offer<'a>(&mut self, _: &mut Context<Self>) -> OutputResponse<'a> {
-        self_test::run_self_test(|self_test_result| {
-            self_test::verify_status(self_test_result)
-                .and_then(|self_test_result| Ok(serde_json::from_str(&self_test_result)?))
-                .and_then(offer)
-                .map(|offer| serde_json::Value::to_string(&offer))
-        })
+    fn offer<'a>(&mut self, ctx: &mut Context<Self>) -> OutputResponse<'a> {
+        let pci_device_id = ctx.cli.runtime.pci_device.clone();
+        self_test::run_self_test(
+            |self_test_result| {
+                self_test::verify_status(self_test_result)
+                    .and_then(|self_test_result| Ok(serde_json::from_str(&self_test_result)?))
+                    .and_then(offer)
+                    .map(|offer| serde_json::Value::to_string(&offer))
+            },
+            pci_device_id,
+        )
         // Dead code. ya_runtime_api::server::run_async requires killing the process to stop app
         .map(|_| Ok(None))
         .boxed_local()
     }
 
-    fn test<'a>(&mut self, _ctx: &mut Context<Self>) -> EmptyResponse<'a> {
-        self_test::test().boxed_local()
+    fn test<'a>(&mut self, ctx: &mut Context<Self>) -> EmptyResponse<'a> {
+        let pci_device_id = ctx.cli.runtime.pci_device.clone();
+        self_test::test(pci_device_id).boxed_local()
     }
 
     fn join_network<'a>(
