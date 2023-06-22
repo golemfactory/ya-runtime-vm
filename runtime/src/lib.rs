@@ -68,7 +68,7 @@ pub struct Cli {
     /// INET endpoint address
     #[structopt(long)]
     inet_endpoint: Option<Url>,
-    #[structopt(long)]
+    #[structopt(long, env = "PCI_DEVICE")]
     /// PCI device identifier
     pci_device: Option<String>,
 }
