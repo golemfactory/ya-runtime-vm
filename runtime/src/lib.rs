@@ -13,6 +13,7 @@ use std::convert::TryFrom;
 use std::env;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use structopt::StructOpt;
 use tokio::{
     fs,
@@ -68,9 +69,18 @@ pub struct Cli {
     /// INET endpoint address
     #[structopt(long)]
     inet_endpoint: Option<Url>,
-    #[structopt(long, env = "PCI_DEVICE")]
     /// PCI device identifier
+    #[structopt(long, env = "PCI_DEVICE")]
     pci_device: Option<String>,
+    /// Test timeout (in seconds)
+    #[structopt(long, env = "TEST_TIMEOUT", default_value = "10")]
+    test_timeout: u64,
+}
+
+impl Cli {
+    fn test_timeout(&self) -> Duration {
+        Duration::from_secs(self.test_timeout)
+    }
 }
 
 #[derive(ya_runtime_sdk::RuntimeDef, Default)]
@@ -194,6 +204,7 @@ impl ya_runtime_sdk::Runtime for Runtime {
 
     fn offer<'a>(&mut self, ctx: &mut Context<Self>) -> OutputResponse<'a> {
         let pci_device_id = ctx.cli.runtime.pci_device.clone();
+        let test_timeout = ctx.cli.runtime.test_timeout();
         self_test::run_self_test(
             |self_test_result| {
                 self_test::verify_status(self_test_result)
@@ -202,6 +213,7 @@ impl ya_runtime_sdk::Runtime for Runtime {
                     .map(|offer| serde_json::Value::to_string(&offer))
             },
             pci_device_id,
+            test_timeout,
         )
         // Dead code. ya_runtime_api::server::run_async requires killing the process to stop app
         .map(|_| Ok(None))
@@ -210,7 +222,8 @@ impl ya_runtime_sdk::Runtime for Runtime {
 
     fn test<'a>(&mut self, ctx: &mut Context<Self>) -> EmptyResponse<'a> {
         let pci_device_id = ctx.cli.runtime.pci_device.clone();
-        self_test::test(pci_device_id).boxed_local()
+        let test_timeout = ctx.cli.runtime.test_timeout();
+        self_test::test(pci_device_id, test_timeout).boxed_local()
     }
 
     fn join_network<'a>(
