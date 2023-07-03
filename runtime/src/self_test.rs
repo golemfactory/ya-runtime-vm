@@ -15,8 +15,13 @@ use crate::Runtime;
 
 const FILE_TEST_IMAGE: &str = "self-test.gvmi";
 
-pub(crate) async fn test(pci_device_id: Option<String>, timeout: Duration) -> Result<(), Error> {
-    run_self_test(verify_status, pci_device_id, timeout).await;
+pub(crate) async fn test(
+    pci_device_id: Option<String>,
+    timeout: Duration,
+    cpu_cores: usize,
+    mem_gib: f64,
+) -> Result<(), Error> {
+    run_self_test(verify_status, pci_device_id, timeout, cpu_cores, mem_gib).await;
     // Dead code. ya_runtime_api::server::run_async requires killing a process to stop
     Ok(())
 }
@@ -30,12 +35,14 @@ pub(crate) async fn run_self_test<HANDLER>(
     handle_result: HANDLER,
     pci_device_id: Option<String>,
     timeout: Duration,
+    cpu_cores: usize,
+    mem_gib: f64,
 ) where
     HANDLER: Fn(anyhow::Result<Value>) -> anyhow::Result<String>,
 {
     let work_dir = std::env::temp_dir();
 
-    let deployment = self_test_deployment(&work_dir)
+    let deployment = self_test_deployment(&work_dir, cpu_cores, mem_gib)
         .await
         .expect("Prepares self test img deployment");
 
@@ -106,7 +113,11 @@ pub(crate) async fn run_self_test<HANDLER>(
     .await;
 }
 
-async fn self_test_deployment(work_dir: &Path) -> anyhow::Result<Deployment> {
+async fn self_test_deployment(
+    work_dir: &Path,
+    cpu_cores: usize,
+    mem_gib: f64,
+) -> anyhow::Result<Deployment> {
     let package_path = runtime_dir()
         .expect("Runtime directory not found")
         .join(FILE_TEST_IMAGE)
@@ -114,12 +125,14 @@ async fn self_test_deployment(work_dir: &Path) -> anyhow::Result<Deployment> {
         .expect("Test image not found");
 
     log::info!("Task package: {}", package_path.display());
+    let mem_mib = (mem_gib * 1024.) as usize;
     let package_file = fs::File::open(package_path.clone())
         .await
         .or_err("Error reading package file")?;
-    let deployment = Deployment::try_from_input(package_file, 1, 125, package_path.clone())
-        .await
-        .or_err("Error reading package metadata")?;
+    let deployment =
+        Deployment::try_from_input(package_file, cpu_cores, mem_mib, package_path.clone())
+            .await
+            .or_err("Error reading package metadata")?;
     for vol in &deployment.volumes {
         let vol_dir = work_dir.join(&vol.name);
         log::debug!("Creating volume dir: {vol_dir:?} for path {}", vol.path);

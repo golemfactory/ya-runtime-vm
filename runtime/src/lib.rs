@@ -72,9 +72,15 @@ pub struct Cli {
     /// PCI device identifier
     #[structopt(long, env = "PCI_DEVICE")]
     pci_device: Option<String>,
-    /// Test timeout (in seconds)
+    /// Test process timeout (in sec)
     #[structopt(long, env = "TEST_TIMEOUT", default_value = "10")]
     test_timeout: u64,
+    /// Number of logical CPU cores for test process
+    #[structopt(long, env = "TEST_CPU_CORES", default_value = "1")]
+    test_cpu_cores: usize,
+    ///  Amount of RAM for test process [GiB]
+    #[structopt(long, env = "TEST_MEM_GIB", default_value = "0.125")]
+    test_mem_gib: f64,
 }
 
 impl Cli {
@@ -205,6 +211,8 @@ impl ya_runtime_sdk::Runtime for Runtime {
     fn offer<'a>(&mut self, ctx: &mut Context<Self>) -> OutputResponse<'a> {
         let pci_device_id = ctx.cli.runtime.pci_device.clone();
         let test_timeout = ctx.cli.runtime.test_timeout();
+        let cpu_cores = ctx.cli.runtime.test_cpu_cores;
+        let mem_gib = ctx.cli.runtime.test_mem_gib;
         self_test::run_self_test(
             |self_test_result| {
                 self_test::verify_status(self_test_result)
@@ -214,6 +222,8 @@ impl ya_runtime_sdk::Runtime for Runtime {
             },
             pci_device_id,
             test_timeout,
+            cpu_cores,
+            mem_gib,
         )
         // Dead code. ya_runtime_api::server::run_async requires killing the process to stop app
         .map(|_| Ok(None))
@@ -223,7 +233,9 @@ impl ya_runtime_sdk::Runtime for Runtime {
     fn test<'a>(&mut self, ctx: &mut Context<Self>) -> EmptyResponse<'a> {
         let pci_device_id = ctx.cli.runtime.pci_device.clone();
         let test_timeout = ctx.cli.runtime.test_timeout();
-        self_test::test(pci_device_id, test_timeout).boxed_local()
+        let cpu_cores = ctx.cli.runtime.test_cpu_cores;
+        let mem_gib = ctx.cli.runtime.test_mem_gib;
+        self_test::test(pci_device_id, test_timeout, cpu_cores, mem_gib).boxed_local()
     }
 
     fn join_network<'a>(
