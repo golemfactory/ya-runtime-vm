@@ -6,8 +6,9 @@ on:
       - pre-rel-*
 
 env:
-  self-test-img_tag: pre-rel-v0.1.0
+  self-test-img_tag: pre-rel-v0.1.0_RC3_file_output
   self-test-img_repository: golemfactory/ya-self-test-img
+  rust_stable: 1.70.0
 
 jobs:
   create-release:
@@ -112,9 +113,10 @@ jobs:
               console.log(release.data.upload_url);
               return release.data.upload_url
 
-      - uses: actions-rs/toolchain@v1
+      - name: Install Rust ${{ env.rust_stable }}
+        uses: actions-rs/toolchain@v1
         with:
-          toolchain: stable
+          toolchain: ${{ env.rust_stable }}
           target: x86_64-unknown-linux-musl
           override: true
       - name: Build

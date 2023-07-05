@@ -16,6 +16,7 @@ jobs:
     env:
       RUSTFLAGS: "-D warnings -C opt-level=z -C target-cpu=x86-64 -C debuginfo=1"
       X86_64_PC_WINDOWS_MSVC_OPENSSL_DIR: c:/vcpkg/installed/x64-windows
+      rust_stable: 1.70.0
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -26,10 +27,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v1
 
-      - name: Install Last Stable Rust
+      - name: Install Rust ${{ env.rust_stable }}
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: stable
+          toolchain: ${{ env.rust_stable }}
 
       - name: Cache cargo registry
         uses: actions/cache@v1

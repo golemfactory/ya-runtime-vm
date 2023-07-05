@@ -1,7 +1,7 @@
 use anyhow::bail;
 use futures::lock::Mutex;
 use notify::event::{DataChange, ModifyKind};
-use notify::{Event, EventKind, INotifyWatcher, RecursiveMode, Watcher};
+use notify::{Event, EventKind, RecursiveMode, Watcher, RecommendedWatcher};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -196,7 +196,7 @@ fn spawn_output_watcher(
     output_notification: Arc<Notify>,
     output_dir: &Path,
     output_file: &Path,
-) -> anyhow::Result<INotifyWatcher> {
+) -> anyhow::Result<RecommendedWatcher> {
     let output_file = output_file.into();
     let mut watcher = notify::recommended_watcher(move |res| match res {
         Ok(Event {

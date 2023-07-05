@@ -32,7 +32,9 @@ bollard-stubs = "1.40.2"
 crc = "1.8"
 futures = "0.3"
 log = "0.4.8"
-notify = { version = "6.0", features = ["crossbeam-channel"] }
+# "crossbeam-channel" and "macos_fsevent" are default features. 
+# Remove `macos_fsevent` if `macos` build will get dropped.
+notify = { version = "6.0", features = ["crossbeam-channel", "macos_fsevent"] }
 rand = "0.8"
 raw-cpuid = "10.7"
 serde = { version = "^1.0", features = ["derive"] }
