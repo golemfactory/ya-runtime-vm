@@ -1,19 +1,25 @@
 use anyhow::bail;
 use futures::lock::Mutex;
+use notify::event::{DataChange, ModifyKind};
+use notify::{Event, EventKind, INotifyWatcher, RecursiveMode, Watcher};
 use serde_json::Value;
-use std::path::Path;
-use std::sync::{mpsc, Arc};
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs;
-use ya_runtime_sdk::runtime_api::server::RuntimeHandler;
-use ya_runtime_sdk::{runtime_api::server, server::Server, Context, ErrorExt, EventEmitter};
-use ya_runtime_sdk::{Error, ProcessStatus, RuntimeStatus};
+use tokio::sync::Notify;
+use uuid::Uuid;
+use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
+use ya_runtime_sdk::RunProcess;
+use ya_runtime_sdk::{runtime_api::server, server::Server, Context, Error, ErrorExt, EventEmitter};
 
 use crate::deploy::Deployment;
 use crate::vmrt::{runtime_dir, RuntimeData};
 use crate::Runtime;
 
 const FILE_TEST_IMAGE: &str = "self-test.gvmi";
+const FILE_TEST_EXECUTABLE: &str = "ya-self-test";
 
 pub(crate) async fn test(
     pci_device_id: Option<String>,
@@ -46,62 +52,61 @@ pub(crate) async fn run_self_test<HANDLER>(
         .await
         .expect("Prepares self test img deployment");
 
-    let runtime_data = RuntimeData {
-        deployment: Some(deployment),
-        pci_device_id,
-        ..Default::default()
-    };
-    let runtime = Runtime {
-        data: Arc::new(Mutex::new(runtime_data)),
-    };
+    let output_volume =
+        get_self_test_only_volume(&deployment).expect("Self test image has an output volume");
+    let output_file_name = format!("out_{}.json", Uuid::new_v4());
+    let output_file_vm = PathBuf::from_str(&output_volume.path)
+        .expect("Can create self test volume path")
+        .join(&output_file_name);
+    let output_dir = work_dir.join(output_volume.name);
+    let output_file = output_dir.join(&output_file_name);
+
+    let runtime = self_test_runtime(deployment, pci_device_id);
 
     server::run_async(|e| async {
         let ctx = Context::try_new().expect("Creates runtime context");
 
         log::info!("Starting runtime");
-        let (status_sender, mut status_receiver) = mpsc::channel();
-        let emitter = EventEmitter::spawn(ProcessOutputHandler {
-            handler: Box::new(e),
-            status_sender,
-        });
+        let emitter = EventEmitter::spawn(e);
         let start_response = crate::start(work_dir.clone(), runtime.data.clone(), emitter.clone())
             .await
             .expect("Starts runtime");
         log::info!("Runtime start response {:?}", start_response);
 
-        let run_process: ya_runtime_sdk::RunProcess = server::RunProcess {
-            bin: "/ya-self-test".into(),
-            args: vec!["ya-self-test".into()],
-            work_dir: "/".into(),
+        let run_process: RunProcess = server::RunProcess {
+            bin: format!("/{FILE_TEST_EXECUTABLE}"),
+            args: vec![
+                FILE_TEST_EXECUTABLE.into(),
+                output_file_vm.to_string_lossy().into(),
+            ],
             ..Default::default()
         };
 
         log::info!("Runtime: {:?}", runtime.data);
         log::info!("Self test process: {run_process:?}");
-
-        let pid: u64 = crate::run_command(runtime.data.clone(), run_process)
-            .await
-            .expect("Runs command");
-
-        let (final_status_sender, final_status_receiver) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            let status = collect_process_response(&mut status_receiver, pid, timeout).await;
-            final_status_sender.send(status)
-        });
-        let process_result = final_status_receiver
-            .await
-            .expect("Receives process status");
-
-        log::info!("Process finished");
-        let result = handle_result(process_result).expect("Handles test result");
-        if !result.is_empty() {
-            println!("{result}");
-        }
+        run_command(
+            runtime.data.clone(),
+            run_process,
+            &output_dir,
+            &output_file,
+            timeout,
+        )
+        .await
+        .expect("Can run self-test command");
 
         log::info!("Stopping runtime");
         crate::stop(runtime.data.clone())
             .await
             .expect("Stops runtime");
+
+        log::info!("Handling result");
+        let out_result = read_json(&output_file);
+        std::fs::remove_dir_all(output_dir).expect("Removes self-test output dir");
+        let result = handle_result(out_result).expect("Handles test result");
+        if !result.is_empty() {
+            // the server refuses to stop by itself; print output to stdout
+            println!("{result}");
+        }
 
         tokio::spawn(async move {
             // the server refuses to stop by itself; force quit
@@ -113,6 +118,18 @@ pub(crate) async fn run_self_test<HANDLER>(
     .await;
 }
 
+fn self_test_runtime(deployment: Deployment, pci_device_id: Option<String>) -> Runtime {
+    let runtime_data = RuntimeData {
+        deployment: Some(deployment),
+        pci_device_id,
+        ..Default::default()
+    };
+    Runtime {
+        data: Arc::new(Mutex::new(runtime_data)),
+    }
+}
+
+/// Builds self test deployment based on `FILE_TEST_IMAGE` from path returned by `runtime_dir()`
 async fn self_test_deployment(
     work_dir: &Path,
     cpu_cores: usize,
@@ -143,67 +160,63 @@ async fn self_test_deployment(
     Ok(deployment)
 }
 
-struct ProcessOutputHandler {
-    status_sender: mpsc::Sender<ProcessStatus>,
-    handler: Box<dyn RuntimeHandler + 'static>,
+/// Returns path to self test image only volume.
+/// Fails if `self_test_deployment` has no volumes or more than one.
+fn get_self_test_only_volume(self_test_deployment: &Deployment) -> anyhow::Result<ContainerVolume> {
+    if self_test_deployment.volumes.len() != 1 {
+        bail!("Self test image has to have one volume");
+    }
+    Ok(self_test_deployment.volumes.first().unwrap().clone())
 }
 
-impl RuntimeHandler for ProcessOutputHandler {
-    fn on_process_status<'a>(&self, status: ProcessStatus) -> futures::future::BoxFuture<'a, ()> {
-        if let Err(err) = self.status_sender.send(status.clone()) {
-            log::warn!("Failed to send process status {err}");
-        }
-        self.handler.on_process_status(status)
-    }
-
-    fn on_runtime_status<'a>(&self, status: RuntimeStatus) -> futures::future::BoxFuture<'a, ()> {
-        self.handler.on_runtime_status(status)
-    }
-}
-
-/// Collects process `stdout` and tries to parse it into `serde_json::Value`.
-///  # Arguments
-/// * `status_receiver` of `ProcessStatus`
-/// * `pid`
-/// * `timeout` used to wait for `ProcessStatus`
-async fn collect_process_response(
-    status_receiver: &mut mpsc::Receiver<ProcessStatus>,
-    pid: u64,
+/// Runs command, monitors `output_dir` looking for `output_file`.
+/// Fails if `output_file` not created before `timeout`.
+async fn run_command(
+    runtime_data: Arc<Mutex<RuntimeData>>,
+    run_process: RunProcess,
+    output_dir: &Path,
+    output_file: &Path,
     timeout: Duration,
-) -> anyhow::Result<Value> {
-    log::debug!("Start listening on process: {pid}");
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    let mut return_code = 0;
-    while let Ok(status) = status_receiver.recv_timeout(timeout) {
-        if status.pid != pid {
-            continue;
+) -> anyhow::Result<()> {
+    let output_notification = Arc::new(Notify::new());
+    // Keep `_watcher` . Watcher shutdowns when dropped.
+    let _watcher = spawn_output_watcher(output_notification.clone(), output_dir, output_file)?;
+
+    if let Err(err) = crate::run_command(runtime_data, run_process).await {
+        bail!("Code: {}, msg: {}", err.code, err.message);
+    };
+
+    if let Err(err) = tokio::time::timeout(timeout, output_notification.notified()).await {
+        log::error!("File {output_file:?} not created before timeout of {timeout:?}s. Err: {err}.");
+    };
+    Ok(())
+}
+
+fn spawn_output_watcher(
+    output_notification: Arc<Notify>,
+    output_dir: &Path,
+    output_file: &Path,
+) -> anyhow::Result<INotifyWatcher> {
+    let output_file = output_file.into();
+    let mut watcher = notify::recommended_watcher(move |res| match res {
+        Ok(Event {
+            kind: EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            paths,
+            ..
+        }) if paths.contains(&output_file) => output_notification.notify_waiters(),
+        Ok(event) => {
+            log::debug!("Output file watch event: {:?}", event);
         }
-        stdout.append(&mut status.stdout.clone());
-        stderr.append(&mut status.stderr.clone());
-        return_code = status.return_code;
-        if !status.running {
-            // Process stopped
-            break;
-        } else if status.return_code != 0 {
-            // Process failed. Waiting for final message or timeout.
-            continue;
-        } else if let Ok(response) = serde_json::from_slice(&stdout) {
-            // Succeed parsing response.
-            return Ok(response);
+        Err(error) => {
+            log::error!("Output file watch error: {:?}", error);
         }
-    }
-    if return_code != 0 {
-        bail!(String::from_utf8_lossy(&stderr).to_string())
-    }
-    match serde_json::from_slice(&stdout) {
-        Ok(response) => Ok(response),
-        Err(err) => {
-            if !stderr.is_empty() {
-                bail!(String::from_utf8_lossy(&stderr).to_string())
-            } else {
-                bail!(err)
-            }
-        }
-    }
+    })?;
+
+    watcher.watch(output_dir, RecursiveMode::Recursive)?;
+    Ok(watcher)
+}
+
+fn read_json(output_file: &Path) -> anyhow::Result<Value> {
+    let output_file = std::fs::File::open(output_file)?;
+    Ok(serde_json::from_reader(&output_file)?)
 }
