@@ -1,7 +1,7 @@
 use anyhow::bail;
 use futures::lock::Mutex;
 use notify::event::{DataChange, ModifyKind};
-use notify::{Event, EventKind, RecursiveMode, Watcher, RecommendedWatcher};
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -11,8 +11,9 @@ use tokio::fs;
 use tokio::sync::Notify;
 use uuid::Uuid;
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
-use ya_runtime_sdk::RunProcess;
+use ya_runtime_sdk::runtime_api::server::RuntimeHandler;
 use ya_runtime_sdk::{runtime_api::server, server::Server, Context, Error, ErrorExt, EventEmitter};
+use ya_runtime_sdk::{ProcessStatus, RunProcess, RuntimeStatus};
 
 use crate::deploy::Deployment;
 use crate::vmrt::{runtime_dir, RuntimeData};
@@ -63,32 +64,22 @@ pub(crate) async fn run_self_test<HANDLER>(
 
     let runtime = self_test_runtime(deployment, pci_device_id);
 
-    server::run_async(|e| async {
+    server::run_async(|emitter| async {
         let ctx = Context::try_new().expect("Creates runtime context");
 
         log::info!("Starting runtime");
-        let emitter = EventEmitter::spawn(e);
-        let start_response = crate::start(work_dir.clone(), runtime.data.clone(), emitter.clone())
+        let start_response = start_runtime(emitter, work_dir.clone(), runtime.data.clone())
             .await
             .expect("Starts runtime");
         log::info!("Runtime start response {:?}", start_response);
 
-        let run_process: RunProcess = server::RunProcess {
-            bin: format!("/{FILE_TEST_EXECUTABLE}"),
-            args: vec![
-                FILE_TEST_EXECUTABLE.into(),
-                output_file_vm.to_string_lossy().into(),
-            ],
-            ..Default::default()
-        };
-
         log::info!("Runtime: {:?}", runtime.data);
-        log::info!("Self test process: {run_process:?}");
-        run_command(
+        log::info!("Running self test command");
+        run_self_test_command(
             runtime.data.clone(),
-            run_process,
             &output_dir,
             &output_file,
+            &output_file_vm,
             timeout,
         )
         .await
@@ -101,12 +92,14 @@ pub(crate) async fn run_self_test<HANDLER>(
 
         log::info!("Handling result");
         let out_result = read_json(&output_file);
-        std::fs::remove_dir_all(output_dir).expect("Removes self-test output dir");
         let result = handle_result(out_result).expect("Handles test result");
         if !result.is_empty() {
             // the server refuses to stop by itself; print output to stdout
             println!("{result}");
         }
+
+        log::debug!("Deleting output files");
+        std::fs::remove_dir_all(output_dir).expect("Removes self-test output dir");
 
         tokio::spawn(async move {
             // the server refuses to stop by itself; force quit
@@ -169,15 +162,36 @@ fn get_self_test_only_volume(self_test_deployment: &Deployment) -> anyhow::Resul
     Ok(self_test_deployment.volumes.first().unwrap().clone())
 }
 
+/// Starts runtime with runtime handler wrapped to log process stdout and stdderr
+async fn start_runtime<HANDLER: RuntimeHandler + 'static>(
+    handler: HANDLER,
+    work_dir: PathBuf,
+    runtime_data: Arc<Mutex<RuntimeData>>,
+) -> anyhow::Result<Option<Value>> {
+    let emitter = ProcessOutputLogger::new(handler);
+    let emitter = EventEmitter::spawn(emitter);
+    crate::start(work_dir.clone(), runtime_data, emitter.clone()).await
+}
+
 /// Runs command, monitors `output_dir` looking for `output_file`.
 /// Fails if `output_file` not created before `timeout`.
-async fn run_command(
+async fn run_self_test_command(
     runtime_data: Arc<Mutex<RuntimeData>>,
-    run_process: RunProcess,
     output_dir: &Path,
     output_file: &Path,
+    output_file_vm: &Path,
     timeout: Duration,
 ) -> anyhow::Result<()> {
+    let run_process: RunProcess = server::RunProcess {
+        bin: format!("/{FILE_TEST_EXECUTABLE}"),
+        args: vec![
+            FILE_TEST_EXECUTABLE.into(),
+            output_file_vm.to_string_lossy().into(),
+        ],
+        ..Default::default()
+    };
+    log::info!("Self test process: {run_process:?}");
+
     let output_notification = Arc::new(Notify::new());
     // Keep `_watcher` . Watcher shutdowns when dropped.
     let _watcher = spawn_output_watcher(output_notification.clone(), output_dir, output_file)?;
@@ -219,4 +233,36 @@ fn spawn_output_watcher(
 fn read_json(output_file: &Path) -> anyhow::Result<Value> {
     let output_file = std::fs::File::open(output_file)?;
     Ok(serde_json::from_reader(&output_file)?)
+}
+struct ProcessOutputLogger {
+    handler: Box<dyn RuntimeHandler + 'static>,
+}
+
+impl ProcessOutputLogger {
+    fn new<HANDLER: RuntimeHandler + 'static>(handler: HANDLER) -> Self {
+        let handler = Box::new(handler);
+        Self { handler }
+    }
+}
+
+impl RuntimeHandler for ProcessOutputLogger {
+    fn on_process_status<'a>(&self, status: ProcessStatus) -> futures::future::BoxFuture<'a, ()> {
+        if !status.stdout.is_empty() {
+            log::debug!(
+                "PID: {}, stdout: {}",
+                status.pid,
+                String::from_utf8_lossy(&status.stdout)
+            );
+        } else if !status.stderr.is_empty() {
+            log::debug!(
+                "PID: {}, stderr: {}",
+                status.pid,
+                String::from_utf8_lossy(&status.stderr)
+            );
+        }
+        self.handler.on_process_status(status)
+    }
+    fn on_runtime_status<'a>(&self, status: RuntimeStatus) -> futures::future::BoxFuture<'a, ()> {
+        self.handler.on_runtime_status(status)
+    }
 }
