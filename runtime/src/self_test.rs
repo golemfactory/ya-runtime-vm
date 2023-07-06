@@ -1,6 +1,6 @@
 use anyhow::bail;
 use futures::lock::Mutex;
-use notify::event::{DataChange, ModifyKind};
+use notify::event::{AccessKind, AccessMode};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -214,12 +214,12 @@ fn spawn_output_watcher(
     let output_file = output_file.into();
     let mut watcher = notify::recommended_watcher(move |res| match res {
         Ok(Event {
-            kind: EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            kind: EventKind::Access(AccessKind::Close(AccessMode::Write)),
             paths,
             ..
         }) if paths.contains(&output_file) => output_notification.notify_waiters(),
         Ok(event) => {
-            log::debug!("Output file watch event: {:?}", event);
+            log::trace!("Output file watch event: {:?}", event);
         }
         Err(error) => {
             log::error!("Output file watch error: {:?}", error);
