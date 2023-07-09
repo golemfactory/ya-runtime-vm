@@ -389,17 +389,19 @@ fn offer(self_test_result: serde_json::Value) -> anyhow::Result<serde_json::Valu
             "golem.inf.cpu.brand": cpu.model.brand,
             "golem.inf.cpu.model": model,
             "golem.inf.cpu.capabilities": cpu.capabilities,
+            "golem.!exp.gap-35.v1.inf": self_test_result,
             "golem.runtime.capabilities": runtime_capabilities,
-            "golem.runtime.!exp.inf": self_test_result,
         },
         "constraints": ""
     }))
 }
 
-#[allow(unused_variables)]
 fn is_gpu_supported(self_test_result: &serde_json::Value) -> bool {
-    // NYI
-    false
+    let Some(root) = self_test_result.as_object() else {
+        return false;
+    };
+
+    root.get("gpu").is_some()
 }
 
 async fn join_network(
