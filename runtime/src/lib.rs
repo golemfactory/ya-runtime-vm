@@ -371,10 +371,12 @@ fn offer(self_test_result: serde_json::Value) -> anyhow::Result<serde_json::Valu
     }))
 }
 
-#[allow(unused_variables)]
 fn is_gpu_supported(self_test_result: &serde_json::Value) -> bool {
-    // NYI
-    false
+    let Some(root) = self_test_result.as_object() else {
+        return false;
+    };
+
+    root.get("gpu").is_some()
 }
 
 async fn join_network(
