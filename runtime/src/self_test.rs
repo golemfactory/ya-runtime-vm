@@ -95,7 +95,7 @@ pub(crate) async fn run_self_test<HANDLER>(
         let result = handle_result(out_result).expect("Handles test result");
         if !result.is_empty() {
             // the server refuses to stop by itself; print output to stdout
-            println!("{result}");
+            print!("{result}");
         }
 
         log::debug!("Deleting output files");

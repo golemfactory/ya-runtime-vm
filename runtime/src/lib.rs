@@ -379,21 +379,33 @@ fn offer(self_test_result: serde_json::Value) -> anyhow::Result<serde_json::Valu
     );
 
     let mut runtime_capabilities = vec!["inet", "vpn", "manifest-support", "start-entrypoint"];
-    if is_gpu_supported(&self_test_result) {
-        runtime_capabilities.push("!exp:gpu");
-    }
 
-    Ok(serde_json::json!({
+    let mut offer_template = serde_json::json!({
         "properties": {
             "golem.inf.cpu.vendor": cpu.model.vendor,
             "golem.inf.cpu.brand": cpu.model.brand,
             "golem.inf.cpu.model": model,
             "golem.inf.cpu.capabilities": cpu.capabilities,
-            "golem.!exp.gap-35.v1.inf": self_test_result,
-            "golem.runtime.capabilities": runtime_capabilities,
         },
         "constraints": ""
-    }))
+    });
+
+    let properties = offer_template
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+        .or_err("Unable to read offer template as a map")?;
+
+    if is_gpu_supported(&self_test_result) {
+        properties.insert("golem.!exp.gap-35.v1.inf".into(), self_test_result);
+        runtime_capabilities.push("!exp:gpu");
+    }
+
+    properties.insert(
+        "golem.runtime.capabilities".into(),
+        serde_json::json!(runtime_capabilities),
+    );
+
+    Ok(offer_template)
 }
 
 fn is_gpu_supported(self_test_result: &serde_json::Value) -> bool {
