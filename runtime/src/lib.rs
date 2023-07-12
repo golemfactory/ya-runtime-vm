@@ -188,8 +188,8 @@ impl ya_runtime_sdk::Runtime for Runtime {
         let pci_device_id = ctx.cli.runtime.pci_device.clone();
         let data = self.data.clone();
         async move {
-            let mut runtime_data = data.lock().await;
             if let Some(pci_device_id) = pci_device_id {
+                let mut runtime_data = data.lock().await;
                 runtime_data.pci_device_id.replace(pci_device_id);
             }
             run_command(data.clone(), command).await
