@@ -70,16 +70,16 @@ pub struct Cli {
     #[structopt(long)]
     inet_endpoint: Option<Url>,
     /// PCI device identifier
-    #[structopt(long, env = "PCI_DEVICE")]
+    #[structopt(long, env = "YA_RUNTIME_VM_PCI_DEVICE")]
     pci_device: Option<String>,
     /// Test process timeout (in sec)
-    #[structopt(long, env = "TEST_TIMEOUT", default_value = "10")]
+    #[structopt(long, env = "YA_RUNTIME_VM_TEST_TIMEOUT", default_value = "10")]
     test_timeout: u64,
     /// Number of logical CPU cores for test process
-    #[structopt(long, env = "TEST_CPU_CORES", default_value = "1")]
+    #[structopt(long, env = "YA_RUNTIME_VM_TEST_CPU_CORES", default_value = "1")]
     test_cpu_cores: usize,
     ///  Amount of RAM for test process [GiB]
-    #[structopt(long, env = "TEST_MEM_GIB", default_value = "0.125")]
+    #[structopt(long, env = "YA_RUNTIME_VM_TEST_MEM_GIB", default_value = "0.125")]
     test_mem_gib: f64,
 }
 
