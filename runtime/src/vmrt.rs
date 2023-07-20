@@ -29,6 +29,7 @@ pub struct RuntimeData {
     pub inet: Option<ContainerEndpoint>,
     pub deployment: Option<Deployment>,
     pub ga: Option<Arc<Mutex<GuestAgent>>>,
+    pub pci_device_id: Option<String>,
 }
 
 impl RuntimeData {
@@ -74,8 +75,6 @@ pub async fn start_vmrt(
         "-m",
         format!("{}M", deployment.mem_mib).as_str(),
         "-nographic",
-        "-vga",
-        "none",
         "-kernel",
         FILE_VMLINUZ,
         "-initrd",
@@ -107,6 +106,14 @@ pub async fn start_vmrt(
         .as_str(),
         "-no-reboot",
     ]);
+
+    if let Some(pci_device_id) = &data.pci_device_id {
+        cmd.arg("-device");
+        cmd.arg(format!("vfio-pci,host={}", pci_device_id).as_str());
+    } else {
+        cmd.arg("-vga");
+        cmd.arg("none");
+    }
 
     let (vpn, inet) =
     // backward-compatibility mode

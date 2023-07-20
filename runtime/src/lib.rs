@@ -13,6 +13,7 @@ use std::convert::TryFrom;
 use std::env;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use structopt::StructOpt;
 use tokio::{
     fs,
@@ -68,12 +69,36 @@ pub struct Cli {
     /// INET endpoint address
     #[structopt(long)]
     inet_endpoint: Option<Url>,
+    /// PCI device identifier
+    #[structopt(long, env = "YA_RUNTIME_VM_PCI_DEVICE")]
+    pci_device: Option<String>,
+    #[structopt(flatten)]
+    test_config: TestConfig,
 }
 
 #[derive(ya_runtime_sdk::RuntimeDef, Default)]
 #[cli(Cli)]
 pub struct Runtime {
     data: Arc<Mutex<RuntimeData>>,
+}
+
+#[derive(StructOpt, Clone, Default)]
+struct TestConfig {
+    /// Test process timeout (in sec)
+    #[structopt(long, env = "YA_RUNTIME_VM_TEST_TIMEOUT", default_value = "10")]
+    test_timeout: u64,
+    /// Number of logical CPU cores for test process
+    #[structopt(long, env = "YA_RUNTIME_VM_TEST_CPU_CORES", default_value = "1")]
+    test_cpu_cores: usize,
+    ///  Amount of RAM for test process [GiB]
+    #[structopt(long, env = "YA_RUNTIME_VM_TEST_MEM_GIB", default_value = "0.5")]
+    test_mem_gib: f64,
+}
+
+impl TestConfig {
+    fn test_timeout(&self) -> Duration {
+        Duration::from_secs(self.test_timeout)
+    }
 }
 
 impl ya_runtime_sdk::Runtime for Runtime {
@@ -101,6 +126,7 @@ impl ya_runtime_sdk::Runtime for Runtime {
 
         let vpn_endpoint = ctx.cli.runtime.vpn_endpoint.clone();
         let inet_endpoint = ctx.cli.runtime.inet_endpoint.clone();
+        let pci_device_id = ctx.cli.runtime.pci_device.clone();
 
         log::info!("VPN endpoint: {vpn_endpoint:?}");
         log::info!("INET endpoint: {inet_endpoint:?}");
@@ -123,7 +149,9 @@ impl ya_runtime_sdk::Runtime for Runtime {
         async move {
             {
                 let mut data = data.lock().await;
-
+                if let Some(pci_device_id) = pci_device_id {
+                    data.pci_device_id.replace(pci_device_id);
+                }
                 if let Some(vpn_endpoint) = vpn_endpoint {
                     let endpoint =
                         ContainerEndpoint::try_from(vpn_endpoint).map_err(Error::from)?;
@@ -156,17 +184,24 @@ impl ya_runtime_sdk::Runtime for Runtime {
         &mut self,
         command: server::RunProcess,
         mode: RuntimeMode,
-        _: &mut Context<Self>,
+        ctx: &mut Context<Self>,
     ) -> ProcessIdResponse<'a> {
         if let RuntimeMode::Command = mode {
             return async move { Err(anyhow::anyhow!("CLI `run` is not supported")) }
                 .map_err(Into::into)
                 .boxed_local();
         }
-
-        run_command(self.data.clone(), command)
-            .map_err(Into::into)
-            .boxed_local()
+        let pci_device_id = ctx.cli.runtime.pci_device.clone();
+        let data = self.data.clone();
+        async move {
+            if let Some(pci_device_id) = pci_device_id {
+                let mut runtime_data = data.lock().await;
+                runtime_data.pci_device_id.replace(pci_device_id);
+            }
+            run_command(data.clone(), command).await
+        }
+        .map_err(Into::into)
+        .boxed_local()
     }
 
     fn kill_command<'a>(
@@ -179,20 +214,28 @@ impl ya_runtime_sdk::Runtime for Runtime {
             .boxed_local()
     }
 
-    fn offer<'a>(&mut self, _: &mut Context<Self>) -> OutputResponse<'a> {
-        self_test::run_self_test(|self_test_result| {
-            self_test::verify_status(self_test_result)
-                .and_then(|self_test_result| Ok(serde_json::from_str(&self_test_result)?))
-                .and_then(offer)
-                .map(|offer| serde_json::Value::to_string(&offer))
-        })
+    fn offer<'a>(&mut self, ctx: &mut Context<Self>) -> OutputResponse<'a> {
+        let pci_device_id = ctx.cli.runtime.pci_device.clone();
+        let test_config = ctx.cli.runtime.test_config.clone();
+        self_test::run_self_test(
+            |self_test_result| {
+                self_test::verify_status(self_test_result)
+                    .and_then(|self_test_result| Ok(serde_json::from_str(&self_test_result)?))
+                    .and_then(offer)
+                    .map(|offer| serde_json::Value::to_string(&offer))
+            },
+            pci_device_id,
+            test_config,
+        )
         // Dead code. ya_runtime_api::server::run_async requires killing the process to stop app
         .map(|_| Ok(None))
         .boxed_local()
     }
 
-    fn test<'a>(&mut self, _ctx: &mut Context<Self>) -> EmptyResponse<'a> {
-        self_test::test().boxed_local()
+    fn test<'a>(&mut self, ctx: &mut Context<Self>) -> EmptyResponse<'a> {
+        let pci_device_id = ctx.cli.runtime.pci_device.clone();
+        let test_config = ctx.cli.runtime.test_config.clone();
+        self_test::test(pci_device_id, test_config).boxed_local()
     }
 
     fn join_network<'a>(
@@ -336,27 +379,40 @@ fn offer(self_test_result: serde_json::Value) -> anyhow::Result<serde_json::Valu
     );
 
     let mut runtime_capabilities = vec!["inet", "vpn", "manifest-support", "start-entrypoint"];
-    if is_gpu_supported(&self_test_result) {
-        runtime_capabilities.push("!exp:gpu");
-    }
 
-    Ok(serde_json::json!({
+    let mut offer_template = serde_json::json!({
         "properties": {
             "golem.inf.cpu.vendor": cpu.model.vendor,
             "golem.inf.cpu.brand": cpu.model.brand,
             "golem.inf.cpu.model": model,
             "golem.inf.cpu.capabilities": cpu.capabilities,
-            "golem.runtime.capabilities": runtime_capabilities,
-            "golem.runtime.!exp.inf": self_test_result,
         },
         "constraints": ""
-    }))
+    });
+
+    let properties = offer_template
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+        .or_err("Unable to read offer template as a map")?;
+
+    if is_gpu_supported(&self_test_result) {
+        properties.insert("golem.!exp.gap-35.v1.inf".into(), self_test_result);
+        runtime_capabilities.push("!exp:gpu");
+    }
+
+    properties.insert(
+        "golem.runtime.capabilities".into(),
+        serde_json::json!(runtime_capabilities),
+    );
+
+    Ok(offer_template)
 }
 
-#[allow(unused_variables)]
 fn is_gpu_supported(self_test_result: &serde_json::Value) -> bool {
-    // NYI
-    false
+    self_test_result
+        .as_object()
+        .and_then(|root| root.get("gpu"))
+        .is_some()
 }
 
 async fn join_network(

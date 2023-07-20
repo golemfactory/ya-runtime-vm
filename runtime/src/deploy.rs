@@ -52,7 +52,6 @@ impl Deployment {
             input.take(json_len as u64).read_to_string(&mut buf).await?;
             buf
         };
-
         if crc32::checksum_ieee(json.as_bytes()) != crc {
             return Err(anyhow::anyhow!("Invalid ContainerConfig crc32 sum"));
         }
