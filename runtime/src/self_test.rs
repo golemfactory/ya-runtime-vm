@@ -17,18 +17,16 @@ use ya_runtime_sdk::{ProcessStatus, RunProcess, RuntimeStatus};
 
 use crate::deploy::Deployment;
 use crate::vmrt::{runtime_dir, RuntimeData};
-use crate::Runtime;
+use crate::{Runtime, TestConfig};
 
 const FILE_TEST_IMAGE: &str = "self-test.gvmi";
 const FILE_TEST_EXECUTABLE: &str = "ya-self-test";
 
 pub(crate) async fn test(
     pci_device_id: Option<String>,
-    timeout: Duration,
-    cpu_cores: usize,
-    mem_gib: f64,
+    test_config: TestConfig,
 ) -> Result<(), Error> {
-    run_self_test(verify_status, pci_device_id, timeout, cpu_cores, mem_gib).await;
+    run_self_test(verify_status, pci_device_id, test_config).await;
     // Dead code. ya_runtime_api::server::run_async requires killing a process to stop
     Ok(())
 }
@@ -41,15 +39,13 @@ pub(crate) fn verify_status(status: anyhow::Result<Value>) -> anyhow::Result<Str
 pub(crate) async fn run_self_test<HANDLER>(
     handle_result: HANDLER,
     pci_device_id: Option<String>,
-    timeout: Duration,
-    cpu_cores: usize,
-    mem_gib: f64,
+    test_config: TestConfig,
 ) where
     HANDLER: Fn(anyhow::Result<Value>) -> anyhow::Result<String>,
 {
     let work_dir = std::env::temp_dir();
 
-    let deployment = self_test_deployment(&work_dir, cpu_cores, mem_gib)
+    let deployment = self_test_deployment(&work_dir, &test_config)
         .await
         .expect("Prepares self test img deployment");
 
@@ -75,6 +71,7 @@ pub(crate) async fn run_self_test<HANDLER>(
 
         log::info!("Runtime: {:?}", runtime.data);
         log::info!("Running self test command");
+        let timeout = test_config.test_timeout();
         run_self_test_command(
             runtime.data.clone(),
             &output_dir,
@@ -125,8 +122,7 @@ fn self_test_runtime(deployment: Deployment, pci_device_id: Option<String>) -> R
 /// Builds self test deployment based on `FILE_TEST_IMAGE` from path returned by `runtime_dir()`
 async fn self_test_deployment(
     work_dir: &Path,
-    cpu_cores: usize,
-    mem_gib: f64,
+    test_config: &TestConfig,
 ) -> anyhow::Result<Deployment> {
     let package_path = runtime_dir()
         .expect("Runtime directory not found")
@@ -134,6 +130,8 @@ async fn self_test_deployment(
         .canonicalize()
         .expect("Test image not found");
 
+    let cpu_cores = test_config.test_cpu_cores;
+    let mem_gib = test_config.test_mem_gib;
     log::info!("Task package: {}", package_path.display());
     let mem_mib = (mem_gib * 1024.) as usize;
     let package_file = fs::File::open(package_path.clone())

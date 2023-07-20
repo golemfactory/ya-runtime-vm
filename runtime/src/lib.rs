@@ -72,6 +72,18 @@ pub struct Cli {
     /// PCI device identifier
     #[structopt(long, env = "YA_RUNTIME_VM_PCI_DEVICE")]
     pci_device: Option<String>,
+    #[structopt(flatten)]
+    test_config: TestConfig,
+}
+
+#[derive(ya_runtime_sdk::RuntimeDef, Default)]
+#[cli(Cli)]
+pub struct Runtime {
+    data: Arc<Mutex<RuntimeData>>,
+}
+
+#[derive(StructOpt, Clone, Default)]
+struct TestConfig {
     /// Test process timeout (in sec)
     #[structopt(long, env = "YA_RUNTIME_VM_TEST_TIMEOUT", default_value = "10")]
     test_timeout: u64,
@@ -83,16 +95,10 @@ pub struct Cli {
     test_mem_gib: f64,
 }
 
-impl Cli {
+impl TestConfig {
     fn test_timeout(&self) -> Duration {
         Duration::from_secs(self.test_timeout)
     }
-}
-
-#[derive(ya_runtime_sdk::RuntimeDef, Default)]
-#[cli(Cli)]
-pub struct Runtime {
-    data: Arc<Mutex<RuntimeData>>,
 }
 
 impl ya_runtime_sdk::Runtime for Runtime {
@@ -210,9 +216,7 @@ impl ya_runtime_sdk::Runtime for Runtime {
 
     fn offer<'a>(&mut self, ctx: &mut Context<Self>) -> OutputResponse<'a> {
         let pci_device_id = ctx.cli.runtime.pci_device.clone();
-        let test_timeout = ctx.cli.runtime.test_timeout();
-        let cpu_cores = ctx.cli.runtime.test_cpu_cores;
-        let mem_gib = ctx.cli.runtime.test_mem_gib;
+        let test_config = ctx.cli.runtime.test_config.clone();
         self_test::run_self_test(
             |self_test_result| {
                 self_test::verify_status(self_test_result)
@@ -221,9 +225,7 @@ impl ya_runtime_sdk::Runtime for Runtime {
                     .map(|offer| serde_json::Value::to_string(&offer))
             },
             pci_device_id,
-            test_timeout,
-            cpu_cores,
-            mem_gib,
+            test_config,
         )
         // Dead code. ya_runtime_api::server::run_async requires killing the process to stop app
         .map(|_| Ok(None))
@@ -232,10 +234,8 @@ impl ya_runtime_sdk::Runtime for Runtime {
 
     fn test<'a>(&mut self, ctx: &mut Context<Self>) -> EmptyResponse<'a> {
         let pci_device_id = ctx.cli.runtime.pci_device.clone();
-        let test_timeout = ctx.cli.runtime.test_timeout();
-        let cpu_cores = ctx.cli.runtime.test_cpu_cores;
-        let mem_gib = ctx.cli.runtime.test_mem_gib;
-        self_test::test(pci_device_id, test_timeout, cpu_cores, mem_gib).boxed_local()
+        let test_config = ctx.cli.runtime.test_config.clone();
+        self_test::test(pci_device_id, test_config).boxed_local()
     }
 
     fn join_network<'a>(
