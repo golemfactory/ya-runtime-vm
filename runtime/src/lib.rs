@@ -79,7 +79,7 @@ pub struct Cli {
     #[structopt(long, env = "YA_RUNTIME_VM_TEST_CPU_CORES", default_value = "1")]
     test_cpu_cores: usize,
     ///  Amount of RAM for test process [GiB]
-    #[structopt(long, env = "YA_RUNTIME_VM_TEST_MEM_GIB", default_value = "0.125")]
+    #[structopt(long, env = "YA_RUNTIME_VM_TEST_MEM_GIB", default_value = "0.5")]
     test_mem_gib: f64,
 }
 
