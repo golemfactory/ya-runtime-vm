@@ -74,9 +74,7 @@ jobs:
       gvmkit-build_archive: gvmkit-build-x86_64-unknown-linux-gnu.tar.gz
       self-test-img_tag: self-test
       rust_stable: 1.70.0
-    defaults:
-      run:
-        working-directory: self_test_img
+      self-test-img_gvmi: self-test.gvmi
 
     steps:
       - uses: actions/checkout@v3
@@ -96,6 +94,7 @@ jobs:
       - name: Build Docker image
         uses: docker/build-push-action@v4
         with:
+          context: self_test_img
           push: false
           tags: ${{ env.self-test-img_tag }}
 
@@ -213,6 +212,7 @@ jobs:
     needs:
       - create-release
       - build-init
+      - build-self-test-img
     runs-on: ubuntu-latest
     steps:
       - name: Get upload url
@@ -240,15 +240,10 @@ jobs:
           path: runtime/init-container/
       - run: |
           test -f runtime/init-container/initramfs.cpio.gz
-      - name: Download self-test image
-        uses: robinraju/release-downloader@v1.8
+      - uses: actions/download-artifact@v2
         with:
-          repository: ${{ env.self-test-img_repository }}
-          tag: ${{ env.self-test-img_tag }}
-          fileName: self-test.gvmi
-          out-file-path: runtime/image/
-          tarBall: false
-          zipBall: false
+          name: self_test_img
+          path: runtime/image/
       - name: Extract Version
         id: version
         shell: bash
