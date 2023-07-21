@@ -1,0 +1,8 @@
+[package]
+name = "ya-self-test"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ya-self-test"
+path = "src/main.rs"

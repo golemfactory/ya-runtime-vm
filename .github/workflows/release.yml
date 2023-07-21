@@ -65,6 +65,62 @@ jobs:
           path: |
             runtime/init-container/initramfs.cpio.gz
             runtime/init-container/vmlinuz-virt
+  build-self-test-img:
+    name: Build self test image
+    runs-on: ubuntu-20.04
+    env:
+      gvmkit-build_tag: v0.3.13
+      gvmkit-build_dir: gvmkit-build
+      gvmkit-build_archive: gvmkit-build-x86_64-unknown-linux-gnu.tar.gz
+      self-test-img_tag: self-test
+      rust_stable: 1.70.0
+    defaults:
+      run:
+        working-directory: self_test_img
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Rust ${{ env.rust_stable }}
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ env.rust_stable }}
+          components: rustfmt, clippy
+
+      - name: Check lockfile
+        uses: actions-rs/cargo@v1
+        with:
+          command: tree
+          args: --locked
+
+      - name: Build Docker image for GPU
+        uses: docker/build-push-action@v4
+        with:
+          push: false
+          tags: ${{ env.self-test-img_tag }}
+
+      - name: Download gvmkit-build
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: robinraju/release-downloader@v1.8
+        with:
+          repository: golemfactory/gvmkit-build-rs
+          tag: ${{ env.gvmkit-build_tag }}
+          fileName: ${{ env.gvmkit-build_archive }}
+          extract: true
+          out-file-path: ${{ env.gvmkit-build_dir }}
+          tarBall: false
+          zipBall: false
+
+      - name: Build GVMkit image
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          ${{ env.gvmkit-build_dir }}/gvmkit-build ${{ env.self-test-img_tag }}:latest -o ${{ env.self-test-img_gvmi }}
+
+      - uses: actions/upload-artifact@v2
+        with:
+          name: self_test_img
+          path: |
+            ${{ env.self-test-img_gvmi }}
 
   build:
     name: Build Release
@@ -85,15 +141,10 @@ jobs:
       - run: |
           ls -R
           test -f runtime/init-container/initramfs.cpio.gz
-      - name: Download self-test image
-        uses: robinraju/release-downloader@v1.8
+      - uses: actions/download-artifact@v2
         with:
-          repository: ${{ env.self-test-img_repository }}
-          tag: ${{ env.self-test-img_tag }}
-          fileName: self-test.gvmi
-          out-file-path: runtime/image/
-          tarBall: false
-          zipBall: false
+          name: self_test_img
+          path: runtime/image/
       - name: Install Musl
         run: |
           sudo apt-get install -y musl-tools musl

@@ -2,6 +2,7 @@
 members = [
     "runtime",
     "gvmkit",
+    "self_test_img"
 ]
 
 [patch.crates-io]
