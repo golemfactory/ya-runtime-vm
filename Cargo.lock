@@ -3083,7 +3083,7 @@ dependencies = [
 
 [[package]]
 name = "ya-runtime-vm"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "bollard-stubs",
@@ -3106,6 +3106,10 @@ dependencies = [
  "uuid",
  "ya-runtime-sdk",
 ]
+
+[[package]]
+name = "ya-self-test"
+version = "0.1.0"
 
 [[package]]
 name = "zstd"
