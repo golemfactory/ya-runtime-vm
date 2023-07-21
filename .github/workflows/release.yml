@@ -127,6 +127,7 @@ jobs:
     needs:
       - create-release
       - build-init
+      - build-self-test-img
     runs-on: ubuntu-latest
     env:
       OPENSSL_STATIC: 1
