@@ -113,6 +113,16 @@ static noreturn void die(void) {
     }
 }
 
+#define CHECK_BOOL(x) ({                                                \
+    __typeof__(x) _x = (x);                                             \
+    if (_x == 0) {                                                      \
+        fprintf(stderr, "Error at %s:%d: %m\n", __FILE__, __LINE__);    \
+        die();                                                          \
+    }                                                                   \
+    _x;                                                                 \
+})
+
+
 #define CHECK(x) ({                                                     \
     __typeof__(x) _x = (x);                                             \
     if (_x == -1) {                                                     \
@@ -124,8 +134,8 @@ static noreturn void die(void) {
 
 static void load_module(const char* path) {
     int fd = CHECK(open(path, O_RDONLY | O_CLOEXEC));
-    CHECK(syscall(SYS_finit_module, fd, "", 0));
-    CHECK(close(fd));
+    CHECK_BOOL(syscall(SYS_finit_module, fd, "", 0) == 0);
+    CHECK_BOOL(close(fd) == 0);
 }
 
 int make_nonblocking(int fd) {
@@ -378,12 +388,12 @@ static int set_network_ns(char *entries[], int n) {
 
     fprintf(f, "search example.com\n");
     for (int i = 0; i < n; ++i) {
-        fprintf(f, "nameserver %s\n", entries[i]);
+        CHECK_BOOL(fprintf(f, "nameserver %s\n", entries[i]) > 0);
     }
 
-    fflush(f);
-    fsync(fileno(f));
-    fclose(f);
+    CHECK_BOOL(fflush(f) == 0);
+    CHECK_BOOL(fsync(fileno(f)) == 0);
+    CHECK_BOOL(fclose(f) == 0);
 
     return 0;
 }
@@ -394,9 +404,9 @@ int write_sys(char *path, size_t value) {
         return -1;
     }
 
-    fprintf(f, "%ld", value);
-    fflush(f);
-    fclose(f);
+    CHECK_BOOL(fprintf(f, "%ld", value) > 0);
+    CHECK_BOOL(fflush(f) == 0);
+    CHECK_BOOL(fclose(f) == 0);
 
     return 0;
 }
@@ -1634,9 +1644,9 @@ static void create_dir(const char *pathname, mode_t mode) {
 }
 
 int main(void) {
-    setbuf(stdin, NULL);
-    setbuf(stdout, NULL);
-    setbuf(stderr, NULL);
+    CHECK_BOOL(setvbuf(stdin, NULL, _IONBF, BUFSIZ) == 0);
+    CHECK_BOOL(setvbuf(stdout, NULL, _IONBF, BUFSIZ) == 0);
+    CHECK_BOOL(setvbuf(stderr, NULL, _IONBF, BUFSIZ) == 0);
 
     create_dir("/dev", DEFAULT_DIR_PERMS);
     CHECK(mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID,
