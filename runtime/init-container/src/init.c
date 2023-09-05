@@ -586,20 +586,10 @@ static bool redirect_fd_to_path(int fd, const char* path) {
 // lives in a separate memory segment (after forking)
 static int child_pipe = -1;
 
-static void close_child_pipe() {
-    if (child_pipe != -1) {
-        char c = '\0';
-        /* Can't do anything with errors here. */
-        (void)write(child_pipe, &c, sizeof(c));
-        close(child_pipe);
-    }
-}
-
 static noreturn void child_wrapper(int parent_pipe[2],
                                    struct new_process_args* new_proc_args,
                                    struct redir_fd_desc fd_descs[3]) {
     child_pipe = parent_pipe[1];
-    atexit(close_child_pipe);
 
     if (close(parent_pipe[0]) < 0) {
         goto out;
@@ -658,7 +648,13 @@ static noreturn void child_wrapper(int parent_pipe[2],
                  new_proc_args->envp ?: environ);
 
 out:
-    exit(errno);
+    if (child_pipe != -1) {
+        char c = '\0';
+        /* Can't do anything with errors here. */
+        (void)write(child_pipe, &c, sizeof(c));
+        close(child_pipe);
+    }
+    _exit(errno);
 }
 
 /* 0 is considered an invalid ID. */
