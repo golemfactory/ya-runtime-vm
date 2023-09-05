@@ -1130,7 +1130,7 @@ static void handle_mount(msg_id_t msg_id) {
         }
     }
 
-    if (!tag || !path) {
+    if (!tag || !path || path[0] != '/') {
         ret = EINVAL;
         goto out;
     }
