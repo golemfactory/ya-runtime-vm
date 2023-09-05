@@ -752,6 +752,7 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
     proc_desc->id = get_next_id();
     if (create_process_fds_dir(proc_desc->id) < 0) {
         ret = errno;
+        fprintf(stderr, "Failed to create file descriptor directory: %m\n");
         goto out_err;
     }
 
@@ -759,6 +760,7 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
      * failures from spawned process exiting. */
     if (pipe2(status_pipe, O_CLOEXEC | O_DIRECT) < 0) {
         ret = errno;
+        fprintf(stderr, "Failed to create status pipe: %m\n");
         goto out_err;
     }
 
@@ -800,6 +802,7 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
 
                 if (pipe2(proc_desc->redirs[fd].buffer.fds, O_CLOEXEC) < 0) {
                     ret = errno;
+                    fprintf(stderr, "Failed to create redirection pipe: %m\n");
                     goto out_err;
                 }
                 break;
@@ -811,6 +814,7 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
     p = fork();
     if (p < 0) {
         ret = errno;
+        fprintf(stderr, "Failed to fork: %m\n");
         goto out_err;
     } else if (p == 0) {
         child_wrapper(status_pipe, new_proc_args, proc_desc->redirs);
@@ -823,8 +827,10 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
     ssize_t x = read(status_pipe[0], &c, sizeof(c));
     if (x < 0) {
         ret = errno;
+        fprintf(stderr, "Failed to read from pipe: %m\n");
         goto out_err;
     } else if (x > 0) {
+        fprintf(stderr, "Failed to spawn process\n");
         /* Process failed to spawn. */
         int status = 0;
         CHECK(waitpid(p, &status, 0));
@@ -854,6 +860,7 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
                                   &epoll_fd_descs[fd]) < 0) {
                 if (errno == ENOMEM || errno == ENOSPC) {
                     ret = errno;
+                    fprintf(stderr, "Failed to add epoll descriptor: %m\n");
                     goto out_err;
                 }
                 CHECK(-1);
