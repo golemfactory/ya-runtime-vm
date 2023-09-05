@@ -28,6 +28,7 @@
 #include "process_bookkeeping.h"
 #include "proto.h"
 #include "forward.h"
+#define SYSROOT "/mnt/newroot"
 
 #define CONTAINER_OF(ptr, type, member) (type*)((char*)(ptr) - offsetof(type, member))
 
@@ -49,9 +50,10 @@
 
 #define DEV_VPN "eth0"
 #define DEV_INET "eth1"
+#define SYSROOT "/mnt/newroot"
 
 #define MODE_RW_UGO (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)
-#define OUTPUT_PATH_PREFIX "/var/tmp/guest_agent_private/fds"
+#define OUTPUT_PATH_PREFIX SYSROOT "/var/tmp/guest_agent_private/fds"
 
 #define NET_MEM_DEFAULT 1048576
 #define NET_MEM_MAX 2097152
@@ -365,7 +367,7 @@ static void setup_agent_directories(void) {
 
 static int add_network_hosts(char *entries[][2], int n) {
     FILE *f;
-    if ((f = fopen("/etc/hosts", "a")) == 0) {
+    if ((f = fopen(SYSROOT "/etc/hosts", "a")) == 0) {
         return -1;
     }
 
@@ -382,7 +384,7 @@ static int add_network_hosts(char *entries[][2], int n) {
 
 static int set_network_ns(char *entries[], int n) {
     FILE *f;
-    if ((f = fopen("/etc/resolv.conf", "w")) == 0) {
+    if ((f = fopen(SYSROOT "/etc/resolv.conf", "w")) == 0) {
         return -1;
     }
 
@@ -603,15 +605,43 @@ static noreturn void child_wrapper(int parent_pipe[2],
         goto out;
     }
 
+#ifdef MASSIVEDEBUGGING
+#define X(a) do if (write(2, a "\n", sizeof(a)) != sizeof(a)) goto out; while (0)
+#else
+#define X(a) do (void)(a ""); while (0)
+#endif
+    X("ENTERING CHROOT");
+    if (chdir(SYSROOT) != 0 || chroot(".") != 0) {
+        goto out;
+    }
+
+    X("chdir(\"/\")");
+    if (chdir("/") != 0) {
+        goto out;
+    }
+
     if (new_proc_args->cwd) {
+        X("chdir(\"command dir\")");
         if (chdir(new_proc_args->cwd) < 0) {
             goto out;
         }
     }
 
+    X("fd processing");
     for (int fd = 0; fd < 3; ++fd) {
+        X("processing an FD");
         switch (fd_descs[fd].type) {
             case REDIRECT_FD_FILE:
+                X("redirecting an FD to a file");
+                if (strncmp(fd_descs[fd].path, SYSROOT, sizeof SYSROOT - 1) != 0)
+                    abort();
+                fd_descs[fd].path += sizeof SYSROOT - 1;
+#ifdef MASSIVEDEBUGGING
+                if ((size_t)write(2, fd_descs[fd].path, strlen(fd_descs[fd].path)) != strlen(fd_descs[fd].path)) {
+                    goto out;
+                }
+                X("");
+#endif
                 if (!redirect_fd_to_path(fd, fd_descs[fd].path)) {
                     goto out;
                 }
@@ -633,15 +663,18 @@ static noreturn void child_wrapper(int parent_pipe[2],
     }
 
     gid_t gid = new_proc_args->gid;
+    X("setresgid");
     if (setresgid(gid, gid, gid) < 0) {
         goto out;
     }
 
     uid_t uid = new_proc_args->uid;
+    X("setresuid");
     if (setresuid(uid, uid, uid) < 0) {
         goto out;
     }
 
+    X("execve");
     /* If execve returns we know an error happened. */
     (void)execve(new_proc_args->bin,
                  new_proc_args->argv,
@@ -1670,62 +1703,59 @@ int main(void) {
     g_cmds_fd = CHECK(open(VPORT_CMD, O_RDWR | O_CLOEXEC));
 
     CHECK(mkdir("/mnt", S_IRWXU));
+    CHECK(mkdir("/proc", S_IRWXU));
     CHECK(mkdir("/mnt/image", S_IRWXU));
     CHECK(mkdir("/mnt/overlay", S_IRWXU));
-    CHECK(mkdir("/mnt/newroot", DEFAULT_DIR_PERMS));
+    CHECK(mkdir(SYSROOT, DEFAULT_DIR_PERMS));
 
     // 'workdir' and 'upperdir' have to be on the same filesystem
     CHECK(mount("tmpfs", "/mnt/overlay", "tmpfs",
                 MS_NOSUID,
-                "mode=0777,size=128M"));
+                "mode=0700,size=128M"));
 
     CHECK(mkdir("/mnt/overlay/upper", S_IRWXU));
     CHECK(mkdir("/mnt/overlay/work", S_IRWXU));
 
     CHECK(mount("/dev/vda", "/mnt/image", "squashfs", MS_RDONLY, ""));
-    CHECK(mount("overlay", "/mnt/newroot", "overlay", 0,
+    CHECK(mount("overlay", SYSROOT, "overlay", 0,
                 "lowerdir=/mnt/image,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work"));
 
-    CHECK(umount2("/dev", MNT_DETACH));
-
-    CHECK(chdir("/mnt/newroot"));
-    CHECK(mount(".", "/", "none", MS_MOVE, NULL));
-    CHECK(chroot("."));
-    CHECK(chdir("/"));
-
-    create_dir("/dev", DEFAULT_DIR_PERMS);
-    create_dir("/tmp", DEFAULT_DIR_PERMS);
+    create_dir(SYSROOT "/dev", DEFAULT_DIR_PERMS);
+    create_dir(SYSROOT "/tmp", DEFAULT_DIR_PERMS);
 
     CHECK(mount("proc", "/proc", "proc",
                 MS_NODEV | MS_NOSUID | MS_NOEXEC,
                 NULL));
-    CHECK(mount("sysfs", "/sys", "sysfs",
+    CHECK(mount("proc", SYSROOT "/proc", "proc",
                 MS_NODEV | MS_NOSUID | MS_NOEXEC,
                 NULL));
-    CHECK(mount("devtmpfs", "/dev", "devtmpfs",
+    CHECK(mount("sysfs", SYSROOT "/sys", "sysfs",
+                MS_NODEV | MS_NOSUID | MS_NOEXEC,
+                NULL));
+    CHECK(mount("devtmpfs", SYSROOT "/dev", "devtmpfs",
                 MS_NOSUID,
                 "exec,mode=0755,size=2M"));
-    CHECK(mount("tmpfs", "/tmp", "tmpfs",
+    CHECK(mount("tmpfs", SYSROOT "/tmp", "tmpfs",
                 MS_NOSUID,
                 "mode=0777"));
 
-    create_dir("/dev/pts", DEFAULT_DIR_PERMS);
-    create_dir("/dev/shm", DEFAULT_DIR_PERMS);
+    create_dir(SYSROOT "/dev/pts", DEFAULT_DIR_PERMS);
+    create_dir(SYSROOT "/dev/shm", DEFAULT_DIR_PERMS);
 
-    CHECK(mount("devpts", "/dev/pts", "devpts",
+    CHECK(mount("devpts", SYSROOT "/dev/pts", "devpts",
                 MS_NOSUID | MS_NOEXEC,
                 "gid=5,mode=0620"));
-    CHECK(mount("tmpfs", "/dev/shm", "tmpfs",
+    CHECK(mount("tmpfs", SYSROOT "/dev/shm", "tmpfs",
                 MS_NODEV | MS_NOSUID | MS_NOEXEC,
                 NULL));
 
-    if (access("/dev/null", F_OK) != 0) {
-        CHECK(mknod("/dev/null",
+    if (access(SYSROOT "/dev/null", F_OK) != 0) {
+        CHECK(mknod(SYSROOT "/dev/null",
                     MODE_RW_UGO | S_IFCHR,
                     makedev(1, 3)));
     }
-    if (access("/dev/ptmx", F_OK) != 0) {
-        CHECK(mknod("/dev/ptmx",
+    if (access(SYSROOT "/dev/ptmx", F_OK) != 0) {
+        CHECK(mknod(SYSROOT "/dev/ptmx",
                     MODE_RW_UGO | S_IFCHR,
                     makedev(5, 2)));
     }
