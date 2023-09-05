@@ -126,7 +126,7 @@ fn spawn_vm<'a, P: AsRef<Path>>(temp_path: P, mount_args: &'a [(&'a str, impl To
         "virtio-rng-pci",
         "-chardev",
         format!(
-            "socket,path={},server,nowait,id=manager_cdev",
+            "socket,path={},server=true,wait=false,id=manager_cdev",
             temp_path.as_ref().join("manager.sock").display()
         )
         .as_str(),
