@@ -96,11 +96,10 @@ fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
 fn spawn_vm<'a, P: AsRef<Path>>(temp_path: P, mount_args: &'a [(&'a str, impl ToString)]) -> Child {
     let root_dir = get_root_dir();
     let project_dir = get_project_dir();
-    let runtime_dir = project_dir.join("poc").join("runtime");
     let init_dir = project_dir.join("init-container");
 
-    let mut cmd = Command::new("vmrt");
-    cmd.current_dir(runtime_dir).args([
+    let mut cmd = Command::new("qemu-system-x86_64");
+    cmd.current_dir(&init_dir).args([
         "-m",
         "256m",
         "-nographic",
