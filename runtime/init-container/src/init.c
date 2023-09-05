@@ -372,12 +372,20 @@ static int add_network_hosts(char *entries[][2], int n) {
     }
 
     for (int i = 0; i < n; ++i) {
-        fprintf(f, "%s\t%s\n", entries[i][0], entries[i][1]);
+        if (fprintf(f, "%s\t%s\n", entries[i][0], entries[i][1]) < 2) {
+            return -1;
+        }
     }
 
-    fflush(f);
-    fsync(fileno(f));
-    fclose(f);
+    if (fflush(f)) {
+        return -1;
+    }
+    if (fsync(fileno(f))) {
+        return -1;
+    }
+    if (fclose(f)) {
+        return -1;
+    }
 
     return 0;
 }
