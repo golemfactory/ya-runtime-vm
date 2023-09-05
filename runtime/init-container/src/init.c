@@ -747,6 +747,7 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
     for (size_t fd = 0; fd < 3; ++fd) {
         proc_desc->redirs[fd].type = REDIRECT_FD_INVALID;
     }
+    int status_pipe[2] = { -1, -1 };
 
     proc_desc->id = get_next_id();
     if (create_process_fds_dir(proc_desc->id) < 0) {
@@ -756,7 +757,6 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
 
     /* All these shenanigans with pipes are so that we can distinguish internal
      * failures from spawned process exiting. */
-    int status_pipe[2] = { -1, -1 };
     if (pipe2(status_pipe, O_CLOEXEC | O_DIRECT) < 0) {
         ret = errno;
         goto out_err;
