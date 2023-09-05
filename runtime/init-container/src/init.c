@@ -59,6 +59,7 @@
 #define MTU_VPN 1220
 #define MTU_INET 65521
 
+static int g_sysroot_fd = AT_FDCWD;
 
 struct new_process_args {
     char* bin;
@@ -1664,7 +1665,7 @@ static noreturn void main_loop(void) {
 }
 
 static void create_dir(const char *pathname, mode_t mode) {
-    if (mkdir(pathname, mode) < 0 && errno != EEXIST) {
+    if (mkdirat(g_sysroot_fd, pathname, mode) < 0 && errno != EEXIST) {
         fprintf(stderr, "mkdir(%s) failed with: %m\n", pathname);
         die();
     }
@@ -1719,8 +1720,11 @@ int main(void) {
     CHECK(mount("overlay", SYSROOT, "overlay", 0,
                 "lowerdir=/mnt/image,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work"));
 
-    create_dir(SYSROOT "/dev", DEFAULT_DIR_PERMS);
-    create_dir(SYSROOT "/tmp", DEFAULT_DIR_PERMS);
+    g_sysroot_fd = CHECK(open(SYSROOT, O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+    assert(g_sysroot_fd >= 3);
+
+    create_dir("dev", DEFAULT_DIR_PERMS);
+    create_dir("tmp", DEFAULT_DIR_PERMS);
 
     CHECK(mount("proc", "/proc", "proc",
                 MS_NODEV | MS_NOSUID | MS_NOEXEC,
@@ -1738,8 +1742,8 @@ int main(void) {
                 MS_NOSUID,
                 "mode=0777"));
 
-    create_dir(SYSROOT "/dev/pts", DEFAULT_DIR_PERMS);
-    create_dir(SYSROOT "/dev/shm", DEFAULT_DIR_PERMS);
+    create_dir("dev/pts", DEFAULT_DIR_PERMS);
+    create_dir("dev/shm", DEFAULT_DIR_PERMS);
 
     CHECK(mount("devpts", SYSROOT "/dev/pts", "devpts",
                 MS_NOSUID | MS_NOEXEC,
