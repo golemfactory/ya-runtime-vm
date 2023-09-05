@@ -99,8 +99,8 @@ fn spawn_vm<'a, P: AsRef<Path>>(temp_path: P, mount_args: &'a [(&'a str, impl To
     let runtime_dir = project_dir.join("poc").join("runtime");
     let init_dir = project_dir.join("init-container");
 
-    let mut cmd = Command::new("vmrt");
-    cmd.current_dir(runtime_dir).args([
+    let mut cmd = Command::new("qemu-system-x86_64");
+    cmd.current_dir(&init_dir).args([
         "-m",
         "256m",
         "-nographic",
