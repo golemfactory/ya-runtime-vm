@@ -386,7 +386,6 @@ static int set_network_ns(char *entries[], int n) {
         return -1;
     }
 
-    fprintf(f, "search example.com\n");
     for (int i = 0; i < n; ++i) {
         CHECK_BOOL(fprintf(f, "nameserver %s\n", entries[i]) > 0);
     }
