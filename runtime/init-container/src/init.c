@@ -53,7 +53,7 @@
 #define SYSROOT "/mnt/newroot"
 
 #define MODE_RW_UGO (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)
-#define OUTPUT_PATH_PREFIX SYSROOT "/var/tmp/guest_agent_private/fds"
+#define OUTPUT_PATH_PREFIX "/var/tmp/guest_agent_private/fds"
 
 #define NET_MEM_DEFAULT 1048576
 #define NET_MEM_MAX 2097152
@@ -331,27 +331,125 @@ static void setup_sigfd(void) {
     g_sig_fd = CHECK(signalfd(g_sig_fd, &set, SFD_CLOEXEC));
 }
 
-static int create_dir_path(char* path) {
+static void debug_dir_path(char* path) {
     assert(path[0] == '/');
 
     char* next = path;
-    while (1) {
-        next = strchr(next + 1, '/');
-        if (!next) {
-            break;
-        }
-        *next = '\0';
-        int ret = mkdir(path, DEFAULT_DIR_PERMS);
-        *next = '/';
-        if (ret < 0 && errno != EEXIST) {
-            return -1;
-        }
+    int fd = g_sysroot_fd;
+    char *prev;
+    int new_fd = openat(fd, path + 1,
+		        O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOCTTY,
+			S_IRWXU);
+    if (new_fd != -1) {
+        fprintf(stderr, "Successful open?\n");
+        close(new_fd);
+        return;
     }
+    fprintf(stderr, "Failed to open %s (%m), trying one part at a time...\n", path);
+    do {
+        next++;
+        prev = next;
+        next = strchr(next, '/');
+        if (next != NULL) {
+            *next = '\0';
+        }
+        if (*prev == '\0' || strcmp(prev, ".") == 0 || strcmp(prev, "..") == 0) {
+            fprintf(stderr, "Invalid path component '%s'\n", prev);
+            if (next != NULL) {
+                *next = '/';
+            }
+            goto fail;
+        }
+        fprintf(stderr, "Opening path component %s\n", prev);
+        new_fd = openat(fd, prev, next != NULL
+			? O_DIRECTORY | O_RDONLY | O_NOFOLLOW|O_NOCTTY|O_CLOEXEC
+			: O_RDWR | O_CREAT | O_CLOEXEC | O_NOCTTY,
+			S_IRWXU);
+        if (new_fd == -1) {
+            int tmp = errno;
+            if (next == NULL && (tmp == ENOTDIR || tmp == ENOENT)) {
+                new_fd = openat(fd, prev,
+                                O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOCTTY,
+                                S_IRWXU);
+                if (new_fd != -1)
+                    goto good;
+                goto fail;
+            }
+            assert(tmp != EBADF);
+            fprintf(stderr, "openat(%s) failed: %m\n", prev);
+            if (next != NULL) {
+                *next = '/';
+            }
+            goto fail;
+        }
+good:
+        if (next != NULL) {
+            *next = '/';
+        }
+        if (fd != g_sysroot_fd) {
+            close(fd);
+        }
+        fd = new_fd;
+    } while (next);
+fail:
+    if (fd != g_sysroot_fd) {
+        close(fd);
+    }
+}
 
-    if (mkdir(path, DEFAULT_DIR_PERMS) < 0 && errno != EEXIST) {
-        return -1;
+static int create_dir_path(char* path, int perms, int *out_fd) {
+    assert(path[0] == '/');
+
+    char* next = path;
+    int fd = g_sysroot_fd;
+    int rc = -1;
+    char *prev;
+    do {
+        next++;
+        prev = next;
+        next = strchr(next, '/');
+        if (next != NULL) {
+            *next = '\0';
+        }
+        if (*prev == '\0' || strcmp(prev, ".") == 0 || strcmp(prev, "..") == 0) {
+            fprintf(stderr, "Invalid path component '%s'\n", prev);
+            errno = EINVAL;
+            goto fail;
+        }
+        int ret = mkdirat(fd, prev, perms);
+        if (ret != 0 && errno != EEXIST) {
+            int tmp = errno;
+            assert(errno != EBADF);
+            fprintf(stderr, "mkdirat() failed: %m\n");
+            errno = tmp;
+            goto fail;
+        }
+
+        int new_fd = openat(fd, prev, O_DIRECTORY | O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        if (new_fd == -1) {
+            int tmp = errno;
+            assert(tmp != EBADF);
+            fprintf(stderr, "openat() failed: %m\n");
+            errno = tmp;
+            goto fail;
+        }
+        if (fd != g_sysroot_fd) {
+            close(fd);
+        }
+        fd = new_fd;
+    } while (next);
+    rc = 0;
+    if (out_fd) {
+        *out_fd = fd;
+        fd = g_sysroot_fd;
     }
-    return 0;
+fail:
+    if (fd != g_sysroot_fd) {
+        int save = errno;
+        close(fd);
+        errno = save;
+    }
+    return rc;
 }
 
 static void setup_agent_directories(void) {
@@ -361,7 +459,7 @@ static void setup_agent_directories(void) {
         die();
     }
 
-    CHECK(create_dir_path(path));
+    CHECK(create_dir_path(path, DEFAULT_DIR_PERMS, NULL));
 
     free(path);
 }
@@ -613,24 +711,39 @@ static noreturn void child_wrapper(int parent_pipe[2],
         goto out;
     }
 
+#define MASSIVEDEBUGGING
 #ifdef MASSIVEDEBUGGING
-#define X(a) do if (write(2, a "\n", sizeof(a)) != sizeof(a)) goto out; while (0)
+#define X(a) do { \
+    int tmp = errno;\
+    if (write(2, a "\n", sizeof(a)) != sizeof(a)) { \
+        errno = tmp; \
+        goto out; \
+    } \
+    errno = tmp; \
+} while (0)
 #else
 #define X(a) do (void)(a ""); while (0)
 #endif
     X("ENTERING CHROOT");
-    if (chdir(SYSROOT) != 0 || chroot(".") != 0) {
+    if (chdir(SYSROOT) != 0) {
+	fprintf(stderr, "Cannot enter %s: %m\n", SYSROOT);
+        X("cannot enter " SYSROOT);
+        goto out;
+    }
+    if (chroot(".") != 0) {
+        X("cannot chroot(\".\")");
         goto out;
     }
 
-    X("chdir(\"/\")");
     if (chdir("/") != 0) {
+        X("cannot chdir(\"/\")");
         goto out;
     }
 
     if (new_proc_args->cwd) {
         X("chdir(\"command dir\")");
         if (chdir(new_proc_args->cwd) < 0) {
+            X("cannot chdir");
             goto out;
         }
     }
@@ -641,9 +754,6 @@ static noreturn void child_wrapper(int parent_pipe[2],
         switch (fd_descs[fd].type) {
             case REDIRECT_FD_FILE:
                 X("redirecting an FD to a file");
-                if (strncmp(fd_descs[fd].path, SYSROOT, sizeof SYSROOT - 1) != 0)
-                    abort();
-                fd_descs[fd].path += sizeof SYSROOT - 1;
 #ifdef MASSIVEDEBUGGING
                 if ((size_t)write(2, fd_descs[fd].path, strlen(fd_descs[fd].path)) != strlen(fd_descs[fd].path)) {
                     goto out;
@@ -687,6 +797,8 @@ static noreturn void child_wrapper(int parent_pipe[2],
     (void)execve(new_proc_args->bin,
                  new_proc_args->argv,
                  new_proc_args->envp ?: environ);
+    X("execve failed");
+
 
 out:
     if (child_pipe != -1) {
@@ -710,7 +822,7 @@ static int create_process_fds_dir(uint64_t id) {
         return -1;
     }
 
-    if (mkdir(path, S_IRWXU) < 0) {
+    if (create_dir_path(path, S_IRWXU, NULL) < 0) {
         int tmp = errno;
         free(path);
         errno = tmp;
@@ -737,11 +849,13 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
     struct epoll_fd_desc* epoll_fd_descs[3] = { NULL };
 
     if (new_proc_args->is_entrypoint && g_entrypoint_desc) {
+        fprintf(stderr, "Caller bug, returning EEXIST\n");
         return EEXIST;
     }
 
     struct process_desc* proc_desc = calloc(1, sizeof(*proc_desc));
     if (!proc_desc) {
+        fprintf(stderr, "Memory allocation failed\n");
         return ENOMEM;
     }
     for (size_t fd = 0; fd < 3; ++fd) {
@@ -772,6 +886,7 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
                     proc_desc->redirs[fd].path = strdup(fd_descs[fd].path);
                     if (!proc_desc->redirs[fd].path) {
                         ret = errno;
+                        fprintf(stderr, "Memory allocation failed\n");
                         goto out_err;
                     }
                 } else {
@@ -779,13 +894,16 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
                         construct_output_path(proc_desc->id, fd);
                     if (!proc_desc->redirs[fd].path) {
                         ret = errno;
+                        fprintf(stderr, "Cannot construct output path: %m\n");
                         goto out_err;
                     }
-                    int tmp_fd = open(proc_desc->redirs[fd].path,
-                                      O_RDWR | O_CREAT | O_EXCL,
+                    int tmp_fd = openat(g_sysroot_fd, proc_desc->redirs[fd].path + 1,
+                                      O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOCTTY,
                                       S_IRWXU);
                     if (tmp_fd < 0 || close(tmp_fd) < 0) {
                         ret = errno;
+                        fprintf(stderr, "Cannot open %s: %m\n", proc_desc->redirs[fd].path);
+                        debug_dir_path(proc_desc->redirs[fd].path);
                         goto out_err;
                     }
                 }
@@ -1109,13 +1227,21 @@ out:
 }
 
 static uint32_t do_mount(const char* tag, char* path) {
-    if (create_dir_path(path) < 0) {
+    int fd;
+    char buf[sizeof "/proc/self/fd/" + 10];
+    if (create_dir_path(path, DEFAULT_DIR_PERMS, &fd) < 0) {
         return errno;
     }
-    if (mount(tag, path, "9p", 0, "trans=virtio,version=9p2000.L") < 0) {
-        return errno;
+    CHECK_BOOL(fd > 2);
+    int res = snprintf(buf, sizeof buf, "/proc/self/fd/%d", fd);
+    CHECK_BOOL(res >= (int)sizeof "/proc/self/fd/" && res < (int)sizeof buf);
+    if (mount(tag, buf, "9p", 0, "trans=virtio,version=9p2000.L") < 0) {
+        res = errno;
+    } else {
+        res = 0;
     }
-    return 0;
+    close(fd);
+    return res;
 }
 
 static void handle_mount(msg_id_t msg_id) {
@@ -1240,18 +1366,23 @@ static void handle_query_output(msg_id_t msg_id) {
 
         switch (subtype) {
             case SUB_MSG_QUERY_OUTPUT_END:
+                fprintf(stderr, "SUB_MSG_QUERY_OUTPUT_END\n");
                 done = true;
                 break;
             case SUB_MSG_QUERY_OUTPUT_ID:
+                fprintf(stderr, "SUB_MSG_QUERY_OUTPUT_ID\n");
                 CHECK(recv_u64(g_cmds_fd, &id));
                 break;
             case SUB_MSG_QUERY_OUTPUT_FD:
+                fprintf(stderr, "SUB_MSG_QUERY_OUTPUT_FD\n");
                 CHECK(recv_u8(g_cmds_fd, &fd));
                 break;
             case SUB_MSG_QUERY_OUTPUT_OFF:
+                fprintf(stderr, "SUB_MSG_QUERY_OUTPUT_OFF\n");
                 CHECK(recv_u64(g_cmds_fd, &off));
                 break;
             case SUB_MSG_QUERY_OUTPUT_LEN:
+                fprintf(stderr, "SUB_MSG_QUERY_OUTPUT_LEN\n");
                 CHECK(recv_u64(g_cmds_fd, &len));
                 break;
             default:
@@ -1262,12 +1393,14 @@ static void handle_query_output(msg_id_t msg_id) {
     }
 
     if (!id || !len || !fd || fd > 2) {
+        fprintf(stderr, "caller bug, returning EINVAL\n");
         ret = EINVAL;
         goto out_err;
     }
 
     struct process_desc* proc_desc = find_process_by_id(id);
     if (!proc_desc) {
+        fprintf(stderr, "no process, returning ESRCH\n");
         ret = ESRCH;
         goto out_err;
     }
