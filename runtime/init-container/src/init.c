@@ -22,6 +22,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <inttypes.h>
+#include <limits.h>
 
 #include "communication.h"
 #include "cyclic_buffer.h"
@@ -32,9 +33,6 @@
 #define SYSROOT "/mnt/newroot"
 
 #define CONTAINER_OF(ptr, type, member) (type*)((char*)(ptr) - offsetof(type, member))
-
-// XXX: maybe obtain this with sysconf?
-#define PAGE_SIZE 0x1000
 
 #define DEFAULT_UID 0
 #define DEFAULT_GID 0
@@ -168,6 +166,25 @@ int make_cloexec(int fd) {
 }
 */
 
+static int open_relative(const char *path, uint64_t flags, uint64_t mode) {
+    /*
+     * Arch's musl 1.2.4-1 doesn't include <linux/openat2.h>, so
+     * open-code the parts that are needed.
+     */
+    struct {
+        uint64_t flags;
+        uint64_t mode;
+        uint64_t resolve;
+    } how;
+    memset(&how, 0, sizeof how);
+    how.flags = flags | O_NOCTTY | O_CLOEXEC;
+    how.mode = mode;
+    how.resolve = 0x10 /* RESOLVE_IN_ROOT */;
+    long r = syscall(SYS_openat2, g_sysroot_fd, path, &how, sizeof how);
+    CHECK_BOOL(r >= -1 && r <= INT_MAX);
+    return r;
+}
+
 static void cleanup_fd_desc(struct redir_fd_desc* fd_desc) {
     switch (fd_desc->type) {
         case REDIRECT_FD_FILE:
@@ -190,18 +207,20 @@ static void cleanup_fd_desc(struct redir_fd_desc* fd_desc) {
 }
 
 static bool redir_buffers_empty(struct redir_fd_desc *redirs, size_t len) {
-    FILE *f;
     for (size_t fd = 0; fd < len; ++fd) {
         switch (redirs[fd].type) {
-            case REDIRECT_FD_FILE:
-                if ((f = fopen(redirs[fd].path, "r")) == 0) {
+            case REDIRECT_FD_FILE:;
+                int this_fd = open_relative(redirs[fd].path, O_RDONLY, 0);
+                if (this_fd == -1) {
                     continue;
                 }
-                fseek(f, 0, SEEK_END);
-                bool empty = ftell(f) == 0;
-                fclose(f);
-
-                if (!empty) {
+                struct stat statbuf;
+                int res = fstat(this_fd, &statbuf);
+                close(this_fd);
+                if (res != 0) {
+                    continue;
+                }
+                if (statbuf.st_size) {
                     return false;
                 }
                 break;
@@ -313,6 +332,7 @@ static void handle_sigchld(void) {
     }
 
     if (redir_buffers_empty(proc_desc->redirs, 3)) {
+        fprintf(stderr, "Deleting process %" PRIu64 "\n", proc_desc->id);
         delete_proc(proc_desc);
     }
 }
@@ -596,12 +616,17 @@ static int del_epoll_fd_desc(struct epoll_fd_desc* epoll_fd_desc) {
  * Returns whether call was successful (setting errno on failures). */
 static bool redirect_fd_to_path(int fd, const char* path) {
     assert(fd == 0 || fd == 1 || fd == 2);
+    if (path[0] != '/' || path[1] == '/') {
+        errno = EINVAL;
+        return false;
+    }
+    path++;
 
     int source_fd = -1;
     if (fd == 0) {
-        source_fd = open(path, O_RDONLY);
+        source_fd = open_relative(path, O_RDONLY, 0);
     } else {
-        source_fd = open(path, O_WRONLY | O_CREAT, DEFAULT_OUT_FILE_PERM);
+        source_fd = open_relative(path, O_WRONLY | O_CREAT, DEFAULT_OUT_FILE_PERM);
     }
 
     if (source_fd < 0) {
@@ -661,7 +686,7 @@ static noreturn void child_wrapper(int parent_pipe[2],
 #endif
     X("ENTERING CHROOT");
     if (chdir(SYSROOT) != 0) {
-	fprintf(stderr, "Cannot enter %s: %m\n", SYSROOT);
+        fprintf(stderr, "Cannot enter %s: %m\n", SYSROOT);
         X("cannot enter " SYSROOT);
         goto out;
     }
@@ -832,7 +857,7 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
                         fprintf(stderr, "Cannot construct output path: %m\n");
                         goto out_err;
                     }
-                    int tmp_fd = openat(g_sysroot_fd, proc_desc->redirs[fd].path + 1,
+                    int tmp_fd = open_relative(proc_desc->redirs[fd].path,
                                       O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOCTTY,
                                       S_IRWXU);
                     if (tmp_fd < 0 || close(tmp_fd) < 0) {
@@ -1230,7 +1255,7 @@ static uint32_t do_query_output_path(char* path, uint64_t off, char** buf_ptr,
     char* buf = MAP_FAILED;
     size_t len = 0;
 
-    int fd = open(path, O_RDONLY);
+    int fd = open_relative(path, O_RDONLY, 0);
     if (fd < 0) {
         return errno;
     }
@@ -1335,7 +1360,7 @@ static void handle_query_output(msg_id_t msg_id) {
 
     struct process_desc* proc_desc = find_process_by_id(id);
     if (!proc_desc) {
-        fprintf(stderr, "no process, returning ESRCH\n");
+        fprintf(stderr, "no process %" PRIu64 ", returning ESRCH\n", id);
         ret = ESRCH;
         goto out_err;
     }
