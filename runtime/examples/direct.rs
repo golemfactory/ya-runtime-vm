@@ -96,7 +96,6 @@ fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
 fn spawn_vm<'a, P: AsRef<Path>>(temp_path: P, mount_args: &'a [(&'a str, impl ToString)]) -> Child {
     let root_dir = get_root_dir();
     let project_dir = get_project_dir();
-    let runtime_dir = project_dir.join("poc").join("runtime");
     let init_dir = project_dir.join("init-container");
 
     let mut cmd = Command::new("qemu-system-x86_64");
