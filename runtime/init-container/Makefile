@@ -1,7 +1,7 @@
 CC := musl-gcc
 CXX := /bin/false
 # -MMD to create dependency files (*.d) on first compilation
-CFLAGS := -MMD -std=c11 -O2 -Wall -Wextra -Werror -fPIE -pie -Iinclude/
+CFLAGS := -MMD -std=c11 -O2 -Wall -Wextra -Werror -fPIE -pie -Iinclude/ -Wmaybe-uninitialized
 
 ifneq ($(DEBUG), "")
 CFLAGS += -DNDEBUG
