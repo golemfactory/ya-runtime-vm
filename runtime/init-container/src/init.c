@@ -21,6 +21,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <inttypes.h>
 
 #include "communication.h"
 #include "cyclic_buffer.h"
@@ -926,6 +927,7 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
 
     *id = proc_desc->id;
 
+    fprintf(stderr, "Adding process with id %" PRIu64 "\n", *id);
     add_process(proc_desc);
     if (new_proc_args->is_entrypoint) {
         g_entrypoint_desc = proc_desc;
@@ -1299,23 +1301,23 @@ static void handle_query_output(msg_id_t msg_id) {
 
         switch (subtype) {
             case SUB_MSG_QUERY_OUTPUT_END:
-                fprintf(stderr, "SUB_MSG_QUERY_OUTPUT_END\n");
+                // fprintf(stderr, "SUB_MSG_QUERY_OUTPUT_END\n");
                 done = true;
                 break;
             case SUB_MSG_QUERY_OUTPUT_ID:
-                fprintf(stderr, "SUB_MSG_QUERY_OUTPUT_ID\n");
+                // fprintf(stderr, "SUB_MSG_QUERY_OUTPUT_ID\n");
                 CHECK(recv_u64(g_cmds_fd, &id));
                 break;
             case SUB_MSG_QUERY_OUTPUT_FD:
-                fprintf(stderr, "SUB_MSG_QUERY_OUTPUT_FD\n");
+                // fprintf(stderr, "SUB_MSG_QUERY_OUTPUT_FD\n");
                 CHECK(recv_u8(g_cmds_fd, &fd));
                 break;
             case SUB_MSG_QUERY_OUTPUT_OFF:
-                fprintf(stderr, "SUB_MSG_QUERY_OUTPUT_OFF\n");
+                // fprintf(stderr, "SUB_MSG_QUERY_OUTPUT_OFF\n");
                 CHECK(recv_u64(g_cmds_fd, &off));
                 break;
             case SUB_MSG_QUERY_OUTPUT_LEN:
-                fprintf(stderr, "SUB_MSG_QUERY_OUTPUT_LEN\n");
+                // fprintf(stderr, "SUB_MSG_QUERY_OUTPUT_LEN\n");
                 CHECK(recv_u64(g_cmds_fd, &len));
                 break;
             default:
