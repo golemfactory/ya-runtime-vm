@@ -331,72 +331,6 @@ static void setup_sigfd(void) {
     g_sig_fd = CHECK(signalfd(g_sig_fd, &set, SFD_CLOEXEC));
 }
 
-static void debug_dir_path(char* path) {
-    assert(path[0] == '/');
-
-    char* next = path;
-    int fd = g_sysroot_fd;
-    char *prev;
-    int new_fd = openat(fd, path + 1,
-		        O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOCTTY,
-			S_IRWXU);
-    if (new_fd != -1) {
-        fprintf(stderr, "Successful open?\n");
-        close(new_fd);
-        return;
-    }
-    fprintf(stderr, "Failed to open %s (%m), trying one part at a time...\n", path);
-    do {
-        next++;
-        prev = next;
-        next = strchr(next, '/');
-        if (next != NULL) {
-            *next = '\0';
-        }
-        if (*prev == '\0' || strcmp(prev, ".") == 0 || strcmp(prev, "..") == 0) {
-            fprintf(stderr, "Invalid path component '%s'\n", prev);
-            if (next != NULL) {
-                *next = '/';
-            }
-            goto fail;
-        }
-        fprintf(stderr, "Opening path component %s\n", prev);
-        new_fd = openat(fd, prev, next != NULL
-			? O_DIRECTORY | O_RDONLY | O_NOFOLLOW|O_NOCTTY|O_CLOEXEC
-			: O_RDWR | O_CREAT | O_CLOEXEC | O_NOCTTY,
-			S_IRWXU);
-        if (new_fd == -1) {
-            int tmp = errno;
-            if (next == NULL && (tmp == ENOTDIR || tmp == ENOENT)) {
-                new_fd = openat(fd, prev,
-                                O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOCTTY,
-                                S_IRWXU);
-                if (new_fd != -1)
-                    goto good;
-                goto fail;
-            }
-            assert(tmp != EBADF);
-            fprintf(stderr, "openat(%s) failed: %m\n", prev);
-            if (next != NULL) {
-                *next = '/';
-            }
-            goto fail;
-        }
-good:
-        if (next != NULL) {
-            *next = '/';
-        }
-        if (fd != g_sysroot_fd) {
-            close(fd);
-        }
-        fd = new_fd;
-    } while (next);
-fail:
-    if (fd != g_sysroot_fd) {
-        close(fd);
-    }
-}
-
 static int create_dir_path(char* path, int perms, int *out_fd) {
     assert(path[0] == '/');
 
@@ -903,7 +837,6 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
                     if (tmp_fd < 0 || close(tmp_fd) < 0) {
                         ret = errno;
                         fprintf(stderr, "Cannot open %s: %m\n", proc_desc->redirs[fd].path);
-                        debug_dir_path(proc_desc->redirs[fd].path);
                         goto out_err;
                     }
                 }
