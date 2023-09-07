@@ -321,7 +321,7 @@ async fn main() -> io::Result<()> {
     println!("Big output 2: {}, expected 0", out.len());
 
     let id = ga
-        .run_entrypoint("/bin/sleep", &["sleep", "2"], None, 0, 0, &no_redir, None)
+        .run_entrypoint("/bin/sleep", &["sleep", "100"], None, 0, 0, &no_redir, None)
         .await?
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
