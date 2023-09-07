@@ -320,14 +320,14 @@ async fn main() -> io::Result<()> {
         .expect("Output query failed");
     println!("Big output 2: {}, expected 0", out.len());
 
-    // ga.quit().await?.expect("Quit failed");
-
     let id = ga
         .run_entrypoint("/bin/sleep", &["sleep", "2"], None, 0, 0, &no_redir, None)
         .await?
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
     notifications.process_died.notified().await;
+
+    ga.quit().await?.expect("Quit failed");
 
     /* VM should quit now. */
     let e = child.wait().await.expect("failed to wait on child");
