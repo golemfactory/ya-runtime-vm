@@ -23,6 +23,9 @@
 #include <unistd.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <linux/sched.h>
+#include <sched.h>
+#include <time.h>
 
 #include "communication.h"
 #include "cyclic_buffer.h"
@@ -284,6 +287,9 @@ static struct exit_reason encode_status(int status, int type) {
     return exit_reason;
 }
 
+pid_t global_zombie_pid = -1;
+pid_t global_pidfd = -1;
+
 static void handle_sigchld(void) {
     struct signalfd_siginfo siginfo = { 0 };
 
@@ -299,6 +305,10 @@ static void handle_sigchld(void) {
     }
 
     pid_t child_pid = (pid_t)siginfo.ssi_pid;
+    if (child_pid == global_zombie_pid) {
+        /* This process is deliberately kept as a zombie, ignore it */
+        return;
+    }
 
     if (siginfo.ssi_code != CLD_EXITED
             && siginfo.ssi_code != CLD_KILLED
@@ -654,6 +664,10 @@ static bool redirect_fd_to_path(int fd, const char* path) {
 // lives in a separate memory segment (after forking)
 static int child_pipe = -1;
 
+#define NAMESPACES \
+                 (CLONE_NEWUSER | /* new user namespace */ \
+                 0)
+
 static noreturn void child_wrapper(int parent_pipe[2],
                                    struct new_process_args* new_proc_args,
                                    struct redir_fd_desc fd_descs[3]) {
@@ -670,13 +684,10 @@ static noreturn void child_wrapper(int parent_pipe[2],
     if (sigprocmask(SIG_SETMASK, &set, NULL) < 0) {
         goto out;
     }
-
-#define MASSIVEDEBUGGING
 #ifdef MASSIVEDEBUGGING
 #define X(a) do { \
     int tmp = errno;\
     if (write(2, a "\n", sizeof(a)) != sizeof(a)) { \
-        errno = tmp; \
         goto out; \
     } \
     errno = tmp; \
@@ -684,6 +695,12 @@ static noreturn void child_wrapper(int parent_pipe[2],
 #else
 #define X(a) do (void)(a ""); while (0)
 #endif
+    X("ENTERING NAMESPACE");
+    if (setns(global_pidfd, NAMESPACES)) {
+        X("CANNOT ENTER NAMESPACE");
+        goto out;
+    }
+
     X("ENTERING CHROOT");
     if (chdir(SYSROOT) != 0) {
         X("cannot enter " SYSROOT);
@@ -1773,6 +1790,51 @@ static void create_dir(const char *pathname, mode_t mode) {
     }
 }
 
+static void get_namespace_fd(void) {
+    char buf[sizeof "/proc//uid_map" + 10];
+    struct clone_args args = {
+        .flags = CLONE_CLEAR_SIGHAND |
+                 CLONE_PIDFD | /* alloc a PID FD */
+                 NAMESPACES,
+        .pidfd = (uint64_t)&global_pidfd,
+        .child_tid = 0,
+        .parent_tid = 0,
+        .exit_signal = (uint64_t)SIGCHLD,
+        .stack = 0,
+        .stack_size = 0,
+        .tls = 0,
+        .set_tid = 0,
+        .set_tid_size = 0,
+        .cgroup = 0,
+    };
+    sigset_t set;
+    CHECK(sigemptyset(&set));
+    errno = 0;
+    global_zombie_pid = syscall(SYS_clone3, &args, sizeof args);
+    CHECK_BOOL(global_zombie_pid >= 0);
+    if (global_zombie_pid == 0) {
+        for (;;) {
+            const struct timespec x = {
+                .tv_sec = INT32_MAX,
+                .tv_nsec = 999999999,
+            };
+            (void)(nanosleep(&x, NULL));
+        }
+    }
+    /* parent */
+    CHECK(global_pidfd);
+    int snprintf_res = snprintf(buf, sizeof buf, "/proc/%d/uid_map", global_zombie_pid);
+    CHECK_BOOL(snprintf_res > (int)sizeof buf - 10);
+    CHECK_BOOL(snprintf_res < (int)sizeof buf);
+    for (int i = 0; i < 2; ++i) {
+        int uidmapfd = CHECK(open(buf, O_NOFOLLOW | O_CLOEXEC | O_NOCTTY | O_WRONLY));
+#define UIDMAP "0 0 4294967295"
+        CHECK_BOOL(write(uidmapfd, UIDMAP, sizeof UIDMAP - 1) == sizeof UIDMAP - 1);
+        CHECK_BOOL(close(uidmapfd) == 0);
+        buf[snprintf_res - 7] = 'g';
+    }
+}
+
 int main(void) {
     CHECK_BOOL(setvbuf(stdin, NULL, _IONBF, BUFSIZ) == 0);
     CHECK_BOOL(setvbuf(stdout, NULL, _IONBF, BUFSIZ) == 0);
@@ -1869,6 +1931,7 @@ int main(void) {
     setup_agent_directories();
 
     block_signals();
+    get_namespace_fd();
     setup_sigfd();
 
     main_loop();
