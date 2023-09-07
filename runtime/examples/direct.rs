@@ -63,7 +63,7 @@ async fn run_process_with_output(
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
     notifications.process_died.notified().await;
-    notifications.output_available.notified().await;
+    // notifications.output_available.notified().await;
     match ga.query_output(id, 1, 0, u64::MAX).await? {
         Ok(out) => {
             println!("Output:");
