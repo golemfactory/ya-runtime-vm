@@ -23,6 +23,9 @@
 #include <unistd.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <linux/sched.h>
+#include <sched.h>
+#include <time.h>
 
 #include "communication.h"
 #include "cyclic_buffer.h"
@@ -285,6 +288,9 @@ static struct exit_reason encode_status(int status, int type) {
     return exit_reason;
 }
 
+pid_t global_zombie_pid = -1;
+pid_t global_pidfd = -1;
+
 static void handle_sigchld(void) {
     struct signalfd_siginfo siginfo = { 0 };
 
@@ -300,6 +306,10 @@ static void handle_sigchld(void) {
     }
 
     pid_t child_pid = (pid_t)siginfo.ssi_pid;
+    if (child_pid == global_zombie_pid) {
+        /* This process is deliberately kept as a zombie, ignore it */
+        return;
+    }
 
     if (siginfo.ssi_code != CLD_EXITED
             && siginfo.ssi_code != CLD_KILLED
@@ -670,13 +680,10 @@ static noreturn void child_wrapper(int parent_pipe[2],
     if (sigprocmask(SIG_SETMASK, &set, NULL) < 0) {
         goto out;
     }
-
-#define MASSIVEDEBUGGING
 #ifdef MASSIVEDEBUGGING
 #define X(a) do { \
     int tmp = errno;\
     if (write(2, a "\n", sizeof(a)) != sizeof(a)) { \
-        errno = tmp; \
         goto out; \
     } \
     errno = tmp; \
@@ -684,6 +691,13 @@ static noreturn void child_wrapper(int parent_pipe[2],
 #else
 #define X(a) do (void)(a ""); while (0)
 #endif
+    X("ENTERING NAMESPACE");
+    if (setns(global_pidfd, CLONE_NEWCGROUP | CLONE_NEWPID |
+                CLONE_NEWNS | CLONE_NEWIPC | CLONE_NEWTIME | CLONE_NEWUTS)) {
+        X("CANNOT ENTER NAMESPACE");
+        goto out;
+    }
+
     X("ENTERING CHROOT");
     if (chdir(SYSROOT) != 0) {
         fprintf(stderr, "Cannot enter %s: %m\n", SYSROOT);
@@ -1779,6 +1793,65 @@ static void create_dir(const char *pathname, mode_t mode) {
     }
 }
 
+static void get_namespace_fd(void) {
+    struct clone_args args = {
+        .flags = CLONE_CLEAR_SIGHAND |
+                 CLONE_FILES | /* no need to unshare this */
+                 CLONE_IO | /* or this */
+                 CLONE_NEWCGROUP | /* new cgroup namespace */
+                 CLONE_NEWPID | /* new PID namespace */
+                 CLONE_NEWIPC | /* new IPC namespace */
+                 CLONE_NEWNS | /* new mount namespace */
+                 CLONE_NEWPID | /* new PID namespace */
+                 CLONE_NEWUSER | /* new user namespace */
+                 CLONE_NEWUTS | /* new UTS namespace */
+                 CLONE_PIDFD | /* alloc a PID FD */
+                 0,
+        .pidfd = (uint64_t)&global_pidfd,
+        .child_tid = 0,
+        .parent_tid = 0,
+        .exit_signal = (uint64_t)SIGCHLD,
+        .stack = 0,
+        .stack_size = 0,
+        .tls = 0,
+        .set_tid = 0,
+        .set_tid_size = 0,
+        .cgroup = 0,
+    };
+    errno = 0;
+    global_zombie_pid = syscall(SYS_clone3, &args, sizeof args);
+    CHECK_BOOL(global_zombie_pid >= 0);
+    sigset_t set;
+    CHECK(sigemptyset(&set));
+    if (global_zombie_pid == 0) {
+        struct sigaction x = {
+            .sa_handler = SIG_DFL,
+            .sa_mask = set,
+            .sa_flags = SA_RESTART | SA_NOCLDWAIT,
+        };
+        CHECK(sigaction(SIGCHLD, &x, NULL));
+        /* child */
+        for (;;) {
+            const struct timespec x = {
+                .tv_sec = INT32_MAX,
+                .tv_nsec = 999999999,
+            };
+            switch (nanosleep(&x, NULL)) {
+                case 0:
+                    break;
+                case -1:
+                    if (errno != EINTR)
+                        abort();
+                    break;
+                default:
+                    abort();
+            }
+        }
+    }
+    /* parent */
+    CHECK(global_pidfd);
+}
+
 int main(void) {
     CHECK_BOOL(setvbuf(stdin, NULL, _IONBF, BUFSIZ) == 0);
     CHECK_BOOL(setvbuf(stdout, NULL, _IONBF, BUFSIZ) == 0);
@@ -1875,6 +1948,7 @@ int main(void) {
     setup_agent_directories();
 
     block_signals();
+    get_namespace_fd();
     setup_sigfd();
 
     main_loop();
