@@ -692,7 +692,7 @@ static noreturn void child_wrapper(int parent_pipe[2],
 #define X(a) do (void)(a ""); while (0)
 #endif
     X("ENTERING NAMESPACE");
-    if (setns(global_pidfd, CLONE_NEWCGROUP | CLONE_NEWPID |
+    if (setns(global_pidfd, CLONE_NEWCGROUP |
                 CLONE_NEWNS | CLONE_NEWIPC | CLONE_NEWTIME | CLONE_NEWUTS)) {
         X("CANNOT ENTER NAMESPACE");
         goto out;
@@ -1799,10 +1799,8 @@ static void get_namespace_fd(void) {
                  CLONE_FILES | /* no need to unshare this */
                  CLONE_IO | /* or this */
                  CLONE_NEWCGROUP | /* new cgroup namespace */
-                 CLONE_NEWPID | /* new PID namespace */
                  CLONE_NEWIPC | /* new IPC namespace */
                  CLONE_NEWNS | /* new mount namespace */
-                 CLONE_NEWPID | /* new PID namespace */
                  CLONE_NEWUSER | /* new user namespace */
                  CLONE_NEWUTS | /* new UTS namespace */
                  CLONE_PIDFD | /* alloc a PID FD */
@@ -1824,28 +1822,12 @@ static void get_namespace_fd(void) {
     sigset_t set;
     CHECK(sigemptyset(&set));
     if (global_zombie_pid == 0) {
-        struct sigaction x = {
-            .sa_handler = SIG_DFL,
-            .sa_mask = set,
-            .sa_flags = SA_RESTART | SA_NOCLDWAIT,
-        };
-        CHECK(sigaction(SIGCHLD, &x, NULL));
-        /* child */
         for (;;) {
             const struct timespec x = {
                 .tv_sec = INT32_MAX,
                 .tv_nsec = 999999999,
             };
-            switch (nanosleep(&x, NULL)) {
-                case 0:
-                    break;
-                case -1:
-                    if (errno != EINTR)
-                        abort();
-                    break;
-                default:
-                    abort();
-            }
+            (void)(nanosleep(&x, NULL));
         }
     }
     /* parent */
