@@ -1807,10 +1807,6 @@ static void get_namespace_fd(void) {
     char buf[sizeof "/proc//uid_map" + 10];
     struct clone_args args = {
         .flags = CLONE_CLEAR_SIGHAND |
-#if 0
-                 CLONE_FILES | /* no need to unshare this */
-                 CLONE_IO | /* or this */
-#endif
                  CLONE_PIDFD | /* alloc a PID FD */
                  NAMESPACES,
         .pidfd = (uint64_t)&global_pidfd,
