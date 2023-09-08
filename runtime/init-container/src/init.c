@@ -705,35 +705,6 @@ static noreturn void child_wrapper(int parent_pipe[2],
         X("sigprocmask problem");
         goto out;
     }
-    X("ENTERING NAMESPACE");
-    if (setns(global_pidfd, NAMESPACES)) {
-        X("CANNOT ENTER NAMESPACE");
-        goto out;
-    }
-
-    X("ENTERING CHROOT");
-    if (chdir(SYSROOT) != 0) {
-        X("cannot enter " SYSROOT);
-        goto out;
-    }
-    if (chroot(".") != 0) {
-        X("cannot chroot(\".\")");
-        goto out;
-    }
-
-    if (chdir("/") != 0) {
-        X("cannot chdir(\"/\")");
-        goto out;
-    }
-
-    if (new_proc_args->cwd) {
-        X("chdir(\"command dir\")");
-        if (chdir(new_proc_args->cwd) < 0) {
-            X("cannot chdir");
-            goto out;
-        }
-    }
-
     X("fd processing");
     for (int fd = 0; fd < 3; ++fd) {
         X("processing an FD");
@@ -766,6 +737,40 @@ static noreturn void child_wrapper(int parent_pipe[2],
                 X("bad command");
                 errno = ENOTRECOVERABLE;
                 goto out;
+        }
+    }
+
+    if (syscall(SYS_close_range, (unsigned int)global_pidfd + 1, ~0U, 0) != 0) {
+        abort();
+    }
+
+    if (global_pidfd > 3 && syscall(SYS_close_range, 3U, (unsigned int)(global_pidfd - 1), 0U) != 0) {
+        abort();
+    }
+
+    if (setns(global_pidfd, NAMESPACES)) {
+        goto out;
+    }
+
+    if (close(global_pidfd)) {
+        goto out;
+    }
+
+    if (chdir(SYSROOT) != 0) {
+        goto out;
+    }
+
+    if (chroot(".") != 0) {
+        goto out;
+    }
+
+    if (chdir("/") != 0) {
+        goto out;
+    }
+
+    if (new_proc_args->cwd) {
+        if (chdir(new_proc_args->cwd) < 0) {
+            goto out;
         }
     }
 
