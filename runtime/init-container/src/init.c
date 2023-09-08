@@ -664,6 +664,15 @@ static bool redirect_fd_to_path(int fd, const char* path) {
 // lives in a separate memory segment (after forking)
 static int child_pipe = -1;
 
+#define NAMESPACES \
+                 (CLONE_NEWCGROUP | /* new cgroup namespace */ \
+                 CLONE_NEWIPC | /* new IPC namespace */ \
+                 CLONE_NEWNS | /* new mount namespace */ \
+                 CLONE_NEWUSER | /* new user namespace */ \
+                 CLONE_NEWUTS | /* new UTS namespace */ \
+                 (0 & CLONE_NEWTIME) | /* new time namespace */ \
+                 0)
+
 static noreturn void child_wrapper(int parent_pipe[2],
                                    struct new_process_args* new_proc_args,
                                    struct redir_fd_desc fd_descs[3]) {
@@ -696,8 +705,7 @@ static noreturn void child_wrapper(int parent_pipe[2],
         goto out;
     }
     X("ENTERING NAMESPACE");
-    if (setns(global_pidfd, CLONE_NEWCGROUP |
-                CLONE_NEWNS | CLONE_NEWIPC | CLONE_NEWTIME | CLONE_NEWUTS)) {
+    if (setns(global_pidfd, NAMESPACES)) {
         X("CANNOT ENTER NAMESPACE");
         goto out;
     }
@@ -1796,17 +1804,15 @@ static void create_dir(const char *pathname, mode_t mode) {
 }
 
 static void get_namespace_fd(void) {
+    char buf[sizeof "/proc//uid_map" + 10];
     struct clone_args args = {
         .flags = CLONE_CLEAR_SIGHAND |
+#if 0
                  CLONE_FILES | /* no need to unshare this */
                  CLONE_IO | /* or this */
-                 CLONE_NEWCGROUP | /* new cgroup namespace */
-                 CLONE_NEWIPC | /* new IPC namespace */
-                 CLONE_NEWNS | /* new mount namespace */
-                 CLONE_NEWUSER | /* new user namespace */
-                 CLONE_NEWUTS | /* new UTS namespace */
+#endif
                  CLONE_PIDFD | /* alloc a PID FD */
-                 0,
+                 NAMESPACES,
         .pidfd = (uint64_t)&global_pidfd,
         .child_tid = 0,
         .parent_tid = 0,
@@ -1818,11 +1824,11 @@ static void get_namespace_fd(void) {
         .set_tid_size = 0,
         .cgroup = 0,
     };
+    sigset_t set;
+    CHECK(sigemptyset(&set));
     errno = 0;
     global_zombie_pid = syscall(SYS_clone3, &args, sizeof args);
     CHECK_BOOL(global_zombie_pid >= 0);
-    sigset_t set;
-    CHECK(sigemptyset(&set));
     if (global_zombie_pid == 0) {
         for (;;) {
             const struct timespec x = {
@@ -1834,6 +1840,16 @@ static void get_namespace_fd(void) {
     }
     /* parent */
     CHECK(global_pidfd);
+    int snprintf_res = snprintf(buf, sizeof buf, "/proc/%d/uid_map", global_zombie_pid);
+    CHECK_BOOL(snprintf_res > (int)sizeof buf - 10);
+    CHECK_BOOL(snprintf_res < (int)sizeof buf);
+    for (int i = 0; i < 2; ++i) {
+        int uidmapfd = CHECK(open(buf, O_NOFOLLOW | O_CLOEXEC | O_NOCTTY | O_WRONLY));
+#define UIDMAP "0 0 4294967295"
+        CHECK_BOOL(write(uidmapfd, UIDMAP, sizeof UIDMAP - 1) == sizeof UIDMAP - 1);
+        CHECK_BOOL(close(uidmapfd) == 0);
+        buf[snprintf_res - 7] = 'g';
+    }
 }
 
 int main(void) {
