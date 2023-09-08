@@ -14,6 +14,7 @@
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/reboot.h>
+#include <sys/prctl.h>
 #include <sys/signalfd.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -1847,6 +1848,8 @@ int main(void) {
     CHECK_BOOL(setvbuf(stdin, NULL, _IONBF, BUFSIZ) == 0);
     CHECK_BOOL(setvbuf(stdout, NULL, _IONBF, BUFSIZ) == 0);
     CHECK_BOOL(setvbuf(stderr, NULL, _IONBF, BUFSIZ) == 0);
+    int res = prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
+    CHECK_BOOL(res == 0 || res == 1);
 
     create_dir("/dev", DEFAULT_DIR_PERMS);
     CHECK(mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID,
