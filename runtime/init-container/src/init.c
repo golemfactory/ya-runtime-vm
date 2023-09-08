@@ -768,6 +768,14 @@ static noreturn void child_wrapper(int parent_pipe[2],
         }
     }
 
+    if (syscall(SYS_close_range, (unsigned int)global_pidfd + 1, ~0U, 0) != 0) {
+        abort();
+    }
+
+    if (global_pidfd >= 3 && syscall(SYS_close_range, 3U, (unsigned int)global_pidfd, 0U) != 0) {
+        abort();
+    }
+
     gid_t gid = new_proc_args->gid;
     if (setresgid(gid, gid, gid) < 0) {
         goto out;
