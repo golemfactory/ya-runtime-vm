@@ -740,14 +740,17 @@ static noreturn void child_wrapper(int parent_pipe[2],
             case REDIRECT_FD_PIPE_BLOCKING:
             case REDIRECT_FD_PIPE_CYCLIC:
                 if (dup2(fd_descs[fd].buffer.fds[fd ? 1 : 0], fd) < 0) {
+                    X("dup2 problem");
                     goto out;
                 }
                 if (close(fd_descs[fd].buffer.fds[0]) < 0
                         || close(fd_descs[fd].buffer.fds[1]) < 0) {
+                    X("close problem");
                     goto out;
                 }
                 break;
             default:
+                X("bad command");
                 errno = ENOTRECOVERABLE;
                 goto out;
         }
