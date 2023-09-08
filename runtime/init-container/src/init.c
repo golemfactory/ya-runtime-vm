@@ -668,18 +668,7 @@ static noreturn void child_wrapper(int parent_pipe[2],
                                    struct new_process_args* new_proc_args,
                                    struct redir_fd_desc fd_descs[3]) {
     child_pipe = parent_pipe[1];
-
-    if (close(parent_pipe[0]) < 0) {
-        goto out;
-    }
-
-    sigset_t set;
-    if (sigemptyset(&set) < 0) {
-        goto out;
-    }
-    if (sigprocmask(SIG_SETMASK, &set, NULL) < 0) {
-        goto out;
-    }
+#define MASSIVEDEBUGGING
 #ifdef MASSIVEDEBUGGING
 #define X(a) do { \
     int tmp = errno;\
@@ -691,6 +680,21 @@ static noreturn void child_wrapper(int parent_pipe[2],
 #else
 #define X(a) do (void)(a ""); while (0)
 #endif
+
+    if (close(parent_pipe[0]) < 0) {
+        X("close problem");
+        goto out;
+    }
+
+    sigset_t set;
+    if (sigemptyset(&set) < 0) {
+        X("sigemptyset problem");
+        goto out;
+    }
+    if (sigprocmask(SIG_SETMASK, &set, NULL) < 0) {
+        X("sigprocmask problem");
+        goto out;
+    }
     X("ENTERING NAMESPACE");
     if (setns(global_pidfd, CLONE_NEWCGROUP |
                 CLONE_NEWNS | CLONE_NEWIPC | CLONE_NEWTIME | CLONE_NEWUTS)) {
