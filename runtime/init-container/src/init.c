@@ -1920,11 +1920,13 @@ int main(void) {
                 NULL));
 
     if (access(SYSROOT "/dev/null", F_OK) != 0) {
+        CHECK_BOOL(errno == ENOENT);
         CHECK(mknod(SYSROOT "/dev/null",
                     MODE_RW_UGO | S_IFCHR,
                     makedev(1, 3)));
     }
     if (access(SYSROOT "/dev/ptmx", F_OK) != 0) {
+        CHECK_BOOL(errno == ENOENT);
         CHECK(mknod(SYSROOT "/dev/ptmx",
                     MODE_RW_UGO | S_IFCHR,
                     makedev(5, 2)));
