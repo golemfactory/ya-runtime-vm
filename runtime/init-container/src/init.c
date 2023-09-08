@@ -52,7 +52,6 @@
 
 #define DEV_VPN "eth0"
 #define DEV_INET "eth1"
-#define SYSROOT "/mnt/newroot"
 
 #define MODE_RW_UGO (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)
 #define OUTPUT_PATH_PREFIX "/var/tmp/guest_agent_private/fds"
