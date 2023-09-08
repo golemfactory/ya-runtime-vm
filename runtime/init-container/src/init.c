@@ -757,23 +757,19 @@ static noreturn void child_wrapper(int parent_pipe[2],
     }
 
     gid_t gid = new_proc_args->gid;
-    X("setresgid");
     if (setresgid(gid, gid, gid) < 0) {
         goto out;
     }
 
     uid_t uid = new_proc_args->uid;
-    X("setresuid");
     if (setresuid(uid, uid, uid) < 0) {
         goto out;
     }
 
-    X("execve");
     /* If execve returns we know an error happened. */
     (void)execve(new_proc_args->bin,
                  new_proc_args->argv,
                  new_proc_args->envp ?: environ);
-    X("execve failed");
 
 
 out:
