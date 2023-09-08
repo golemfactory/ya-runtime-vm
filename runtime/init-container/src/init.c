@@ -700,7 +700,6 @@ static noreturn void child_wrapper(int parent_pipe[2],
 
     X("ENTERING CHROOT");
     if (chdir(SYSROOT) != 0) {
-        fprintf(stderr, "Cannot enter %s: %m\n", SYSROOT);
         X("cannot enter " SYSROOT);
         goto out;
     }
