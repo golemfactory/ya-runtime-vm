@@ -34,6 +34,8 @@
 #include "process_bookkeeping.h"
 #include "proto.h"
 #include "forward.h"
+#include "init-seccomp.h"
+#define SYSROOT "/mnt/newroot"
 
 #define CONTAINER_OF(ptr, type, member) (type*)((char*)(ptr) - offsetof(type, member))
 
@@ -784,6 +786,7 @@ static noreturn void child_wrapper(int parent_pipe[2],
         goto out;
     }
 
+    sandbox_apply();
     /* If execve returns we know an error happened. */
     (void)execve(new_proc_args->bin,
                  new_proc_args->argv,
@@ -1945,6 +1948,7 @@ int main(void) {
                     makedev(5, 2)));
     }
 
+    setup_sandbox();
     setup_network();
     setup_agent_directories();
 
