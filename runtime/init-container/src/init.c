@@ -25,8 +25,10 @@
 #include <inttypes.h>
 #include <limits.h>
 #include <linux/sched.h>
+#include <linux/capability.h>
 #include <sched.h>
 #include <time.h>
+#include <glob.h>
 
 #include "communication.h"
 #include "cyclic_buffer.h"
@@ -676,6 +678,9 @@ static int child_pipe = -1;
                  (0 & CLONE_NEWTIME) | /* new time namespace */ \
                  0)
 
+static int capset(cap_user_header_t hdrp, cap_user_data_t datap) {
+    return syscall(SYS_capset, hdrp, datap);
+}
 static noreturn void child_wrapper(int parent_pipe[2],
                                    struct new_process_args* new_proc_args,
                                    struct redir_fd_desc fd_descs[3]) {
@@ -787,6 +792,42 @@ static noreturn void child_wrapper(int parent_pipe[2],
     }
 
     sandbox_apply();
+
+    struct __user_cap_header_struct hdr = {
+        .version = _LINUX_CAPABILITY_VERSION_3,
+    };
+    struct __user_cap_data_struct data[_LINUX_CAPABILITY_U32S_3] = { 0 };
+
+    for (int i = 0; i < _LINUX_CAPABILITY_U32S_3 * 32; ++i) {
+        switch (i) {
+            case CAP_SETUID:
+            case CAP_SETGID:
+            case CAP_SYS_NICE:
+            case CAP_SYS_CHROOT:
+            case CAP_SYS_RESOURCE:
+            case CAP_NET_BIND_SERVICE:
+            case CAP_KILL:
+            case CAP_FSETID:
+            case CAP_DAC_OVERRIDE:
+            case CAP_DAC_READ_SEARCH:
+            case CAP_CHOWN:
+            case CAP_IPC_LOCK:
+            case CAP_IPC_OWNER: {
+                data[i / 32].permitted |= (UINT32_C(1) << (i % 32));
+                data[i / 32].effective |= (UINT32_C(1) << (i % 32));
+                break;
+            }
+            default:;
+                int res = prctl(PR_CAPBSET_DROP, i);
+                if (res != 0 && (res != -1 && errno == EINVAL))
+                    goto out;
+        }
+    }
+
+    if (capset(&hdr, &*data)) {
+        goto out;
+    }
+
     /* If execve returns we know an error happened. */
     (void)execve(new_proc_args->bin,
                  new_proc_args->argv,
@@ -1934,6 +1975,21 @@ int main(void) {
     CHECK(mount("tmpfs", SYSROOT "/dev/shm", "tmpfs",
                 MS_NODEV | MS_NOSUID | MS_NOEXEC,
                 NULL));
+
+    glob_t nvidia_nodes;
+    res = glob("/dev/nvidia[0-9]*", GLOB_ERR, NULL, &nvidia_nodes);
+    if (res == 0) {
+        struct stat statbuf;
+        for (size_t i = 0; i < nvidia_nodes.gl_pathc; ++i) {
+            CHECK_BOOL(strncmp(nvidia_nodes.gl_pathv[i], "/dev/nvidia", sizeof "/dev/nvidia" - 1) == 0);
+            CHECK_BOOL(stat(nvidia_nodes.gl_pathv[i], &statbuf) == 0);
+            CHECK_BOOL(S_ISCHR(statbuf.st_mode));
+            res = mknodat(g_sysroot_fd, nvidia_nodes.gl_pathv[i] + 1, statbuf.st_dev, statbuf.st_mode & 0777);
+            CHECK_BOOL(res == 0 || (res == -1 && errno == EEXIST));
+        }
+    } else {
+        CHECK_BOOL(res == GLOB_NOMATCH);
+    }
 
     if (access(SYSROOT "/dev/null", F_OK) != 0) {
         CHECK_BOOL(errno == ENOENT);
