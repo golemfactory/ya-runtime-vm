@@ -55,7 +55,7 @@ $(SRC_DIR)/network.o: $(SRC_DIR)/network.c
 	    -I"$(CURDIR)/$(UNPACKED_HEADERS)/usr/include" \
 	    -o $@ -c $<
 
-$(SRC_DIR)/forward.o: $(SRC_DIR)/forward.c uring
+$(SRC_DIR)/forward.o: $(SRC_DIR)/forward.c uring $(CURDIR)/$(LIBSECCOMP_SUBMODULE)/src/.libs/libseccomp.a
 	$(QUIET_CC)$(CC) -MMD -O2 -Wall -Wextra -Werror -fPIE -pie \
 	    -I"$(CURDIR)/$(UNPACKED_HEADERS)/usr/include/" \
         -I"$(CURDIR)/$(LIBURING_SUBMODULE)/src/include/" \
@@ -66,9 +66,9 @@ $(SRC_DIR)/forward.o: $(SRC_DIR)/forward.c uring
 %.o: %.c
 	$(QUIET_CC)$(CC) $(CFLAGS) -o $@ -c $<
 
-init: $(UNPACKED_HEADERS) uring seccomp $(OBJECTS) $(OBJECTS_EXT)
+init: $(UNPACKED_HEADERS) uring $(OBJECTS) $(OBJECTS_EXT) $(CURDIR)/$(LIBSECCOMP_SUBMODULE)/src/.libs/libseccomp.a
 	@echo init
-	$(QUIET_CC)$(CC) $(CFLAGS) -static -o $@ $(wordlist 4, $(words $^), $^) "$(CURDIR)/$(LIBURING_SUBMODULE)/src/liburing.a" "$(CURDIR)/$(LIBSECCOMP_SUBMODULE)/src/.libs/libseccomp.a"
+	$(QUIET_CC)$(CC) $(CFLAGS) -static -o $@ $(wordlist 3, $(words $^), $^) "$(CURDIR)/$(LIBURING_SUBMODULE)/src/liburing.a" "$(CURDIR)/$(LIBSECCOMP_SUBMODULE)/src/.libs/libseccomp.a"
 	@# default musl libs on some distros have debug symbols, lets strip them (and everything else)
 	strip $@
 
@@ -93,7 +93,7 @@ uring: $(UNPACKED_HEADERS)
 	$(MAKE) -e CC=$(CC) -e CFLAGS=-I"$(CURDIR)/$(UNPACKED_HEADERS)/usr/include" -C "$(LIBURING_SUBMODULE)/src" all
 
 SHELL := /bin/bash
-seccomp: $(UNPACKED_HEADERS)
+$(CURDIR)/$(LIBSECCOMP_SUBMODULE)/src/.libs/libseccomp.a: $(UNPACKED_HEADERS) $(LIBSECCOMP_SUBMODULE)
 	set -euo pipefail; \
 	cd $(LIBSECCOMP_SUBMODULE); \
 	export CC=$(CC) CXX=$(CXX) CFLAGS=-I"$$PWD/../$(UNPACKED_HEADERS)/usr/include";\
