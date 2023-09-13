@@ -745,20 +745,26 @@ static noreturn void child_wrapper(int parent_pipe[2],
         }
     }
 
-    if (syscall(SYS_close_range, (unsigned int)global_pidfd + 1, ~0U, 0) != 0) {
-        abort();
-    }
+    if (global_pidfd != -1) {
+        if (syscall(SYS_close_range, (unsigned int)global_pidfd + 1, ~0U, 0) != 0) {
+            abort();
+        }
 
-    if (global_pidfd > 3 && syscall(SYS_close_range, 3U, (unsigned int)(global_pidfd - 1), 0U) != 0) {
-        abort();
-    }
+        if (global_pidfd > 3 && syscall(SYS_close_range, 3U, (unsigned int)(global_pidfd - 1), 0U) != 0) {
+            abort();
+        }
 
-    if (setns(global_pidfd, NAMESPACES)) {
-        goto out;
-    }
+        if (setns(global_pidfd, NAMESPACES)) {
+            goto out;
+        }
 
-    if (close(global_pidfd)) {
-        goto out;
+        if (close(global_pidfd)) {
+            goto out;
+        }
+    } else {
+        if (syscall(SYS_close_range, 3U, ~0U, 0U) != 0) {
+            abort();
+        }
     }
 
     if (chdir(SYSROOT) != 0) {
@@ -789,41 +795,43 @@ static noreturn void child_wrapper(int parent_pipe[2],
         goto out;
     }
 
-    sandbox_apply();
+    if (global_pidfd != -1) {
+        sandbox_apply();
 
-    struct __user_cap_header_struct hdr = {
-	    .version = _LINUX_CAPABILITY_VERSION_3,
-    };
-    struct __user_cap_data_struct data[_LINUX_CAPABILITY_U32S_3] = { 0 };
+        struct __user_cap_header_struct hdr = {
+                .version = _LINUX_CAPABILITY_VERSION_3,
+        };
+        struct __user_cap_data_struct data[_LINUX_CAPABILITY_U32S_3] = { 0 };
 
-    for (int i = 0; i < _LINUX_CAPABILITY_U32S_3 * 32; ++i) {
-        switch (i) {
-            case CAP_SETUID:
-            case CAP_SETGID:
-            case CAP_SYS_NICE:
-            case CAP_SYS_CHROOT:
-            case CAP_SYS_RESOURCE:
-            case CAP_NET_BIND_SERVICE:
-            case CAP_KILL:
-            case CAP_FSETID:
-            case CAP_DAC_OVERRIDE:
-            case CAP_DAC_READ_SEARCH:
-            case CAP_CHOWN:
-            case CAP_IPC_LOCK:
-            case CAP_IPC_OWNER: {
-                data[i / 32].permitted |= (UINT32_C(1) << (i % 32));
-                data[i / 32].effective |= (UINT32_C(1) << (i % 32));
-                break;
+        for (int i = 0; i < _LINUX_CAPABILITY_U32S_3 * 32; ++i) {
+            switch (i) {
+                case CAP_SETUID:
+                case CAP_SETGID:
+                case CAP_SYS_NICE:
+                case CAP_SYS_CHROOT:
+                case CAP_SYS_RESOURCE:
+                case CAP_NET_BIND_SERVICE:
+                case CAP_KILL:
+                case CAP_FSETID:
+                case CAP_DAC_OVERRIDE:
+                case CAP_DAC_READ_SEARCH:
+                case CAP_CHOWN:
+                case CAP_IPC_LOCK:
+                case CAP_IPC_OWNER: {
+                    data[i / 32].permitted |= (UINT32_C(1) << (i % 32));
+                    data[i / 32].effective |= (UINT32_C(1) << (i % 32));
+                    break;
+                }
+                default:;
+                    int res = prctl(PR_CAPBSET_DROP, i);
+                    if (res != 0 && (res != -1 && errno == EINVAL))
+                        goto out;
             }
-            default:;
-                int res = prctl(PR_CAPBSET_DROP, i);
-                if (res != 0 && (res != -1 && errno == EINVAL))
-                    goto out;
         }
-    }
 
-    if (capset(&hdr, &*data)) {
-        goto out;
+        if (capset(&hdr, &*data)) {
+            goto out;
+        }
     }
 
     /* If execve returns we know an error happened. */
@@ -1896,7 +1904,7 @@ static void get_namespace_fd(void) {
     }
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     CHECK_BOOL(setvbuf(stdin, NULL, _IONBF, BUFSIZ) == 0);
     CHECK_BOOL(setvbuf(stdout, NULL, _IONBF, BUFSIZ) == 0);
     CHECK_BOOL(setvbuf(stderr, NULL, _IONBF, BUFSIZ) == 0);
@@ -1979,16 +1987,36 @@ int main(void) {
                 MS_NODEV | MS_NOSUID | MS_NOEXEC,
                 NULL));
 
+    bool do_sandbox = true;
+    for (int i = 1; i < argc; ++i) {
+        fprintf(stderr, "Command line argument: %s\n", argv[i]);
+        if (strcmp(argv[i], "sandbox=yes") == 0) {
+            do_sandbox = true;
+        } else if (strcmp(argv[i], "sandbox=no") == 0) {
+            fprintf(stderr, "WARNING: Disabling sandboxing.\n");
+            do_sandbox = false;
+        }
+    }
+    for (char **p = environ; *p; ++p) {
+        fprintf(stderr, "Environment variable: %s\n", *p);
+    }
+
     glob_t nvidia_nodes;
     res = glob("/dev/nvidia[0-9]*", GLOB_ERR, NULL, &nvidia_nodes);
     if (res == 0) {
+        if (do_sandbox == false) {
+            fprintf(stderr, "Sandboxing is disabled, refusing to enable Nvidia GPU passthrough.\n");
+            fprintf(stderr, "Please re-run the container with sandboxing enabled or disable GPU passthrough.\n");
+            errno = 0;
+            CHECK_BOOL(0);
+        }
         struct stat statbuf;
         for (size_t i = 0; i < nvidia_nodes.gl_pathc; ++i) {
             CHECK_BOOL(strncmp(nvidia_nodes.gl_pathv[i], "/dev/nvidia", sizeof "/dev/nvidia" - 1) == 0);
             CHECK_BOOL(stat(nvidia_nodes.gl_pathv[i], &statbuf) == 0);
             CHECK_BOOL(S_ISCHR(statbuf.st_mode));
             res = mknodat(g_sysroot_fd, nvidia_nodes.gl_pathv[i] + 1, statbuf.st_dev, statbuf.st_mode & 0777);
-	    CHECK_BOOL(res == 0 || (res == -1 && errno == EEXIST));
+            CHECK_BOOL(res == 0 || (res == -1 && errno == EEXIST));
         }
     } else {
         CHECK_BOOL(res == GLOB_NOMATCH);
@@ -2012,7 +2040,9 @@ int main(void) {
     setup_agent_directories();
 
     block_signals();
-    get_namespace_fd();
+    if (do_sandbox) {
+        get_namespace_fd();
+    }
     setup_sigfd();
 
     main_loop();
