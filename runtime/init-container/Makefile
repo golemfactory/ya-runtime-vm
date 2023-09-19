@@ -1,7 +1,7 @@
 CC := musl-gcc
 CXX := /bin/false
 # -MMD to create dependency files (*.d) on first compilation
-CFLAGS := -MMD -std=c11 -O2 -Wall -Wextra -Werror -fPIE -pie -Iinclude/
+CFLAGS := -MMD -std=c11 -O2 -Wall -Wextra -Werror -fPIE -pie -Iinclude/ -Wmaybe-uninitialized -Iunpacked_headers/usr/include -Ilibseccomp/include
 
 ifneq ($(DEBUG), "")
 CFLAGS += -DNDEBUG
@@ -23,10 +23,11 @@ HEADERS_SHA256 ?= 0b0f0c30be30ff367f5d1eaee227e919efc4b7f442bc03b3190c6e0d1a1653
 UNPACKED_KERNEL := unpacked_kernel
 UNPACKED_HEADERS := unpacked_headers
 LIBURING_SUBMODULE ?= liburing
+LIBSECCOMP_SUBMODULE ?= libseccomp
 SRC_DIR ?= src
 TEST_DIR ?= tests
 
-OBJECTS = $(addprefix $(SRC_DIR)/,init.o communication.o process_bookkeeping.o cyclic_buffer.o)
+OBJECTS = $(addprefix $(SRC_DIR)/,init.o communication.o process_bookkeeping.o cyclic_buffer.o seccomp.o)
 OBJECTS_EXT = $(addprefix $(SRC_DIR)/,network.o forward.o)
 
 # Add headers to object dependencies for conditional recompilation on header change
@@ -54,7 +55,7 @@ $(SRC_DIR)/network.o: $(SRC_DIR)/network.c
 	    -I"$(CURDIR)/$(UNPACKED_HEADERS)/usr/include" \
 	    -o $@ -c $<
 
-$(SRC_DIR)/forward.o: $(SRC_DIR)/forward.c uring
+$(SRC_DIR)/forward.o: $(SRC_DIR)/forward.c uring $(CURDIR)/$(LIBSECCOMP_SUBMODULE)/src/.libs/libseccomp.a
 	$(QUIET_CC)$(CC) -MMD -O2 -Wall -Wextra -Werror -fPIE -pie \
 	    -I"$(CURDIR)/$(UNPACKED_HEADERS)/usr/include/" \
         -I"$(CURDIR)/$(LIBURING_SUBMODULE)/src/include/" \
@@ -65,9 +66,9 @@ $(SRC_DIR)/forward.o: $(SRC_DIR)/forward.c uring
 %.o: %.c
 	$(QUIET_CC)$(CC) $(CFLAGS) -o $@ -c $<
 
-init: $(UNPACKED_HEADERS) uring $(OBJECTS) $(OBJECTS_EXT)
+init: $(UNPACKED_HEADERS) uring $(OBJECTS) $(OBJECTS_EXT) $(CURDIR)/$(LIBSECCOMP_SUBMODULE)/src/.libs/libseccomp.a
 	@echo init
-	$(QUIET_CC)$(CC) $(CFLAGS) -static -o $@ $(wordlist 3, $(words $^), $^) "$(CURDIR)/$(LIBURING_SUBMODULE)/src/liburing.a"
+	$(QUIET_CC)$(CC) $(CFLAGS) -static -o $@ $(wordlist 3, $(words $^), $^) "$(CURDIR)/$(LIBURING_SUBMODULE)/src/liburing.a" "$(CURDIR)/$(LIBSECCOMP_SUBMODULE)/src/.libs/libseccomp.a"
 	@# default musl libs on some distros have debug symbols, lets strip them (and everything else)
 	strip $@
 
@@ -90,6 +91,18 @@ $(UNPACKED_KERNEL):
 uring: $(UNPACKED_HEADERS)
 	(cd $(LIBURING_SUBMODULE) && CC=$(CC) CXX=$(CXX) ./configure > /dev/null)
 	$(MAKE) -e CC=$(CC) -e CFLAGS=-I"$(CURDIR)/$(UNPACKED_HEADERS)/usr/include" -C "$(LIBURING_SUBMODULE)/src" all
+
+SHELL := /bin/bash
+$(CURDIR)/$(LIBSECCOMP_SUBMODULE)/src/.libs/libseccomp.a: $(UNPACKED_HEADERS) $(LIBSECCOMP_SUBMODULE)
+	set -euo pipefail; \
+	cd $(LIBSECCOMP_SUBMODULE); \
+	export CC=$(CC) CXX=$(CXX) CFLAGS=-I"$$PWD/../$(UNPACKED_HEADERS)/usr/include";\
+	mkdir -p build-aux;\
+	libtoolize;\
+	automake --add-missing;\
+	autoreconf;\
+	./configure --disable-python;\
+	$(MAKE) all
 
 vmlinuz-virt: $(UNPACKED_KERNEL)
 	cp $(UNPACKED_KERNEL)/boot/vmlinuz-virt .
@@ -117,7 +130,7 @@ initramfs.cpio.gz: init $(UNPACKED_KERNEL)
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/core/failover.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/ipv6/ipv6.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/packet/af_packet.ko initramfs
-	cd initramfs && find . | cpio --quiet -o -H newc -R 0:0 | gzip -9 > ../$@
+	set -euo pipefail; cd initramfs && find . | cpio --quiet -o -H newc -R 0:0 | gzip -9 > ../$@
 	$(RM) -rf initramfs
 
 TESTS_NAMES := cyclic_buffer

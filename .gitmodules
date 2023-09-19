@@ -1,3 +1,6 @@
 [submodule "runtime/init-container/liburing"]
 	path = runtime/init-container/liburing
 	url = https://github.com/axboe/liburing
+[submodule "runtime/init-container/libseccomp"]
+	path = runtime/init-container/libseccomp
+	url = https://github.com/seccomp/libseccomp.git
