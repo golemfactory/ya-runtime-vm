@@ -158,19 +158,19 @@ int make_nonblocking(int fd) {
     return 0;
 }
 
-/*
-int make_cloexec(int fd) {
-    errno = 0;
-    int flags = fcntl(fd, F_GETFD);
-    if (flags == -1 && errno) {
-        return -1;
-    }
-    if (fcntl(fd, F_SETFD, flags | FD_CLOEXEC) < 0) {
-        return -1;
-    }
-    return 0;
-}
-*/
+#ifdef __x86_64__
+# ifndef SYS_clone3
+#  define SYS_clone3 435
+# endif
+# ifndef SYS_close_range
+#  define SYS_close_range 436
+# endif
+# ifndef SYS_openat2
+#  define SYS_openat2 437
+# endif
+#elif !defined SYS_clone3 || !defined SYS_close_range || !defined SYS_openat2
+# error missing definition for SYS_clone3, SYS_close_range, or SYS_openat2
+#endif
 
 static int open_relative(const char *path, uint64_t flags, uint64_t mode) {
     /*
