@@ -1699,7 +1699,7 @@ int main(void) {
                 NULL));
     CHECK(mount("devtmpfs", "/dev", "devtmpfs",
                 MS_NOSUID,
-                "exec,mode=0755,size=2M"));
+                "mode=0755,size=2M"));
     CHECK(mount("tmpfs", "/tmp", "tmpfs",
                 MS_NOSUID,
                 "mode=0777"));
