@@ -1937,14 +1937,14 @@ int main(int argc, char **argv) {
 
     // 'workdir' and 'upperdir' have to be on the same filesystem
     CHECK(mount("tmpfs", "/mnt/overlay", "tmpfs",
-                MS_NOSUID,
+                MS_NOSUID | MS_NODEV,
                 "mode=0700,size=128M"));
 
     CHECK(mkdir("/mnt/overlay/upper", S_IRWXU));
     CHECK(mkdir("/mnt/overlay/work", S_IRWXU));
 
-    CHECK(mount("/dev/vda", "/mnt/image", "squashfs", MS_RDONLY, ""));
-    CHECK(mount("overlay", SYSROOT, "overlay", 0,
+    CHECK(mount("/dev/vda", "/mnt/image", "squashfs", MS_RDONLY | MS_NODEV, ""));
+    CHECK(mount("overlay", SYSROOT, "overlay", MS_NODEV,
                 "lowerdir=/mnt/image,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work"));
 
     g_sysroot_fd = CHECK(open(SYSROOT, O_RDONLY | O_DIRECTORY | O_CLOEXEC));
