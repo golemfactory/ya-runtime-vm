@@ -1896,12 +1896,42 @@ static void get_namespace_fd(void) {
     }
 }
 
+static int find_device_major(const char *name) {
+    FILE *f;
+    char *line = NULL;
+    size_t line_size; /* size of the buffer */
+    ssize_t line_len;
+    char entry_name[32];
+    int entry_major;
+    int major = -1;
+
+    if ((f = fopen("/proc/devices", "r")) == 0)
+        return -1;
+
+    while ((line_len = getline(&line, &line_size, f)) != -1) {
+        if (strcmp(line, "Character devices:\n") == 0) {
+            /* initial header, nothing to do yet */
+        } else if (strcmp(line, "\n") == 0 ||
+                   strcmp(line, "Block devices:\n") == 0) {
+            /* end of character devices, entry not found */
+            break;
+        } else if (sscanf(line, " %d %31s", &entry_major, entry_name) == 2 &&
+                   strcmp(entry_name, name) == 0) {
+            major = entry_major;
+            break;
+        }
+    }
+    free(line);
+    return major;
+}
+
 int main(int argc, char **argv) {
     CHECK_BOOL(setvbuf(stdin, NULL, _IONBF, BUFSIZ) == 0);
     CHECK_BOOL(setvbuf(stdout, NULL, _IONBF, BUFSIZ) == 0);
     CHECK_BOOL(setvbuf(stderr, NULL, _IONBF, BUFSIZ) == 0);
     int res = prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
     CHECK_BOOL(res == 0 || res == 1);
+    bool nvidia_loaded = false;
 
     create_dir("/dev", DEFAULT_DIR_PERMS);
     CHECK(mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID,
@@ -1926,6 +1956,28 @@ int main(int argc, char **argv) {
     load_module("/9pnet.ko");
     load_module("/9pnet_virtio.ko");
     load_module("/9p.ko");
+
+    if (access("/nvidia.ko", R_OK) == 0) {
+        load_module("/i2c-core.ko");
+        load_module("/drm_panel_orientation_quirks.ko");
+        load_module("/firmware_class.ko");
+        load_module("/drm.ko");
+        load_module("/nvidia.ko");
+        load_module("/nvidia-uvm.ko");
+        load_module("/fbdev.ko");
+        load_module("/fb.ko");
+        load_module("/fb_sys_fops.ko");
+        load_module("/cfbcopyarea.ko");
+        load_module("/cfbfillrect.ko");
+        load_module("/cfbimgblt.ko");
+        load_module("/syscopyarea.ko");
+        load_module("/sysfillrect.ko");
+        load_module("/sysimgblt.ko");
+        load_module("/drm_kms_helper.ko");
+        load_module("/nvidia-modeset.ko");
+        load_module("/nvidia-drm.ko");
+        nvidia_loaded = true;
+    }
 
     g_cmds_fd = CHECK(open(VPORT_CMD, O_RDWR | O_CLOEXEC));
 
@@ -1993,25 +2045,22 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Environment variable: %s\n", *p);
     }
 
-    glob_t nvidia_nodes;
-    res = glob("/dev/nvidia[0-9]*", GLOB_ERR, NULL, &nvidia_nodes);
-    if (res == 0) {
+    if (nvidia_loaded) {
         if (do_sandbox == false) {
             fprintf(stderr, "Sandboxing is disabled, refusing to enable Nvidia GPU passthrough.\n");
             fprintf(stderr, "Please re-run the container with sandboxing enabled or disable GPU passthrough.\n");
             errno = 0;
             CHECK_BOOL(0);
         }
-        struct stat statbuf;
-        for (size_t i = 0; i < nvidia_nodes.gl_pathc; ++i) {
-            CHECK_BOOL(strncmp(nvidia_nodes.gl_pathv[i], "/dev/nvidia", sizeof "/dev/nvidia" - 1) == 0);
-            CHECK_BOOL(stat(nvidia_nodes.gl_pathv[i], &statbuf) == 0);
-            CHECK_BOOL(S_ISCHR(statbuf.st_mode));
-            res = mknodat(g_sysroot_fd, nvidia_nodes.gl_pathv[i] + 1, statbuf.st_dev, statbuf.st_mode & 0777);
-            CHECK_BOOL(res == 0 || (res == -1 && errno == EEXIST));
-        }
-    } else {
-        CHECK_BOOL(res == GLOB_NOMATCH);
+        int nvidia_major = CHECK(find_device_major("nvidia-frontend"));
+        /* TODO: multi-card support needs more /dev/nvidia%d nodes */
+        res = mknodat(g_sysroot_fd, "dev/nvidia0", S_IFCHR | (0666 & 0777), nvidia_major << 8 | 0);
+        CHECK_BOOL(res == 0 || (res == -1 && errno == EEXIST));
+        res = mknodat(g_sysroot_fd, "dev/nvidiactl", S_IFCHR | (0666 & 0777), nvidia_major << 8 | 255);
+        CHECK_BOOL(res == 0 || (res == -1 && errno == EEXIST));
+        nvidia_major = CHECK(find_device_major("nvidia-uvm"));
+        res = mknodat(g_sysroot_fd, "dev/nvidia-uvm", S_IFCHR | (0666 & 0777), nvidia_major << 8 | 0);
+        CHECK_BOOL(res == 0 || (res == -1 && errno == EEXIST));
     }
 
     if (access(SYSROOT "/dev/null", F_OK) != 0) {
