@@ -1996,8 +1996,15 @@ int main(int argc, char **argv) {
     CHECK(mkdir("/mnt/overlay/work", S_IRWXU));
 
     CHECK(mount("/dev/vda", "/mnt/image", "squashfs", MS_RDONLY, ""));
-    CHECK(mount("overlay", SYSROOT, "overlay", 0,
-                "lowerdir=/mnt/image,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work"));
+    if (access("/dev/vdb", R_OK) == 0) {
+        CHECK(mkdir("/mnt/gpu-files", S_IRWXU));
+        CHECK(mount("/dev/vdb", "/mnt/gpu-files", "squashfs", MS_RDONLY, ""));
+        CHECK(mount("overlay", SYSROOT, "overlay", 0,
+                    "lowerdir=/mnt/image:/mnt/gpu-files,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work"));
+    } else {
+        CHECK(mount("overlay", SYSROOT, "overlay", 0,
+                    "lowerdir=/mnt/image,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work"));
+    }
 
     g_sysroot_fd = CHECK(open(SYSROOT, O_RDONLY | O_DIRECTORY | O_CLOEXEC));
     assert(g_sysroot_fd >= 3);
