@@ -13,6 +13,7 @@ assets = [
     ["image/self-test.gvmi", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
 
     ["poc/runtime/vmrt", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "755"],
+    ["poc/runtime/vgabios-stdvga.bin", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
     ["poc/runtime/bios-256k.bin", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
     ["poc/runtime/kvmvapic.bin", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
     ["poc/runtime/linuxboot_dma.bin", "usr/lib/yagna/plugins/ya-runtime-vm/runtime/", "644"],
