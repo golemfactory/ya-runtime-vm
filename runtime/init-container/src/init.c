@@ -1940,6 +1940,10 @@ int main(int argc, char **argv) {
     load_module("/failover.ko");
     load_module("/virtio.ko");
     load_module("/virtio_ring.ko");
+    if (access("/virtio_pci_modern_dev.ko", R_OK) == 0)
+        load_module("/virtio_pci_modern_dev.ko");
+    if (access("/virtio_pci_legacy_dev.ko", R_OK) == 0)
+        load_module("/virtio_pci_legacy_dev.ko");
     load_module("/virtio_pci.ko");
     load_module("/net_failover.ko");
     load_module("/virtio_net.ko");
@@ -1949,6 +1953,8 @@ int main(int argc, char **argv) {
     load_module("/virtio_blk.ko");
     load_module("/squashfs.ko");
     load_module("/overlay.ko");
+    if (access("/netfs.ko", R_OK) == 0)
+        load_module("/netfs.ko");
     load_module("/fscache.ko");
     load_module("/af_packet.ko");
     load_module("/ipv6.ko");
