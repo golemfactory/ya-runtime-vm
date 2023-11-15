@@ -2095,6 +2095,7 @@ int main(int argc, char **argv) {
 
     block_signals();
     if (do_sandbox) {
+        write_sys("/proc/sys/net/ipv4/ip_unprivileged_port_start", 0);
         get_namespace_fd();
     }
     setup_sigfd();
