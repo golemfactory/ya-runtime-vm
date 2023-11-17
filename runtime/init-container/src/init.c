@@ -2006,7 +2006,7 @@ int main(int argc, char **argv) {
         CHECK(mkdir("/mnt/gpu-files", S_IRWXU));
         CHECK(mount("/dev/vdb", "/mnt/gpu-files", "squashfs", MS_RDONLY | MS_NODEV, ""));
         CHECK(mount("overlay", SYSROOT, "overlay", MS_NODEV,
-                    "lowerdir=/mnt/image:/mnt/gpu-files,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work"));
+                    "lowerdir=/mnt/gpu-files:/mnt/image,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work"));
     } else {
         CHECK(mount("overlay", SYSROOT, "overlay", MS_NODEV,
                     "lowerdir=/mnt/image,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work"));

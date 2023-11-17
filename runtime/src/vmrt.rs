@@ -116,12 +116,12 @@ pub async fn start_vmrt(
         cmd.arg("none");
     }
 
-    if Path::new(FILE_NVIDIA_FILES).exists() {
+    if runtime_dir.join(FILE_NVIDIA_FILES).exists() {
         cmd.arg("-drive");
         cmd.arg(
             format!(
                 "file={},cache=unsafe,readonly=on,format=raw,if=virtio",
-                FILE_NVIDIA_FILES
+                runtime_dir.join(FILE_NVIDIA_FILES).display()
             )
             .as_str(),
         );
