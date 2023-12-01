@@ -21,6 +21,8 @@
 #include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/random.h>
+#include <sys/sendfile.h>
 #include <unistd.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -29,6 +31,7 @@
 #include <sched.h>
 #include <time.h>
 #include <glob.h>
+#include <dirent.h>
 
 #include "communication.h"
 #include "cyclic_buffer.h"
@@ -124,7 +127,7 @@ static noreturn void die(void) {
 
 #define CHECK_BOOL(x) ({                                                \
     __typeof__(x) _x = (x);                                             \
-    if (_x == 0) {                                                      \
+    if (!_x) {                                                          \
         fprintf(stderr, "Error at %s:%d: %m\n", __FILE__, __LINE__);    \
         die();                                                          \
     }                                                                   \
@@ -140,6 +143,7 @@ static noreturn void die(void) {
     }                                                                   \
     _x;                                                                 \
 })
+#pragma GCC poison _x
 
 static void load_module(const char* path) {
     int fd = CHECK(open(path, O_RDONLY | O_CLOEXEC));
@@ -878,6 +882,84 @@ static char* construct_output_path(uint64_t id, unsigned int fd) {
     return path;
 }
 
+// This is recursive, but will only ever run on trusted input.
+// FIXME: get this fixed in upstream Linux.
+static void copy_initramfs_recursive(int dirfd, int newdirfd, const char *skip_name) {
+    CHECK_BOOL(newdirfd != dirfd);
+    DIR *d = fdopendir(dirfd);
+    CHECK_BOOL(d != NULL);
+    for (;;) {
+        errno = 0;
+        const struct dirent *entry = readdir(d);
+        if (entry == NULL) {
+            CHECK_BOOL(errno == 0);
+            break;
+        }
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0 ||
+            strcmp(entry->d_name, skip_name) == 0)
+        {
+            continue; // skip this entry
+        }
+        struct stat statbuf;
+        CHECK(fstatat(dirfd, entry->d_name, &statbuf, AT_SYMLINK_NOFOLLOW));
+        switch (statbuf.st_mode & S_IFMT) {
+            case S_IFCHR:
+            case S_IFBLK:
+            case S_IFSOCK:
+            case S_IFIFO:
+                CHECK(mknodat(newdirfd, entry->d_name, statbuf.st_mode, statbuf.st_rdev));
+                break;
+            case S_IFLNK: {
+                char *buf = CHECK_BOOL(malloc(statbuf.st_size + 1));
+                ssize_t size = CHECK(readlinkat(dirfd, entry->d_name, buf, statbuf.st_size + 1));
+                CHECK_BOOL(size == statbuf.st_size);
+                buf[size] = 0;
+                CHECK(symlinkat(buf, newdirfd, entry->d_name));
+                free(buf);
+                break;
+            }
+            case S_IFREG: {
+                uint64_t size = statbuf.st_size;
+                int srcfd = CHECK(openat(dirfd, entry->d_name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC));
+                int dstfd = CHECK(openat(newdirfd, entry->d_name, O_WRONLY | O_NOFOLLOW | O_CLOEXEC | O_CREAT, statbuf.st_mode & 07777));
+                while (size > 0) {
+                    size_t res = (size_t)CHECK(sendfile(dstfd, srcfd, NULL, size > SIZE_MAX ? SIZE_MAX : size));
+                    size -= res;
+                }
+                close(dstfd);
+                close(srcfd);
+                break;
+            }
+            case S_IFDIR: {
+                int old_child_dirfd = CHECK(openat(dirfd, entry->d_name, O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC | O_RDONLY));
+                CHECK(mkdirat(newdirfd, entry->d_name, statbuf.st_mode & 07777));
+                int new_child_dirfd = CHECK(openat(newdirfd, entry->d_name, O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC | O_RDONLY));
+                copy_initramfs_recursive(old_child_dirfd, new_child_dirfd, "");
+                break;
+            }
+            default:
+                CHECK_BOOL(false);
+                break;
+        }
+        CHECK(unlinkat(dirfd, entry->d_name, S_ISDIR(statbuf.st_mode) ? AT_REMOVEDIR : 0));
+    }
+    CHECK(closedir(d));
+    CHECK(close(newdirfd));
+}
+
+static void copy_initramfs(void) {
+    int rootfd = CHECK(open("/", O_DIRECTORY | O_NOFOLLOW | O_RDONLY | O_CLOEXEC));
+    struct stat stats;
+    CHECK(fstat(rootfd, &stats));
+    CHECK_BOOL(mount("", "/" NEW_ROOT, "tmpfs", 0, "") == 0);
+    int newdirfd = CHECK(open("/" NEW_ROOT, O_DIRECTORY | O_NOFOLLOW | O_RDONLY | O_CLOEXEC));
+    copy_initramfs_recursive(rootfd, newdirfd, NEW_ROOT);
+    CHECK_BOOL(chdir("/" NEW_ROOT) == 0);
+    CHECK_BOOL(mount(".", "/", NULL, MS_MOVE, NULL) == 0);
+    CHECK_BOOL(chroot(".") == 0);
+}
+
 static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
                                   struct redir_fd_desc fd_descs[3],
                                   uint64_t* id) {
@@ -889,7 +971,6 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
         fprintf(stderr, "Caller bug, returning EEXIST\n");
         return EEXIST;
     }
-
     struct process_desc* proc_desc = calloc(1, sizeof(*proc_desc));
     if (!proc_desc) {
         fprintf(stderr, "Memory allocation failed\n");
@@ -1932,6 +2013,7 @@ int main(int argc, char **argv) {
     int res = prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
     CHECK_BOOL(res == 0 || res == 1);
     bool nvidia_loaded = false;
+    copy_initramfs();
 
     create_dir("/dev", DEFAULT_DIR_PERMS);
     CHECK(mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID,

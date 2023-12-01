@@ -1,8 +1,9 @@
 CC := musl-gcc
 CXX := /bin/false
 LIBSECCOMP_SUBMODULE ?= libseccomp
+NEW_ROOT := newroot
 # -MMD to create dependency files (*.d) on first compilation
-CFLAGS := -MMD -std=c11 -O2 -Wall -Wextra -Werror -fPIE -pie -Iinclude/ -Wmaybe-uninitialized -Iunpacked_headers/usr/include -I$(CURDIR)/$(LIBSECCOMP_SUBMODULE)/include
+CFLAGS := -MMD -std=c11 -O2 -Wall -Wextra -Werror -fPIE -pie -Iinclude/ -Wmaybe-uninitialized -Iunpacked_headers/usr/include -I$(CURDIR)/$(LIBSECCOMP_SUBMODULE)/include '-DNEW_ROOT="$(NEW_ROOT)"'
 
 ifneq ($(DEBUG), "")
 CFLAGS += -DNDEBUG
@@ -128,6 +129,7 @@ initramfs.cpio.gz: init $(UNPACKED_KERNEL)
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/core/failover.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/ipv6/ipv6.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/packet/af_packet.ko initramfs
+	mkdir initramfs/$(NEW_ROOT)
 	set -euo pipefail; cd initramfs && find . | cpio --quiet -o -H newc -R 0:0 | gzip -9 > ../$@
 	$(RM) -rf initramfs
 
