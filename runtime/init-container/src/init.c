@@ -58,7 +58,6 @@
 
 #define DEV_VPN "eth0"
 #define DEV_INET "eth1"
-#define SYSROOT "/mnt/newroot"
 
 #define MODE_RW_UGO (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH)
 #define OUTPUT_PATH_PREFIX "/var/tmp/guest_agent_private/fds"
@@ -674,7 +673,8 @@ static int child_pipe = -1;
 
 #define NAMESPACES \
                  (CLONE_NEWUSER | /* new user namespace */ \
-                 0)
+                  CLONE_NEWNS | /* new mount namespace */ \
+                  0)
 
 static int capset(cap_user_header_t hdrp, cap_user_data_t datap) {
     return syscall(SYS_capset, hdrp, datap);
@@ -761,22 +761,26 @@ static noreturn void child_wrapper(int parent_pipe[2],
         if (close(global_pidfd)) {
             goto out;
         }
+
+        if (chdir("/") != 0) {
+            goto out;
+        }
+
+        if (chroot(".") != 0) {
+            goto out;
+        }
     } else {
         if (syscall(SYS_close_range, 3U, ~0U, 0U) != 0) {
             abort();
         }
-    }
 
-    if (chdir(SYSROOT) != 0) {
-        goto out;
-    }
+        if (chroot(SYSROOT) != 0) {
+            goto out;
+        }
 
-    if (chroot(".") != 0) {
-        goto out;
-    }
-
-    if (chdir("/") != 0) {
-        goto out;
+        if (chdir("/") != 0) {
+            goto out;
+        }
     }
 
     if (new_proc_args->cwd) {
@@ -957,6 +961,7 @@ static void copy_initramfs(void) {
     CHECK_BOOL(chdir("/" NEW_ROOT) == 0);
     CHECK_BOOL(mount(".", "/", NULL, MS_MOVE, NULL) == 0);
     CHECK_BOOL(chroot(".") == 0);
+    CHECK_BOOL(mount(NULL, "/", NULL, MS_SHARED, NULL) == 0);
 }
 
 static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
@@ -1950,10 +1955,38 @@ static void get_namespace_fd(void) {
     };
     sigset_t set;
     CHECK(sigemptyset(&set));
+    int fds[2], status = 0;
+    CHECK_BOOL(pipe2(fds, O_CLOEXEC) == 0);
     errno = 0;
     global_zombie_pid = syscall(SYS_clone3, &args, sizeof args);
     CHECK_BOOL(global_zombie_pid >= 0);
     if (global_zombie_pid == 0) {
+        if (close(fds[0]))
+            abort();
+        if (mount(SYSROOT, SYSROOT, NULL, MS_BIND | MS_REC, NULL)) {
+            status = errno;
+            goto bad;
+        }
+        if (mount(NULL, SYSROOT, NULL, MS_SLAVE | MS_REC, NULL)) {
+            status = errno;
+            goto bad;
+        }
+        if (chdir(SYSROOT))
+            abort();
+        if (syscall(SYS_pivot_root, ".", ".")) {
+            status = errno;
+            goto bad;
+        }
+        if (umount2(".", MNT_DETACH)) {
+            status = errno;
+            goto bad;
+        }
+        if (chdir("/")) {
+            status = errno;
+        }
+bad:
+        if (write(fds[1], &status, sizeof status) != sizeof status || close(fds[1]) != 0)
+            _exit(1);
         for (;;) {
             const struct timespec x = {
                 .tv_sec = INT32_MAX,
@@ -1962,8 +1995,13 @@ static void get_namespace_fd(void) {
             (void)(nanosleep(&x, NULL));
         }
     }
-    /* parent */
     CHECK(global_pidfd);
+    /* parent */
+    CHECK_BOOL(close(fds[1]) == 0);
+    CHECK_BOOL(read(fds[0], &status, sizeof status) == sizeof status);
+    errno = status;
+    CHECK_BOOL(status == 0);
+    CHECK_BOOL(close(fds[0]) == 0);
     int snprintf_res = snprintf(buf, sizeof buf, "/proc/%d/uid_map", global_zombie_pid);
     CHECK_BOOL(snprintf_res > (int)sizeof buf - 10);
     CHECK_BOOL(snprintf_res < (int)sizeof buf);

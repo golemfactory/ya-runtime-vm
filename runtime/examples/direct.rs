@@ -208,6 +208,8 @@ async fn main() -> io::Result<()> {
     )
     .await?;
 
+    run_process_with_output(&mut ga, &notifications, "/bin/mount", &["mount"]).await?;
+
     let fds = [
         None,
         Some(RedirectFdType::RedirectFdFile(
