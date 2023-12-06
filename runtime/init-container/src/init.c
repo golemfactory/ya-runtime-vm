@@ -19,6 +19,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/sysmacros.h>
+#include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/random.h>
@@ -297,6 +298,8 @@ static struct exit_reason encode_status(int status, int type) {
 
 pid_t global_zombie_pid = -1;
 pid_t global_pidfd = -1;
+int global_userns_fd = -1;
+int global_mountns_fd = -1;
 
 static void handle_sigchld(void) {
     struct signalfd_siginfo siginfo = { 0 };
@@ -745,21 +748,29 @@ static noreturn void child_wrapper(int parent_pipe[2],
                 goto out;
         }
     }
-
     if (global_pidfd != -1) {
-        if (syscall(SYS_close_range, (unsigned int)global_pidfd + 1, ~0U, 0) != 0) {
+        int low_fd = global_userns_fd > global_mountns_fd ? global_mountns_fd : global_userns_fd;
+        int high_fd = global_userns_fd > global_mountns_fd ? global_userns_fd : global_mountns_fd;
+        if (low_fd < 3)
             abort();
+        if (low_fd > 3 && syscall(SYS_close_range, 3, (unsigned int)low_fd - 1, 0) != 0) {
+            goto out;
         }
-
-        if (global_pidfd > 3 && syscall(SYS_close_range, 3U, (unsigned int)(global_pidfd - 1), 0U) != 0) {
-            abort();
-        }
-
-        if (setns(global_pidfd, NAMESPACES)) {
+        if (high_fd - low_fd > 1 &&
+            syscall(SYS_close_range, (unsigned int)low_fd + 1, (unsigned int)high_fd - 1, 0))
+        {
             goto out;
         }
 
-        if (close(global_pidfd)) {
+        if (setns(global_mountns_fd, CLONE_NEWNS) || close(global_mountns_fd)) {
+            goto out;
+        }
+
+        if (setns(global_userns_fd, CLONE_NEWUSER)) {
+            goto out;
+        }
+
+        if (close(global_userns_fd)) {
             goto out;
         }
 
@@ -1938,6 +1949,10 @@ static void create_dir(const char *pathname, mode_t mode) {
 }
 
 static void get_namespace_fd(void) {
+    int tmp_fd = CHECK(open("/user_namespace", O_RDWR|O_CREAT|O_NOFOLLOW|O_CLOEXEC|O_EXCL|O_NOCTTY, 0600));
+    CHECK(close(tmp_fd));
+    tmp_fd = CHECK(open("/mount_namespace", O_RDWR|O_CREAT|O_NOFOLLOW|O_CLOEXEC|O_EXCL|O_NOCTTY, 0600));
+    CHECK(close(tmp_fd));
     char buf[sizeof "/proc//uid_map" + 10];
     struct clone_args args = {
         .flags = CLONE_CLEAR_SIGHAND |
@@ -1957,7 +1972,7 @@ static void get_namespace_fd(void) {
     sigset_t set;
     CHECK(sigemptyset(&set));
     int fds[2], status = 0;
-    CHECK_BOOL(pipe2(fds, O_CLOEXEC) == 0);
+    CHECK_BOOL(socketpair(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC, 0, fds) == 0);
     errno = 0;
     global_zombie_pid = syscall(SYS_clone3, &args, sizeof args);
     CHECK_BOOL(global_zombie_pid >= 0);
@@ -1986,15 +2001,10 @@ static void get_namespace_fd(void) {
             status = errno;
         }
 bad:
-        if (write(fds[1], &status, sizeof status) != sizeof status || close(fds[1]) != 0)
+        if (write(fds[1], &status, sizeof status) != sizeof status || shutdown(fds[1], SHUT_WR) != 0)
             _exit(1);
-        for (;;) {
-            const struct timespec x = {
-                .tv_sec = INT32_MAX,
-                .tv_nsec = 999999999,
-            };
-            (void)(nanosleep(&x, NULL));
-        }
+        (void)read(fds[1], &status, 1);
+        _exit(0);
     }
     CHECK(global_pidfd);
     /* parent */
@@ -2002,9 +2012,8 @@ bad:
     CHECK_BOOL(read(fds[0], &status, sizeof status) == sizeof status);
     errno = status;
     CHECK_BOOL(status == 0);
-    CHECK_BOOL(close(fds[0]) == 0);
     int snprintf_res = snprintf(buf, sizeof buf, "/proc/%d/uid_map", global_zombie_pid);
-    CHECK_BOOL(snprintf_res > (int)sizeof buf - 10);
+    CHECK_BOOL(snprintf_res >= (int)sizeof("/proc/1/uid_map") - 1);
     CHECK_BOOL(snprintf_res < (int)sizeof buf);
     for (int i = 0; i < 2; ++i) {
         int uidmapfd = CHECK(open(buf, O_NOFOLLOW | O_CLOEXEC | O_NOCTTY | O_WRONLY));
@@ -2013,6 +2022,23 @@ bad:
         CHECK_BOOL(close(uidmapfd) == 0);
         buf[snprintf_res - 7] = 'g';
     }
+    static_assert(sizeof("ns/user") <= sizeof("uid_map"), "string size oops");
+    static_assert(sizeof("ns/mnt") <= sizeof("uid_map"), "string size oops");
+    snprintf_res = snprintf(buf, sizeof buf, "/proc/%d/ns/user", global_zombie_pid);
+    CHECK_BOOL(snprintf_res >= (int)sizeof "/proc/1/ns/user" - 1);
+    CHECK_BOOL(snprintf_res < (int)sizeof "/proc/1/ns/user" + 9);
+    CHECK(mount(buf, "/user_namespace", NULL, MS_BIND, NULL));
+    global_userns_fd = CHECK(open("/user_namespace", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NOCTTY));
+    snprintf_res = snprintf(buf, sizeof buf, "/proc/%d/ns/mnt", global_zombie_pid);
+    CHECK_BOOL(snprintf_res >= (int)sizeof "/proc/1/ns/mnt" - 1);
+    CHECK_BOOL(snprintf_res < (int)sizeof "/proc/1/ns/mnt" + 9);
+    CHECK(mount(buf, "/mount_namespace", NULL, MS_BIND, NULL));
+    global_mountns_fd = CHECK(open("/mount_namespace", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NOCTTY));
+    CHECK(write(fds[0], "", 1));
+    int v;
+    CHECK_BOOL(waitpid(global_zombie_pid, &v, 0) == global_zombie_pid);
+    CHECK_BOOL(WIFEXITED(v));
+    CHECK_BOOL(WEXITSTATUS(v) == 0);
 }
 
 static int find_device_major(const char *name) {
