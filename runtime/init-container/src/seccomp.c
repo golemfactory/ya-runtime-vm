@@ -37,6 +37,7 @@ static const char *allow_syscalls[] = {
     "chmod",
     "chown",
     "chown32",
+    "chroot",
     "clock_adjtime",
     "clock_adjtime64",
     "clock_getres",
