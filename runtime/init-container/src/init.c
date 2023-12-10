@@ -821,19 +821,46 @@ static noreturn void child_wrapper(int parent_pipe[2],
 
         for (int i = 0; i < _LINUX_CAPABILITY_U32S_3 * 32; ++i) {
             switch (i) {
-                case CAP_SETUID:
-                case CAP_SETGID:
-                case CAP_SYS_NICE:
-                case CAP_SYS_CHROOT:
-                case CAP_SYS_RESOURCE:
-                case CAP_NET_BIND_SERVICE:
-                case CAP_KILL:
-                case CAP_FSETID:
+                // CAP_AUDIT_CONTROL: no
+                // CAP_AUDIT_READ: no
+                // CAP_AUDIT_WRITE: no
+                case CAP_BLOCK_SUSPEND
+                // case CAP_BPF:
+                // case CAP_CHECKPOINT_RESTORE:
+                case CAP_CHOWN:
                 case CAP_DAC_OVERRIDE:
                 case CAP_DAC_READ_SEARCH:
-                case CAP_CHOWN:
+                case CAP_FOWNER:
+                case CAP_FSETID:
                 case CAP_IPC_LOCK:
-                case CAP_IPC_OWNER: {
+                case CAP_IPC_OWNER:
+                case CAP_KILL:
+                case CAP_LEASE:
+                case CAP_LINUX_IMMUTABLE:
+                // case CAP_MKNOD:
+                // cas CAP_NET_ADMIN:
+                case CAP_NET_BIND_SERVICE:
+                case CAP_NET_BROADCAST:
+                case CAP_NET_RAW:
+                // case CAP_PERFMON:
+                case CAP_SETGID:
+                case CAP_SETFCAP:
+                case CAP_SETPCAP:
+                case CAP_SETUID:
+                // case CAP_SYS_ADMIN:
+                case CAP_SYS_BOOT:
+                case CAP_SYS_CHROOT:
+                // case CAP_SYS_MODULE:
+                case CAP_SYS_NICE:
+                case CAP_SYS_PACCT:
+                case CAP_SYS_PTRACE:
+                // case CAP_SYS_RAWIO
+                case CAP_SYS_RESOURCE:
+                // case CAP_SYS_TIME:
+                // case CAP_SYS_TTY_CONFIG:
+                // case CAP_SYSLOG:
+                case CAP_WAKE_ALARM:
+                {
                     data[i / 32].permitted |= (UINT32_C(1) << (i % 32));
                     data[i / 32].effective |= (UINT32_C(1) << (i % 32));
                     break;
