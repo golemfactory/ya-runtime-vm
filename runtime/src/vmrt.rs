@@ -21,6 +21,7 @@ const DIR_RUNTIME: &str = "runtime";
 const FILE_RUNTIME: &str = "vmrt";
 const FILE_VMLINUZ: &str = "vmlinuz-virt";
 const FILE_INITRAMFS: &str = "initramfs.cpio.gz";
+const FILE_NVIDIA_FILES: &str = "nvidia-files.squashfs";
 
 #[derive(Default)]
 pub struct RuntimeData {
@@ -113,6 +114,17 @@ pub async fn start_vmrt(
     } else {
         cmd.arg("-vga");
         cmd.arg("none");
+    }
+
+    if runtime_dir.join(FILE_NVIDIA_FILES).exists() {
+        cmd.arg("-drive");
+        cmd.arg(
+            format!(
+                "file={},cache=unsafe,readonly=on,format=raw,if=virtio",
+                runtime_dir.join(FILE_NVIDIA_FILES).display()
+            )
+            .as_str(),
+        );
     }
 
     let (vpn, inet) =

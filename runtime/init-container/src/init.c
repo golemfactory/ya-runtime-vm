@@ -14,13 +14,25 @@
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/reboot.h>
+#include <sys/prctl.h>
 #include <sys/signalfd.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/sysmacros.h>
+#include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/random.h>
+#include <sys/sendfile.h>
 #include <unistd.h>
+#include <inttypes.h>
+#include <limits.h>
+#include <linux/sched.h>
+#include <linux/capability.h>
+#include <sched.h>
+#include <time.h>
+#include <glob.h>
+#include <dirent.h>
 
 #include "communication.h"
 #include "cyclic_buffer.h"
@@ -28,11 +40,10 @@
 #include "process_bookkeeping.h"
 #include "proto.h"
 #include "forward.h"
+#include "init-seccomp.h"
+#define SYSROOT "/mnt/newroot"
 
 #define CONTAINER_OF(ptr, type, member) (type*)((char*)(ptr) - offsetof(type, member))
-
-// XXX: maybe obtain this with sysconf?
-#define PAGE_SIZE 0x1000
 
 #define DEFAULT_UID 0
 #define DEFAULT_GID 0
@@ -58,6 +69,7 @@
 #define MTU_VPN 1220
 #define MTU_INET 65521
 
+static int g_sysroot_fd = AT_FDCWD;
 
 struct new_process_args {
     char* bin;
@@ -113,6 +125,16 @@ static noreturn void die(void) {
     }
 }
 
+#define CHECK_BOOL(x) ({                                                \
+    __typeof__(x) _x = (x);                                             \
+    if (!_x) {                                                          \
+        fprintf(stderr, "Error at %s:%d: %m\n", __FILE__, __LINE__);    \
+        die();                                                          \
+    }                                                                   \
+    _x;                                                                 \
+})
+
+
 #define CHECK(x) ({                                                     \
     __typeof__(x) _x = (x);                                             \
     if (_x == -1) {                                                     \
@@ -121,11 +143,12 @@ static noreturn void die(void) {
     }                                                                   \
     _x;                                                                 \
 })
+#pragma GCC poison _x
 
 static void load_module(const char* path) {
     int fd = CHECK(open(path, O_RDONLY | O_CLOEXEC));
-    CHECK(syscall(SYS_finit_module, fd, "", 0));
-    CHECK(close(fd));
+    CHECK_BOOL(syscall(SYS_finit_module, fd, "", 0) == 0);
+    CHECK_BOOL(close(fd) == 0);
 }
 
 int make_nonblocking(int fd) {
@@ -154,6 +177,25 @@ int make_cloexec(int fd) {
 }
 */
 
+static int open_relative(const char *path, uint64_t flags, uint64_t mode) {
+    /*
+     * Arch's musl 1.2.4-1 doesn't include <linux/openat2.h>, so
+     * open-code the parts that are needed.
+     */
+    struct {
+        uint64_t flags;
+        uint64_t mode;
+        uint64_t resolve;
+    } how;
+    memset(&how, 0, sizeof how);
+    how.flags = flags | O_NOCTTY | O_CLOEXEC;
+    how.mode = mode;
+    how.resolve = 0x10 /* RESOLVE_IN_ROOT */;
+    long r = syscall(SYS_openat2, g_sysroot_fd, path, &how, sizeof how);
+    CHECK_BOOL(r >= -1 && r <= INT_MAX);
+    return r;
+}
+
 static void cleanup_fd_desc(struct redir_fd_desc* fd_desc) {
     switch (fd_desc->type) {
         case REDIRECT_FD_FILE:
@@ -176,18 +218,20 @@ static void cleanup_fd_desc(struct redir_fd_desc* fd_desc) {
 }
 
 static bool redir_buffers_empty(struct redir_fd_desc *redirs, size_t len) {
-    FILE *f;
     for (size_t fd = 0; fd < len; ++fd) {
         switch (redirs[fd].type) {
-            case REDIRECT_FD_FILE:
-                if ((f = fopen(redirs[fd].path, "r")) == 0) {
+            case REDIRECT_FD_FILE:;
+                int this_fd = open_relative(redirs[fd].path, O_RDONLY, 0);
+                if (this_fd == -1) {
                     continue;
                 }
-                fseek(f, 0, SEEK_END);
-                bool empty = ftell(f) == 0;
-                fclose(f);
-
-                if (!empty) {
+                struct stat statbuf;
+                int res = fstat(this_fd, &statbuf);
+                close(this_fd);
+                if (res != 0) {
+                    continue;
+                }
+                if (statbuf.st_size) {
                     return false;
                 }
                 break;
@@ -252,6 +296,11 @@ static struct exit_reason encode_status(int status, int type) {
     return exit_reason;
 }
 
+pid_t global_zombie_pid = -1;
+pid_t global_pidfd = -1;
+int global_userns_fd = -1;
+int global_mountns_fd = -1;
+
 static void handle_sigchld(void) {
     struct signalfd_siginfo siginfo = { 0 };
 
@@ -267,6 +316,10 @@ static void handle_sigchld(void) {
     }
 
     pid_t child_pid = (pid_t)siginfo.ssi_pid;
+    if (child_pid == global_zombie_pid) {
+        /* This process is deliberately kept as a zombie, ignore it */
+        return;
+    }
 
     if (siginfo.ssi_code != CLD_EXITED
             && siginfo.ssi_code != CLD_KILLED
@@ -299,6 +352,7 @@ static void handle_sigchld(void) {
     }
 
     if (redir_buffers_empty(proc_desc->redirs, 3)) {
+        fprintf(stderr, "Deleting process %" PRIu64 "\n", proc_desc->id);
         delete_proc(proc_desc);
     }
 }
@@ -318,27 +372,59 @@ static void setup_sigfd(void) {
     g_sig_fd = CHECK(signalfd(g_sig_fd, &set, SFD_CLOEXEC));
 }
 
-static int create_dir_path(char* path) {
+static int create_dir_path(char* path, int perms, int *out_fd) {
     assert(path[0] == '/');
 
     char* next = path;
-    while (1) {
-        next = strchr(next + 1, '/');
-        if (!next) {
-            break;
+    int fd = g_sysroot_fd;
+    int rc = -1;
+    char *prev;
+    do {
+        next++;
+        prev = next;
+        next = strchr(next, '/');
+        if (next != NULL) {
+            *next = '\0';
         }
-        *next = '\0';
-        int ret = mkdir(path, DEFAULT_DIR_PERMS);
-        *next = '/';
-        if (ret < 0 && errno != EEXIST) {
-            return -1;
+        if (*prev == '\0' || strcmp(prev, ".") == 0 || strcmp(prev, "..") == 0) {
+            fprintf(stderr, "Invalid path component '%s'\n", prev);
+            errno = EINVAL;
+            goto fail;
         }
-    }
+        int ret = mkdirat(fd, prev, perms);
+        if (ret != 0 && errno != EEXIST) {
+            int tmp = errno;
+            assert(errno != EBADF);
+            fprintf(stderr, "mkdirat() failed: %m\n");
+            errno = tmp;
+            goto fail;
+        }
 
-    if (mkdir(path, DEFAULT_DIR_PERMS) < 0 && errno != EEXIST) {
-        return -1;
+        int new_fd = openat(fd, prev, O_DIRECTORY | O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        if (new_fd == -1) {
+            int tmp = errno;
+            assert(tmp != EBADF);
+            fprintf(stderr, "openat() failed: %m\n");
+            errno = tmp;
+            goto fail;
+        }
+        if (fd != g_sysroot_fd) {
+            close(fd);
+        }
+        fd = new_fd;
+    } while (next);
+    rc = 0;
+    if (out_fd) {
+        *out_fd = fd;
+        fd = g_sysroot_fd;
     }
-    return 0;
+fail:
+    if (fd != g_sysroot_fd) {
+        int save = errno;
+        close(fd);
+        errno = save;
+    }
+    return rc;
 }
 
 static void setup_agent_directories(void) {
@@ -348,42 +434,49 @@ static void setup_agent_directories(void) {
         die();
     }
 
-    CHECK(create_dir_path(path));
+    CHECK(create_dir_path(path, DEFAULT_DIR_PERMS, NULL));
 
     free(path);
 }
 
 static int add_network_hosts(char *entries[][2], int n) {
     FILE *f;
-    if ((f = fopen("/etc/hosts", "a")) == 0) {
+    if ((f = fopen(SYSROOT "/etc/hosts", "a")) == 0) {
         return -1;
     }
 
     for (int i = 0; i < n; ++i) {
-        fprintf(f, "%s\t%s\n", entries[i][0], entries[i][1]);
+        if (fprintf(f, "%s\t%s\n", entries[i][0], entries[i][1]) < 2) {
+            return -1;
+        }
     }
 
-    fflush(f);
-    fsync(fileno(f));
-    fclose(f);
+    if (fflush(f)) {
+        return -1;
+    }
+    if (fsync(fileno(f))) {
+        return -1;
+    }
+    if (fclose(f)) {
+        return -1;
+    }
 
     return 0;
 }
 
 static int set_network_ns(char *entries[], int n) {
     FILE *f;
-    if ((f = fopen("/etc/resolv.conf", "w")) == 0) {
+    if ((f = fopen(SYSROOT "/etc/resolv.conf", "w")) == 0) {
         return -1;
     }
 
-    fprintf(f, "search example.com\n");
     for (int i = 0; i < n; ++i) {
-        fprintf(f, "nameserver %s\n", entries[i]);
+        CHECK_BOOL(fprintf(f, "nameserver %s\n", entries[i]) > 0);
     }
 
-    fflush(f);
-    fsync(fileno(f));
-    fclose(f);
+    CHECK_BOOL(fflush(f) == 0);
+    CHECK_BOOL(fsync(fileno(f)) == 0);
+    CHECK_BOOL(fclose(f) == 0);
 
     return 0;
 }
@@ -394,9 +487,9 @@ int write_sys(char *path, size_t value) {
         return -1;
     }
 
-    fprintf(f, "%ld", value);
-    fflush(f);
-    fclose(f);
+    CHECK_BOOL(fprintf(f, "%ld", value) > 0);
+    CHECK_BOOL(fflush(f) == 0);
+    CHECK_BOOL(fclose(f) == 0);
 
     return 0;
 }
@@ -544,12 +637,17 @@ static int del_epoll_fd_desc(struct epoll_fd_desc* epoll_fd_desc) {
  * Returns whether call was successful (setting errno on failures). */
 static bool redirect_fd_to_path(int fd, const char* path) {
     assert(fd == 0 || fd == 1 || fd == 2);
+    if (path[0] != '/' || path[1] == '/') {
+        errno = EINVAL;
+        return false;
+    }
+    path++;
 
     int source_fd = -1;
     if (fd == 0) {
-        source_fd = open(path, O_RDONLY);
+        source_fd = open_relative(path, O_RDONLY, 0);
     } else {
-        source_fd = open(path, O_WRONLY | O_CREAT, DEFAULT_OUT_FILE_PERM);
+        source_fd = open_relative(path, O_WRONLY | O_CREAT, DEFAULT_OUT_FILE_PERM);
     }
 
     if (source_fd < 0) {
@@ -577,42 +675,57 @@ static bool redirect_fd_to_path(int fd, const char* path) {
 // lives in a separate memory segment (after forking)
 static int child_pipe = -1;
 
-static void close_child_pipe() {
-    if (child_pipe != -1) {
-        char c = '\0';
-        /* Can't do anything with errors here. */
-        (void)write(child_pipe, &c, sizeof(c));
-        close(child_pipe);
-    }
-}
+#define NAMESPACES \
+                 (CLONE_NEWUSER | /* new user namespace */ \
+                  CLONE_NEWNS | /* new mount namespace */ \
+                  0)
 
+static int capset(cap_user_header_t hdrp, cap_user_data_t datap) {
+    return syscall(SYS_capset, hdrp, datap);
+}
 static noreturn void child_wrapper(int parent_pipe[2],
                                    struct new_process_args* new_proc_args,
                                    struct redir_fd_desc fd_descs[3]) {
     child_pipe = parent_pipe[1];
-    atexit(close_child_pipe);
+#define MASSIVEDEBUGGING
+#ifdef MASSIVEDEBUGGING
+#define X(a) do { \
+    int tmp = errno;\
+    if (write(2, a "\n", sizeof(a)) != sizeof(a)) { \
+        goto out; \
+    } \
+    errno = tmp; \
+} while (0)
+#else
+#define X(a) do (void)(a ""); while (0)
+#endif
 
     if (close(parent_pipe[0]) < 0) {
+        X("close problem");
         goto out;
     }
 
     sigset_t set;
     if (sigemptyset(&set) < 0) {
+        X("sigemptyset problem");
         goto out;
     }
     if (sigprocmask(SIG_SETMASK, &set, NULL) < 0) {
+        X("sigprocmask problem");
         goto out;
     }
-
-    if (new_proc_args->cwd) {
-        if (chdir(new_proc_args->cwd) < 0) {
-            goto out;
-        }
-    }
-
+    X("fd processing");
     for (int fd = 0; fd < 3; ++fd) {
+        X("processing an FD");
         switch (fd_descs[fd].type) {
             case REDIRECT_FD_FILE:
+                X("redirecting an FD to a file");
+#ifdef MASSIVEDEBUGGING
+                if ((size_t)write(2, fd_descs[fd].path, strlen(fd_descs[fd].path)) != strlen(fd_descs[fd].path)) {
+                    goto out;
+                }
+                X("");
+#endif
                 if (!redirect_fd_to_path(fd, fd_descs[fd].path)) {
                     goto out;
                 }
@@ -620,16 +733,71 @@ static noreturn void child_wrapper(int parent_pipe[2],
             case REDIRECT_FD_PIPE_BLOCKING:
             case REDIRECT_FD_PIPE_CYCLIC:
                 if (dup2(fd_descs[fd].buffer.fds[fd ? 1 : 0], fd) < 0) {
+                    X("dup2 problem");
                     goto out;
                 }
                 if (close(fd_descs[fd].buffer.fds[0]) < 0
                         || close(fd_descs[fd].buffer.fds[1]) < 0) {
+                    X("close problem");
                     goto out;
                 }
                 break;
             default:
+                X("bad command");
                 errno = ENOTRECOVERABLE;
                 goto out;
+        }
+    }
+    if (global_pidfd != -1) {
+        int low_fd = global_userns_fd > global_mountns_fd ? global_mountns_fd : global_userns_fd;
+        int high_fd = global_userns_fd > global_mountns_fd ? global_userns_fd : global_mountns_fd;
+        if (low_fd < 3)
+            abort();
+        if (low_fd > 3 && syscall(SYS_close_range, 3, (unsigned int)low_fd - 1, 0) != 0) {
+            goto out;
+        }
+        if (high_fd - low_fd > 1 &&
+            syscall(SYS_close_range, (unsigned int)low_fd + 1, (unsigned int)high_fd - 1, 0))
+        {
+            goto out;
+        }
+
+        if (setns(global_mountns_fd, CLONE_NEWNS) || close(global_mountns_fd)) {
+            goto out;
+        }
+
+        if (setns(global_userns_fd, CLONE_NEWUSER)) {
+            goto out;
+        }
+
+        if (close(global_userns_fd)) {
+            goto out;
+        }
+
+        if (chdir("/") != 0) {
+            goto out;
+        }
+
+        if (chroot(".") != 0) {
+            goto out;
+        }
+    } else {
+        if (syscall(SYS_close_range, 3U, ~0U, 0U) != 0) {
+            abort();
+        }
+
+        if (chroot(SYSROOT) != 0) {
+            goto out;
+        }
+
+        if (chdir("/") != 0) {
+            goto out;
+        }
+    }
+
+    if (new_proc_args->cwd) {
+        if (chdir(new_proc_args->cwd) < 0) {
+            goto out;
         }
     }
 
@@ -643,13 +811,86 @@ static noreturn void child_wrapper(int parent_pipe[2],
         goto out;
     }
 
+    if (global_pidfd != -1) {
+        sandbox_apply();
+
+        struct __user_cap_header_struct hdr = {
+                .version = _LINUX_CAPABILITY_VERSION_3,
+        };
+        struct __user_cap_data_struct data[_LINUX_CAPABILITY_U32S_3] = { 0 };
+
+        for (int i = 0; i < _LINUX_CAPABILITY_U32S_3 * 32; ++i) {
+            switch (i) {
+                // CAP_AUDIT_CONTROL: no
+                // CAP_AUDIT_READ: no
+                // CAP_AUDIT_WRITE: no
+                case CAP_BLOCK_SUSPEND:
+                // case CAP_BPF:
+                // case CAP_CHECKPOINT_RESTORE:
+                case CAP_CHOWN:
+                case CAP_DAC_OVERRIDE:
+                case CAP_DAC_READ_SEARCH:
+                case CAP_FOWNER:
+                case CAP_FSETID:
+                case CAP_IPC_LOCK:
+                case CAP_IPC_OWNER:
+                case CAP_KILL:
+                case CAP_LEASE:
+                case CAP_LINUX_IMMUTABLE:
+                // case CAP_MKNOD:
+                // cas CAP_NET_ADMIN:
+                case CAP_NET_BIND_SERVICE:
+                case CAP_NET_BROADCAST:
+                case CAP_NET_RAW:
+                // case CAP_PERFMON:
+                case CAP_SETGID:
+                case CAP_SETFCAP:
+                case CAP_SETPCAP:
+                case CAP_SETUID:
+                // case CAP_SYS_ADMIN:
+                case CAP_SYS_BOOT:
+                case CAP_SYS_CHROOT:
+                // case CAP_SYS_MODULE:
+                case CAP_SYS_NICE:
+                case CAP_SYS_PACCT:
+                case CAP_SYS_PTRACE:
+                // case CAP_SYS_RAWIO
+                case CAP_SYS_RESOURCE:
+                // case CAP_SYS_TIME:
+                // case CAP_SYS_TTY_CONFIG:
+                // case CAP_SYSLOG:
+                case CAP_WAKE_ALARM:
+                {
+                    data[i / 32].permitted |= (UINT32_C(1) << (i % 32));
+                    data[i / 32].effective |= (UINT32_C(1) << (i % 32));
+                    break;
+                }
+                default:;
+                    int res = prctl(PR_CAPBSET_DROP, i);
+                    if (res != 0 && (res != -1 && errno == EINVAL))
+                        goto out;
+            }
+        }
+
+        if (capset(&hdr, &*data)) {
+            goto out;
+        }
+    }
+
     /* If execve returns we know an error happened. */
     (void)execve(new_proc_args->bin,
                  new_proc_args->argv,
                  new_proc_args->envp ?: environ);
 
+
 out:
-    exit(errno);
+    if (child_pipe != -1) {
+        char c = '\0';
+        /* Can't do anything with errors here. */
+        (void)write(child_pipe, &c, sizeof(c));
+        close(child_pipe);
+    }
+    _exit(errno);
 }
 
 /* 0 is considered an invalid ID. */
@@ -664,7 +905,7 @@ static int create_process_fds_dir(uint64_t id) {
         return -1;
     }
 
-    if (mkdir(path, S_IRWXU) < 0) {
+    if (create_dir_path(path, S_IRWXU, NULL) < 0) {
         int tmp = errno;
         free(path);
         errno = tmp;
@@ -683,6 +924,85 @@ static char* construct_output_path(uint64_t id, unsigned int fd) {
     return path;
 }
 
+// This is recursive, but will only ever run on trusted input.
+// FIXME: get this fixed in upstream Linux.
+static void copy_initramfs_recursive(int dirfd, int newdirfd, const char *skip_name) {
+    CHECK_BOOL(newdirfd != dirfd);
+    DIR *d = fdopendir(dirfd);
+    CHECK_BOOL(d != NULL);
+    for (;;) {
+        errno = 0;
+        const struct dirent *entry = readdir(d);
+        if (entry == NULL) {
+            CHECK_BOOL(errno == 0);
+            break;
+        }
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0 ||
+            strcmp(entry->d_name, skip_name) == 0)
+        {
+            continue; // skip this entry
+        }
+        struct stat statbuf;
+        CHECK(fstatat(dirfd, entry->d_name, &statbuf, AT_SYMLINK_NOFOLLOW));
+        switch (statbuf.st_mode & S_IFMT) {
+            case S_IFCHR:
+            case S_IFBLK:
+            case S_IFSOCK:
+            case S_IFIFO:
+                CHECK(mknodat(newdirfd, entry->d_name, statbuf.st_mode, statbuf.st_rdev));
+                break;
+            case S_IFLNK: {
+                char *buf = CHECK_BOOL(malloc(statbuf.st_size + 1));
+                ssize_t size = CHECK(readlinkat(dirfd, entry->d_name, buf, statbuf.st_size + 1));
+                CHECK_BOOL(size == statbuf.st_size);
+                buf[size] = 0;
+                CHECK(symlinkat(buf, newdirfd, entry->d_name));
+                free(buf);
+                break;
+            }
+            case S_IFREG: {
+                uint64_t size = statbuf.st_size;
+                int srcfd = CHECK(openat(dirfd, entry->d_name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC));
+                int dstfd = CHECK(openat(newdirfd, entry->d_name, O_WRONLY | O_NOFOLLOW | O_CLOEXEC | O_CREAT, statbuf.st_mode & 07777));
+                while (size > 0) {
+                    size_t res = (size_t)CHECK(sendfile(dstfd, srcfd, NULL, size > SIZE_MAX ? SIZE_MAX : size));
+                    size -= res;
+                }
+                close(dstfd);
+                close(srcfd);
+                break;
+            }
+            case S_IFDIR: {
+                int old_child_dirfd = CHECK(openat(dirfd, entry->d_name, O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC | O_RDONLY));
+                CHECK(mkdirat(newdirfd, entry->d_name, statbuf.st_mode & 07777));
+                int new_child_dirfd = CHECK(openat(newdirfd, entry->d_name, O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC | O_RDONLY));
+                copy_initramfs_recursive(old_child_dirfd, new_child_dirfd, "");
+                break;
+            }
+            default:
+                CHECK_BOOL(false);
+                break;
+        }
+        CHECK(unlinkat(dirfd, entry->d_name, S_ISDIR(statbuf.st_mode) ? AT_REMOVEDIR : 0));
+    }
+    CHECK(closedir(d));
+    CHECK(close(newdirfd));
+}
+
+static void copy_initramfs(void) {
+    int rootfd = CHECK(open("/", O_DIRECTORY | O_NOFOLLOW | O_RDONLY | O_CLOEXEC));
+    struct stat stats;
+    CHECK(fstat(rootfd, &stats));
+    CHECK_BOOL(mount("", "/" NEW_ROOT, "tmpfs", 0, "") == 0);
+    int newdirfd = CHECK(open("/" NEW_ROOT, O_DIRECTORY | O_NOFOLLOW | O_RDONLY | O_CLOEXEC));
+    copy_initramfs_recursive(rootfd, newdirfd, NEW_ROOT);
+    CHECK_BOOL(chdir("/" NEW_ROOT) == 0);
+    CHECK_BOOL(mount(".", "/", NULL, MS_MOVE, NULL) == 0);
+    CHECK_BOOL(chroot(".") == 0);
+    CHECK_BOOL(mount(NULL, "/", NULL, MS_SHARED, NULL) == 0);
+}
+
 static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
                                   struct redir_fd_desc fd_descs[3],
                                   uint64_t* id) {
@@ -691,28 +1011,31 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
     struct epoll_fd_desc* epoll_fd_descs[3] = { NULL };
 
     if (new_proc_args->is_entrypoint && g_entrypoint_desc) {
+        fprintf(stderr, "Caller bug, returning EEXIST\n");
         return EEXIST;
     }
-
     struct process_desc* proc_desc = calloc(1, sizeof(*proc_desc));
     if (!proc_desc) {
+        fprintf(stderr, "Memory allocation failed\n");
         return ENOMEM;
     }
     for (size_t fd = 0; fd < 3; ++fd) {
         proc_desc->redirs[fd].type = REDIRECT_FD_INVALID;
     }
+    int status_pipe[2] = { -1, -1 };
 
     proc_desc->id = get_next_id();
     if (create_process_fds_dir(proc_desc->id) < 0) {
         ret = errno;
+        fprintf(stderr, "Failed to create file descriptor directory: %m\n");
         goto out_err;
     }
 
     /* All these shenanigans with pipes are so that we can distinguish internal
      * failures from spawned process exiting. */
-    int status_pipe[2] = { -1, -1 };
     if (pipe2(status_pipe, O_CLOEXEC | O_DIRECT) < 0) {
         ret = errno;
+        fprintf(stderr, "Failed to create status pipe: %m\n");
         goto out_err;
     }
 
@@ -724,6 +1047,7 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
                     proc_desc->redirs[fd].path = strdup(fd_descs[fd].path);
                     if (!proc_desc->redirs[fd].path) {
                         ret = errno;
+                        fprintf(stderr, "Memory allocation failed\n");
                         goto out_err;
                     }
                 } else {
@@ -731,13 +1055,15 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
                         construct_output_path(proc_desc->id, fd);
                     if (!proc_desc->redirs[fd].path) {
                         ret = errno;
+                        fprintf(stderr, "Cannot construct output path: %m\n");
                         goto out_err;
                     }
-                    int tmp_fd = open(proc_desc->redirs[fd].path,
-                                      O_RDWR | O_CREAT | O_EXCL,
+                    int tmp_fd = open_relative(proc_desc->redirs[fd].path,
+                                      O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOCTTY,
                                       S_IRWXU);
                     if (tmp_fd < 0 || close(tmp_fd) < 0) {
                         ret = errno;
+                        fprintf(stderr, "Cannot open %s: %m\n", proc_desc->redirs[fd].path);
                         goto out_err;
                     }
                 }
@@ -754,6 +1080,7 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
 
                 if (pipe2(proc_desc->redirs[fd].buffer.fds, O_CLOEXEC) < 0) {
                     ret = errno;
+                    fprintf(stderr, "Failed to create redirection pipe: %m\n");
                     goto out_err;
                 }
                 break;
@@ -765,6 +1092,7 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
     p = fork();
     if (p < 0) {
         ret = errno;
+        fprintf(stderr, "Failed to fork: %m\n");
         goto out_err;
     } else if (p == 0) {
         child_wrapper(status_pipe, new_proc_args, proc_desc->redirs);
@@ -777,8 +1105,10 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
     ssize_t x = read(status_pipe[0], &c, sizeof(c));
     if (x < 0) {
         ret = errno;
+        fprintf(stderr, "Failed to read from pipe: %m\n");
         goto out_err;
     } else if (x > 0) {
+        fprintf(stderr, "Failed to spawn process\n");
         /* Process failed to spawn. */
         int status = 0;
         CHECK(waitpid(p, &status, 0));
@@ -808,6 +1138,7 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
                                   &epoll_fd_descs[fd]) < 0) {
                 if (errno == ENOMEM || errno == ENOSPC) {
                     ret = errno;
+                    fprintf(stderr, "Failed to add epoll descriptor: %m\n");
                     goto out_err;
                 }
                 CHECK(-1);
@@ -822,6 +1153,7 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
 
     *id = proc_desc->id;
 
+    fprintf(stderr, "Adding process with id %" PRIu64 "\n", *id);
     add_process(proc_desc);
     if (new_proc_args->is_entrypoint) {
         g_entrypoint_desc = proc_desc;
@@ -1056,13 +1388,21 @@ out:
 }
 
 static uint32_t do_mount(const char* tag, char* path) {
-    if (create_dir_path(path) < 0) {
+    int fd;
+    char buf[sizeof "/proc/self/fd/" + 10];
+    if (create_dir_path(path, DEFAULT_DIR_PERMS, &fd) < 0) {
         return errno;
     }
-    if (mount(tag, path, "9p", 0, "trans=virtio,version=9p2000.L") < 0) {
-        return errno;
+    CHECK_BOOL(fd > 2);
+    int res = snprintf(buf, sizeof buf, "/proc/self/fd/%d", fd);
+    CHECK_BOOL(res >= (int)sizeof "/proc/self/fd/" && res < (int)sizeof buf);
+    if (mount(tag, buf, "9p", 0, "trans=virtio,version=9p2000.L") < 0) {
+        res = errno;
+    } else {
+        res = 0;
     }
-    return 0;
+    close(fd);
+    return res;
 }
 
 static void handle_mount(msg_id_t msg_id) {
@@ -1093,7 +1433,7 @@ static void handle_mount(msg_id_t msg_id) {
         }
     }
 
-    if (!tag || !path) {
+    if (!tag || !path || path[0] != '/') {
         ret = EINVAL;
         goto out;
     }
@@ -1116,7 +1456,7 @@ static uint32_t do_query_output_path(char* path, uint64_t off, char** buf_ptr,
     char* buf = MAP_FAILED;
     size_t len = 0;
 
-    int fd = open(path, O_RDONLY);
+    int fd = open_relative(path, O_RDONLY, 0);
     if (fd < 0) {
         return errno;
     }
@@ -1209,12 +1549,14 @@ static void handle_query_output(msg_id_t msg_id) {
     }
 
     if (!id || !len || !fd || fd > 2) {
+        fprintf(stderr, "caller bug, returning EINVAL\n");
         ret = EINVAL;
         goto out_err;
     }
 
     struct process_desc* proc_desc = find_process_by_id(id);
     if (!proc_desc) {
+        fprintf(stderr, "no process %" PRIu64 ", returning ESRCH\n", id);
         ret = ESRCH;
         goto out_err;
     }
@@ -1627,16 +1969,142 @@ static noreturn void main_loop(void) {
 }
 
 static void create_dir(const char *pathname, mode_t mode) {
-    if (mkdir(pathname, mode) < 0 && errno != EEXIST) {
+    if (mkdirat(g_sysroot_fd, pathname, mode) < 0 && errno != EEXIST) {
         fprintf(stderr, "mkdir(%s) failed with: %m\n", pathname);
         die();
     }
 }
 
-int main(void) {
-    setbuf(stdin, NULL);
-    setbuf(stdout, NULL);
-    setbuf(stderr, NULL);
+static void get_namespace_fd(void) {
+    int tmp_fd = CHECK(open("/user_namespace", O_RDWR|O_CREAT|O_NOFOLLOW|O_CLOEXEC|O_EXCL|O_NOCTTY, 0600));
+    CHECK(close(tmp_fd));
+    tmp_fd = CHECK(open("/mount_namespace", O_RDWR|O_CREAT|O_NOFOLLOW|O_CLOEXEC|O_EXCL|O_NOCTTY, 0600));
+    CHECK(close(tmp_fd));
+    char buf[sizeof "/proc//uid_map" + 10];
+    struct clone_args args = {
+        .flags = CLONE_CLEAR_SIGHAND |
+                 CLONE_PIDFD | /* alloc a PID FD */
+                 NAMESPACES,
+        .pidfd = (uint64_t)&global_pidfd,
+        .child_tid = 0,
+        .parent_tid = 0,
+        .exit_signal = (uint64_t)SIGCHLD,
+        .stack = 0,
+        .stack_size = 0,
+        .tls = 0,
+        .set_tid = 0,
+        .set_tid_size = 0,
+        .cgroup = 0,
+    };
+    sigset_t set;
+    CHECK(sigemptyset(&set));
+    int fds[2], status = 0;
+    CHECK_BOOL(socketpair(AF_UNIX, SOCK_STREAM|SOCK_CLOEXEC, 0, fds) == 0);
+    errno = 0;
+    global_zombie_pid = syscall(SYS_clone3, &args, sizeof args);
+    CHECK_BOOL(global_zombie_pid >= 0);
+    if (global_zombie_pid == 0) {
+        if (close(fds[0]))
+            abort();
+        if (mount(SYSROOT, SYSROOT, NULL, MS_BIND | MS_REC, NULL)) {
+            status = errno;
+            goto bad;
+        }
+        if (mount(NULL, SYSROOT, NULL, MS_SLAVE | MS_REC, NULL)) {
+            status = errno;
+            goto bad;
+        }
+        if (chdir(SYSROOT))
+            abort();
+        if (syscall(SYS_pivot_root, ".", ".")) {
+            status = errno;
+            goto bad;
+        }
+        if (umount2(".", MNT_DETACH)) {
+            status = errno;
+            goto bad;
+        }
+        if (chdir("/")) {
+            status = errno;
+        }
+bad:
+        if (write(fds[1], &status, sizeof status) != sizeof status || shutdown(fds[1], SHUT_WR) != 0)
+            _exit(1);
+        (void)read(fds[1], &status, 1);
+        _exit(0);
+    }
+    CHECK(global_pidfd);
+    /* parent */
+    CHECK_BOOL(close(fds[1]) == 0);
+    CHECK_BOOL(read(fds[0], &status, sizeof status) == sizeof status);
+    errno = status;
+    CHECK_BOOL(status == 0);
+    int snprintf_res = snprintf(buf, sizeof buf, "/proc/%d/uid_map", global_zombie_pid);
+    CHECK_BOOL(snprintf_res >= (int)sizeof("/proc/1/uid_map") - 1);
+    CHECK_BOOL(snprintf_res < (int)sizeof buf);
+    for (int i = 0; i < 2; ++i) {
+        int uidmapfd = CHECK(open(buf, O_NOFOLLOW | O_CLOEXEC | O_NOCTTY | O_WRONLY));
+#define UIDMAP "0 0 4294967295"
+        CHECK_BOOL(write(uidmapfd, UIDMAP, sizeof UIDMAP - 1) == sizeof UIDMAP - 1);
+        CHECK_BOOL(close(uidmapfd) == 0);
+        buf[snprintf_res - 7] = 'g';
+    }
+    static_assert(sizeof("ns/user") <= sizeof("uid_map"), "string size oops");
+    static_assert(sizeof("ns/mnt") <= sizeof("uid_map"), "string size oops");
+    snprintf_res = snprintf(buf, sizeof buf, "/proc/%d/ns/user", global_zombie_pid);
+    CHECK_BOOL(snprintf_res >= (int)sizeof "/proc/1/ns/user" - 1);
+    CHECK_BOOL(snprintf_res < (int)sizeof "/proc/1/ns/user" + 9);
+    CHECK(mount(buf, "/user_namespace", NULL, MS_BIND, NULL));
+    global_userns_fd = CHECK(open("/user_namespace", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NOCTTY));
+    snprintf_res = snprintf(buf, sizeof buf, "/proc/%d/ns/mnt", global_zombie_pid);
+    CHECK_BOOL(snprintf_res >= (int)sizeof "/proc/1/ns/mnt" - 1);
+    CHECK_BOOL(snprintf_res < (int)sizeof "/proc/1/ns/mnt" + 9);
+    CHECK(mount(buf, "/mount_namespace", NULL, MS_BIND, NULL));
+    global_mountns_fd = CHECK(open("/mount_namespace", O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NOCTTY));
+    CHECK(write(fds[0], "", 1));
+    int v;
+    CHECK_BOOL(waitpid(global_zombie_pid, &v, 0) == global_zombie_pid);
+    CHECK_BOOL(WIFEXITED(v));
+    CHECK_BOOL(WEXITSTATUS(v) == 0);
+}
+
+static int find_device_major(const char *name) {
+    FILE *f;
+    char *line = NULL;
+    size_t line_size; /* size of the buffer */
+    ssize_t line_len;
+    char entry_name[32];
+    int entry_major;
+    int major = -1;
+
+    if ((f = fopen("/proc/devices", "r")) == 0)
+        return -1;
+
+    while ((line_len = getline(&line, &line_size, f)) != -1) {
+        if (strcmp(line, "Character devices:\n") == 0) {
+            /* initial header, nothing to do yet */
+        } else if (strcmp(line, "\n") == 0 ||
+                   strcmp(line, "Block devices:\n") == 0) {
+            /* end of character devices, entry not found */
+            break;
+        } else if (sscanf(line, " %d %31s", &entry_major, entry_name) == 2 &&
+                   strcmp(entry_name, name) == 0) {
+            major = entry_major;
+            break;
+        }
+    }
+    free(line);
+    return major;
+}
+
+int main(int argc, char **argv) {
+    CHECK_BOOL(setvbuf(stdin, NULL, _IONBF, BUFSIZ) == 0);
+    CHECK_BOOL(setvbuf(stdout, NULL, _IONBF, BUFSIZ) == 0);
+    CHECK_BOOL(setvbuf(stderr, NULL, _IONBF, BUFSIZ) == 0);
+    int res = prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
+    CHECK_BOOL(res == 0 || res == 1);
+    bool nvidia_loaded = false;
+    copy_initramfs();
 
     create_dir("/dev", DEFAULT_DIR_PERMS);
     CHECK(mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID,
@@ -1645,6 +2113,10 @@ int main(void) {
     load_module("/failover.ko");
     load_module("/virtio.ko");
     load_module("/virtio_ring.ko");
+    if (access("/virtio_pci_modern_dev.ko", R_OK) == 0)
+        load_module("/virtio_pci_modern_dev.ko");
+    if (access("/virtio_pci_legacy_dev.ko", R_OK) == 0)
+        load_module("/virtio_pci_legacy_dev.ko");
     load_module("/virtio_pci.ko");
     load_module("/net_failover.ko");
     load_module("/virtio_net.ko");
@@ -1654,6 +2126,8 @@ int main(void) {
     load_module("/virtio_blk.ko");
     load_module("/squashfs.ko");
     load_module("/overlay.ko");
+    if (access("/netfs.ko", R_OK) == 0)
+        load_module("/netfs.ko");
     load_module("/fscache.ko");
     load_module("/af_packet.ko");
     load_module("/ipv6.ko");
@@ -1662,73 +2136,142 @@ int main(void) {
     load_module("/9pnet_virtio.ko");
     load_module("/9p.ko");
 
+    if (access("/nvidia.ko", R_OK) == 0) {
+        load_module("/i2c-core.ko");
+        load_module("/drm_panel_orientation_quirks.ko");
+        load_module("/firmware_class.ko");
+        load_module("/drm.ko");
+        load_module("/nvidia.ko");
+        load_module("/nvidia-uvm.ko");
+        load_module("/fbdev.ko");
+        load_module("/fb.ko");
+        load_module("/fb_sys_fops.ko");
+        load_module("/cfbcopyarea.ko");
+        load_module("/cfbfillrect.ko");
+        load_module("/cfbimgblt.ko");
+        load_module("/syscopyarea.ko");
+        load_module("/sysfillrect.ko");
+        load_module("/sysimgblt.ko");
+        load_module("/drm_kms_helper.ko");
+        load_module("/nvidia-modeset.ko");
+        load_module("/nvidia-drm.ko");
+        nvidia_loaded = true;
+    }
+
     g_cmds_fd = CHECK(open(VPORT_CMD, O_RDWR | O_CLOEXEC));
 
     CHECK(mkdir("/mnt", S_IRWXU));
+    CHECK(mkdir("/proc", S_IRWXU));
     CHECK(mkdir("/mnt/image", S_IRWXU));
     CHECK(mkdir("/mnt/overlay", S_IRWXU));
-    CHECK(mkdir("/mnt/newroot", DEFAULT_DIR_PERMS));
+    CHECK(mkdir(SYSROOT, DEFAULT_DIR_PERMS));
 
     // 'workdir' and 'upperdir' have to be on the same filesystem
     CHECK(mount("tmpfs", "/mnt/overlay", "tmpfs",
-                MS_NOSUID,
-                "mode=0777,size=128M"));
+                MS_NOSUID | MS_NODEV,
+                "mode=0700,size=128M"));
 
     CHECK(mkdir("/mnt/overlay/upper", S_IRWXU));
     CHECK(mkdir("/mnt/overlay/work", S_IRWXU));
 
-    CHECK(mount("/dev/vda", "/mnt/image", "squashfs", MS_RDONLY, ""));
-    CHECK(mount("overlay", "/mnt/newroot", "overlay", 0,
-                "lowerdir=/mnt/image,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work"));
+    CHECK(mount("/dev/vda", "/mnt/image", "squashfs", MS_RDONLY | MS_NODEV, ""));
+    if (access("/dev/vdb", R_OK) == 0) {
+        CHECK(mkdir("/mnt/gpu-files", S_IRWXU));
+        CHECK(mount("/dev/vdb", "/mnt/gpu-files", "squashfs", MS_RDONLY | MS_NODEV, ""));
+        CHECK(mount("overlay", SYSROOT, "overlay", MS_NODEV,
+                    "lowerdir=/mnt/gpu-files:/mnt/image,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work"));
+    } else {
+        CHECK(mount("overlay", SYSROOT, "overlay", MS_NODEV,
+                    "lowerdir=/mnt/image,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work"));
+    }
 
-    CHECK(umount2("/dev", MNT_DETACH));
+    g_sysroot_fd = CHECK(open(SYSROOT, O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+    assert(g_sysroot_fd >= 3);
 
-    CHECK(chdir("/mnt/newroot"));
-    CHECK(mount(".", "/", "none", MS_MOVE, NULL));
-    CHECK(chroot("."));
-    CHECK(chdir("/"));
-
-    create_dir("/dev", DEFAULT_DIR_PERMS);
-    create_dir("/tmp", DEFAULT_DIR_PERMS);
+    create_dir("dev", DEFAULT_DIR_PERMS);
+    create_dir("tmp", DEFAULT_DIR_PERMS);
 
     CHECK(mount("proc", "/proc", "proc",
                 MS_NODEV | MS_NOSUID | MS_NOEXEC,
                 NULL));
-    CHECK(mount("sysfs", "/sys", "sysfs",
+    CHECK(mount("proc", SYSROOT "/proc", "proc",
                 MS_NODEV | MS_NOSUID | MS_NOEXEC,
                 NULL));
-    CHECK(mount("devtmpfs", "/dev", "devtmpfs",
+    CHECK(mount("sysfs", SYSROOT "/sys", "sysfs",
+                MS_NODEV | MS_NOSUID | MS_NOEXEC,
+                NULL));
+    CHECK(mount("devtmpfs", SYSROOT "/dev", "devtmpfs",
                 MS_NOSUID,
-                "exec,mode=0755,size=2M"));
-    CHECK(mount("tmpfs", "/tmp", "tmpfs",
+                "mode=0755,size=2M"));
+    CHECK(mount("tmpfs", SYSROOT "/tmp", "tmpfs",
                 MS_NOSUID,
                 "mode=0777"));
 
-    create_dir("/dev/pts", DEFAULT_DIR_PERMS);
-    create_dir("/dev/shm", DEFAULT_DIR_PERMS);
+    create_dir("dev/pts", DEFAULT_DIR_PERMS);
+    create_dir("dev/shm", DEFAULT_DIR_PERMS);
 
-    CHECK(mount("devpts", "/dev/pts", "devpts",
+    CHECK(mount("devpts", SYSROOT "/dev/pts", "devpts",
                 MS_NOSUID | MS_NOEXEC,
                 "gid=5,mode=0620"));
-    CHECK(mount("tmpfs", "/dev/shm", "tmpfs",
+    CHECK(mount("tmpfs", SYSROOT "/dev/shm", "tmpfs",
                 MS_NODEV | MS_NOSUID | MS_NOEXEC,
                 NULL));
 
-    if (access("/dev/null", F_OK) != 0) {
-        CHECK(mknod("/dev/null",
+    bool do_sandbox = true;
+    for (int i = 1; i < argc; ++i) {
+        fprintf(stderr, "Command line argument: %s\n", argv[i]);
+        if (strcmp(argv[i], "sandbox=yes") == 0) {
+            do_sandbox = true;
+        } else if (strcmp(argv[i], "sandbox=no") == 0) {
+            fprintf(stderr, "WARNING: Disabling sandboxing.\n");
+            do_sandbox = false;
+        }
+    }
+    for (char **p = environ; *p; ++p) {
+        fprintf(stderr, "Environment variable: %s\n", *p);
+    }
+
+    if (nvidia_loaded) {
+        if (do_sandbox == false) {
+            fprintf(stderr, "Sandboxing is disabled, refusing to enable Nvidia GPU passthrough.\n");
+            fprintf(stderr, "Please re-run the container with sandboxing enabled or disable GPU passthrough.\n");
+            errno = 0;
+            CHECK_BOOL(0);
+        }
+        int nvidia_major = CHECK(find_device_major("nvidia-frontend"));
+        /* TODO: multi-card support needs more /dev/nvidia%d nodes */
+        res = mknodat(g_sysroot_fd, "dev/nvidia0", S_IFCHR | (0666 & 0777), nvidia_major << 8 | 0);
+        CHECK_BOOL(res == 0 || (res == -1 && errno == EEXIST));
+        res = mknodat(g_sysroot_fd, "dev/nvidiactl", S_IFCHR | (0666 & 0777), nvidia_major << 8 | 255);
+        CHECK_BOOL(res == 0 || (res == -1 && errno == EEXIST));
+        nvidia_major = CHECK(find_device_major("nvidia-uvm"));
+        res = mknodat(g_sysroot_fd, "dev/nvidia-uvm", S_IFCHR | (0666 & 0777), nvidia_major << 8 | 0);
+        CHECK_BOOL(res == 0 || (res == -1 && errno == EEXIST));
+    }
+
+    if (access(SYSROOT "/dev/null", F_OK) != 0) {
+        CHECK_BOOL(errno == ENOENT);
+        CHECK(mknod(SYSROOT "/dev/null",
                     MODE_RW_UGO | S_IFCHR,
                     makedev(1, 3)));
     }
-    if (access("/dev/ptmx", F_OK) != 0) {
-        CHECK(mknod("/dev/ptmx",
+    if (access(SYSROOT "/dev/ptmx", F_OK) != 0) {
+        CHECK_BOOL(errno == ENOENT);
+        CHECK(mknod(SYSROOT "/dev/ptmx",
                     MODE_RW_UGO | S_IFCHR,
                     makedev(5, 2)));
     }
 
+    setup_sandbox();
     setup_network();
     setup_agent_directories();
 
     block_signals();
+    if (do_sandbox) {
+        write_sys("/proc/sys/net/ipv4/ip_unprivileged_port_start", 0);
+        write_sys("/proc/sys/user/max_user_namespaces", 1);
+        get_namespace_fd();
+    }
     setup_sigfd();
 
     main_loop();

@@ -63,7 +63,6 @@ async fn run_process_with_output(
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
     notifications.process_died.notified().await;
-    notifications.output_available.notified().await;
     match ga.query_output(id, 1, 0, u64::MAX).await? {
         Ok(out) => {
             println!("Output:");
@@ -96,11 +95,10 @@ fn join_as_string<P: AsRef<Path>>(path: P, file: impl ToString) -> String {
 fn spawn_vm<'a, P: AsRef<Path>>(temp_path: P, mount_args: &'a [(&'a str, impl ToString)]) -> Child {
     let root_dir = get_root_dir();
     let project_dir = get_project_dir();
-    let runtime_dir = project_dir.join("poc").join("runtime");
     let init_dir = project_dir.join("init-container");
 
-    let mut cmd = Command::new("vmrt");
-    cmd.current_dir(runtime_dir).args([
+    let mut cmd = Command::new("qemu-system-x86_64");
+    cmd.current_dir(&init_dir).args([
         "-m",
         "256m",
         "-nographic",
@@ -113,9 +111,6 @@ fn spawn_vm<'a, P: AsRef<Path>>(temp_path: P, mount_args: &'a [(&'a str, impl To
         "-no-reboot",
         "-net",
         "none",
-        "-enable-kvm",
-        "-cpu",
-        "host",
         "-smp",
         "1",
         "-append",
@@ -126,7 +121,7 @@ fn spawn_vm<'a, P: AsRef<Path>>(temp_path: P, mount_args: &'a [(&'a str, impl To
         "virtio-rng-pci",
         "-chardev",
         format!(
-            "socket,path={},server,nowait,id=manager_cdev",
+            "socket,path={},server=true,wait=false,id=manager_cdev",
             temp_path.as_ref().join("manager.sock").display()
         )
         .as_str(),
@@ -212,6 +207,8 @@ async fn main() -> io::Result<()> {
         &["ls", "-al", "/mnt/mnt1/tag1"],
     )
     .await?;
+
+    run_process_with_output(&mut ga, &notifications, "/bin/mount", &["mount"]).await?;
 
     let fds = [
         None,
@@ -324,14 +321,14 @@ async fn main() -> io::Result<()> {
         .expect("Output query failed");
     println!("Big output 2: {}, expected 0", out.len());
 
-    // ga.quit().await?.expect("Quit failed");
-
     let id = ga
-        .run_entrypoint("/bin/sleep", &["sleep", "2"], None, 0, 0, &no_redir, None)
+        .run_entrypoint("/bin/sleep", &["sleep", "100"], None, 0, 0, &no_redir, None)
         .await?
         .expect("Run process failed");
     println!("Spawned process with id: {}", id);
     notifications.process_died.notified().await;
+
+    ga.quit().await?.expect("Quit failed");
 
     /* VM should quit now. */
     let e = child.wait().await.expect("failed to wait on child");
