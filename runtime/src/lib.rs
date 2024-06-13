@@ -71,7 +71,7 @@ pub struct Cli {
     inet_endpoint: Option<Url>,
     /// PCI device identifier
     #[structopt(long, env = "YA_RUNTIME_VM_PCI_DEVICE")]
-    pci_device: Option<String>,
+    pci_device: Option<Vec<String>>,
     #[structopt(flatten)]
     test_config: TestConfig,
 }
