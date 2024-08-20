@@ -208,7 +208,7 @@ jobs:
           VERSION=${TAGV_NAME#v}
           echo "::set-output name=tagv::${TAG_NAME}"
           echo "::set-output name=version::${VERSION}"
-      - uses: golemfactory/build-deb-action@v4
+      - uses: golemfactory/build-deb-action@v0.6
         id: deb
         with:
           debVersion: ${{ steps.version.outputs.version }}

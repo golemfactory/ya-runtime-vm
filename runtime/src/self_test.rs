@@ -23,7 +23,7 @@ const FILE_TEST_IMAGE: &str = "self-test.gvmi";
 const FILE_TEST_EXECUTABLE: &str = "ya-self-test";
 
 pub(crate) async fn test(
-    pci_device_id: Option<String>,
+    pci_device_id: Option<Vec<String>>,
     test_config: TestConfig,
 ) -> Result<(), Error> {
     run_self_test(verify_status, pci_device_id, test_config).await;
@@ -38,7 +38,7 @@ pub(crate) fn verify_status(status: anyhow::Result<Value>) -> anyhow::Result<Str
 
 pub(crate) async fn run_self_test<HANDLER>(
     handle_result: HANDLER,
-    pci_device_id: Option<String>,
+    pci_device_id: Option<Vec<String>>,
     test_config: TestConfig,
 ) where
     HANDLER: Fn(anyhow::Result<Value>) -> anyhow::Result<String>,
@@ -108,7 +108,7 @@ pub(crate) async fn run_self_test<HANDLER>(
     .await;
 }
 
-fn self_test_runtime(deployment: Deployment, pci_device_id: Option<String>) -> Runtime {
+fn self_test_runtime(deployment: Deployment, pci_device_id: Option<Vec<String>>) -> Runtime {
     let runtime_data = RuntimeData {
         deployment: Some(deployment),
         pci_device_id,
