@@ -2188,10 +2188,14 @@ int main(int argc, char **argv) {
                 MS_NOSUID | MS_NODEV,
                 "mode=0700,size=128M"));
 
-    CHECK(mkdir("/mnt/overlay/upper", S_IRWXU));
-    CHECK(mkdir("/mnt/overlay/work", S_IRWXU));
-
     CHECK(mount("/dev/vda", "/mnt/image", "squashfs", MS_RDONLY | MS_NODEV, ""));
+    {
+        struct stat statbuf;
+        CHECK(stat("/mnt/image", &statbuf));
+        CHECK(mkdir("/mnt/overlay/upper", statbuf.st_mode));
+        CHECK(mkdir("/mnt/overlay/work", statbuf.st_mode));
+    }
+
     if (access("/dev/vdb", R_OK) == 0) {
         CHECK(mkdir("/mnt/gpu-files", S_IRWXU));
         CHECK(mount("/dev/vdb", "/mnt/gpu-files", "squashfs", MS_RDONLY | MS_NODEV, ""));
@@ -2220,6 +2224,9 @@ int main(int argc, char **argv) {
     CHECK(mount("devtmpfs", SYSROOT "/dev", "devtmpfs",
                 MS_NOSUID,
                 "mode=0755,size=2M"));
+
+    CHECK(symlinkat("/proc/self/fd", AT_FDCWD, SYSROOT "/dev/fd"));
+
     CHECK(mount("tmpfs", SYSROOT "/tmp", "tmpfs",
                 MS_NOSUID,
                 "mode=0777"));
