@@ -2097,6 +2097,23 @@ static int find_device_major(const char *name) {
     return major;
 }
 
+static int nvidia_gpu_count() {
+    int counter;
+    int res;
+    char buf[sizeof "sys/class/drm/card000"];
+
+    for (counter = 0; counter < 256; counter++) {
+        res = snprintf(buf, sizeof buf, "sys/class/drm/card%d", counter);
+        CHECK_BOOL(res > 0);
+        CHECK_BOOL(res < (int)sizeof buf);
+        /* iterate as long as devices are there, nothing unloads/unbinds
+         * devices so there should be no holes in numbering */
+        if (faccessat(g_sysroot_fd, buf, F_OK, 0) != 0)
+            break;
+    }
+    return counter;
+}
+
 int main(int argc, char **argv) {
     CHECK_BOOL(setvbuf(stdin, NULL, _IONBF, BUFSIZ) == 0);
     CHECK_BOOL(setvbuf(stdout, NULL, _IONBF, BUFSIZ) == 0);
@@ -2232,6 +2249,7 @@ int main(int argc, char **argv) {
     }
 
     if (nvidia_loaded) {
+        char buf[sizeof "dev/nvidia000"];
         if (do_sandbox == false) {
             fprintf(stderr, "Sandboxing is disabled, refusing to enable Nvidia GPU passthrough.\n");
             fprintf(stderr, "Please re-run the container with sandboxing enabled or disable GPU passthrough.\n");
@@ -2239,9 +2257,13 @@ int main(int argc, char **argv) {
             CHECK_BOOL(0);
         }
         int nvidia_major = CHECK(find_device_major("nvidia-frontend"));
-        /* TODO: multi-card support needs more /dev/nvidia%d nodes */
-        res = mknodat(g_sysroot_fd, "dev/nvidia0", S_IFCHR | (0666 & 0777), nvidia_major << 8 | 0);
-        CHECK_BOOL(res == 0 || (res == -1 && errno == EEXIST));
+        int nvidia_count = nvidia_gpu_count();
+        for (int i = 0; i < nvidia_count; i++) {
+            res = snprintf(buf, sizeof buf, "dev/nvidia%d", i);
+            CHECK_BOOL(res >= (int)sizeof "dev/nvidia" && res < (int)sizeof buf);
+            res = mknodat(g_sysroot_fd, buf, S_IFCHR | (0666 & 0777), nvidia_major << 8 | i);
+            CHECK_BOOL(res == 0 || (res == -1 && errno == EEXIST));
+        }
         res = mknodat(g_sysroot_fd, "dev/nvidiactl", S_IFCHR | (0666 & 0777), nvidia_major << 8 | 255);
         CHECK_BOOL(res == 0 || (res == -1 && errno == EEXIST));
         nvidia_major = CHECK(find_device_major("nvidia-uvm"));

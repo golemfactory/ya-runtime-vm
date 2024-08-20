@@ -30,7 +30,7 @@ pub struct RuntimeData {
     pub inet: Option<ContainerEndpoint>,
     pub deployment: Option<Deployment>,
     pub ga: Option<Arc<Mutex<GuestAgent>>>,
-    pub pci_device_id: Option<String>,
+    pub pci_device_id: Option<Vec<String>>,
 }
 
 impl RuntimeData {
@@ -109,8 +109,10 @@ pub async fn start_vmrt(
     ]);
 
     if let Some(pci_device_id) = &data.pci_device_id {
-        cmd.arg("-device");
-        cmd.arg(format!("vfio-pci,host={}", pci_device_id).as_str());
+        for device_id in pci_device_id.iter() {
+            cmd.arg("-device");
+            cmd.arg(format!("vfio-pci,host={}", device_id).as_str());
+        }
     } else {
         cmd.arg("-vga");
         cmd.arg("none");
