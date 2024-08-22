@@ -165,7 +165,7 @@ async fn main() -> anyhow::Result<()> {
             .pid;
         log::info!("pid: {}", pid);
 
-        c.kill_process(server::KillProcess {
+        let _ = c.kill_process(server::KillProcess {
             pid,
             signal: 0, // TODO
         });
