@@ -9,6 +9,7 @@ use bollard_stubs::models::ContainerConfig;
 use futures::future::FutureExt;
 use futures::lock::Mutex;
 use futures::TryFutureExt;
+use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::env;
 use std::path::{Component, Path, PathBuf};
@@ -20,6 +21,8 @@ use tokio::{
     io::{self, AsyncWriteExt},
 };
 use url::Url;
+use uuid::Uuid;
+use ya_client_model::activity::exe_script_command::VolumeInfo;
 
 use crate::{
     cpu::CpuInfo,
@@ -27,7 +30,7 @@ use crate::{
     guest_agent_comm::{RedirectFdType, RemoteCommandResult},
     vmrt::{start_vmrt, RuntimeData},
 };
-use ya_runtime_sdk::runtime_api::deploy::ContainerEndpoint;
+use ya_runtime_sdk::runtime_api::deploy::{ContainerEndpoint, ContainerVolume};
 
 use ya_runtime_sdk::{
     runtime_api::{
@@ -72,6 +75,8 @@ pub struct Cli {
     /// PCI device identifier
     #[structopt(long, env = "YA_RUNTIME_VM_PCI_DEVICE")]
     pci_device: Option<Vec<String>>,
+    #[structopt(long, env = "YA_RUNTIME_VOLUME_OVERRIDE")]
+    volume_override: Option<String>,
     #[structopt(flatten)]
     test_config: TestConfig,
 }
@@ -253,8 +258,12 @@ async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<Option<serialize::
     let work_dir = normalize_path(&workdir).await?;
     let package_path = normalize_path(&cli.task_package.unwrap()).await?;
     let package_file = fs::File::open(&package_path).await?;
+    let volume_override = cli
+        .volume_override
+        .map(|vo_str| serde_json::from_str::<HashMap<String, VolumeInfo>>(&vo_str))
+        .transpose()?;
 
-    let deployment = Deployment::try_from_input(
+    let mut deployment = Deployment::try_from_input(
         package_file,
         cli.cpu_cores,
         (cli.mem_gib * 1024.) as usize,
@@ -262,6 +271,20 @@ async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<Option<serialize::
     )
     .await
     .or_err("Error reading package metadata")?;
+
+    if let Some(volume_override) = volume_override {
+        deployment.volumes.clear();
+
+        for (guest_path, vol_info) in volume_override {
+            // Only VolumeInfo::Override creates a hole in the FS for transfers.
+            if matches!(&vol_info, VolumeInfo::Override {}) {
+                deployment.volumes.push(ContainerVolume {
+                    name: format!("vol-{}", Uuid::new_v4()),
+                    path: guest_path,
+                });
+            }
+        }
+    }
 
     for vol in &deployment.volumes {
         fs::create_dir_all(work_dir.join(&vol.name)).await?;

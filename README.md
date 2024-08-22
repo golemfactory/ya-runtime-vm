@@ -21,12 +21,12 @@ Prerequisites:
   
     Recommendation: use the Rust toolchain installer from [https://rustup.rs/](https://rustup.rs/)
 
-- `musl-gcc`
+- `musl-gcc` and `gperf`
 
     On a Ubuntu system, execute in terminal:
 
     ```bash
-       sudo apt install musl musl-tools
+       sudo apt install musl musl-tools gperf
     ```
 
 Git checkout:
