@@ -153,7 +153,7 @@ async fn repack(
 
     let squashfs_image = "prekucki/squashfs-tools:latest";
     let squashfs_cont = "sqfs-tools";
-    let start_cmd = vec!["tail", "-f", "/dev/null"]; // prevent container from exiting
+    let start_cmd = ["tail", "-f", "/dev/null"]; // prevent container from exiting
     let options = ContainerOptions {
         image_name: squashfs_image.to_owned(),
         container_name: squashfs_cont.to_owned(),

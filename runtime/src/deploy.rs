@@ -72,7 +72,7 @@ impl Deployment {
             .env
             .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect())
-            .unwrap_or_else(Vec::new)
+            .unwrap_or_default()
     }
 }
 

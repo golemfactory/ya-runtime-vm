@@ -128,10 +128,7 @@ async fn main() -> anyhow::Result<()> {
     {
         let run = server::RunProcess {
             bin: "/bin/ls".to_string(),
-            args: vec!["ls", "-al", "."]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
+            args: ["ls", "-al", "."].iter().map(|s| s.to_string()).collect(),
             work_dir: "/".to_string(),
             stdout: None,
             stderr: None,
@@ -165,10 +162,12 @@ async fn main() -> anyhow::Result<()> {
             .pid;
         log::info!("pid: {}", pid);
 
-        let _ = c.kill_process(server::KillProcess {
+        let fut = c.kill_process(server::KillProcess {
             pid,
             signal: 0, // TODO
         });
+        std::mem::drop(fut);
+
         events.process_died(pid).notified().await;
     }
 
