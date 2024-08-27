@@ -102,46 +102,48 @@ pub async fn start_vmrt(
         "virtserialport,chardev=manager_cdev,name=manager_port",
         "-drive",
         format!(
-            "file={},cache=unsafe,readonly=on,format=raw,if=virtio",
+            "file={},cache=unsafe,readonly=on,format=raw,id=rootfs,if=none",
             deployment.task_package.display()
         )
         .as_str(),
+        "-device",
+        format!("virtio-blk-pci,drive=rootfs,serial=rootfs").as_str(),
         "-no-reboot",
     ]);
 
-    let mut vol_idx = 0;
-    let mut dev_idx = 0;
-    for DeploymentMount {
-        name,
-        guest_path,
-        mount,
-    } in &deployment.mounts
+    for (
+        vol_idx,
+        DeploymentMount {
+            name,
+            guest_path,
+            mount,
+        },
+    ) in deployment.mounts.iter().enumerate()
     {
         match mount {
             VolumeMount::Storage { errors, .. } => {
+                let errors = errors.as_deref().unwrap_or("continue");
+
                 let img_path = work_dir.join(name);
                 cmd.args([
                     "-drive",
                     format!(
-                        "file={},format=qcow2,media=disk,if=virtio",
+                        "file={},format=qcow2,media=disk,id=vol-{vol_idx},if=none",
                         img_path.display()
                     )
                     .as_str(),
+                    "-device",
+                    format!("virtio-blk-pci,drive=vol-{vol_idx},serial=vol-{vol_idx}").as_ref(),
                 ]);
-                kernel_cmdline.push_str(&match errors {
-                    None => format!(" vol-{vol_idx}={guest_path}:{dev_idx}"),
-                    Some(errors) => {
-                        format!(" vol-{vol_idx}={guest_path},errors={errors}:{dev_idx}")
-                    }
-                });
-                dev_idx += 1;
+                kernel_cmdline.push_str(&format!(" vol-{vol_idx}-path={guest_path}"));
+                kernel_cmdline.push_str(&format!(" vol-{vol_idx}-errors={errors}"));
             }
             VolumeMount::Ram { size } => {
                 let size = size.as_u64();
-                kernel_cmdline.push_str(&format!(" vol-{vol_idx}={guest_path},size={size}"));
+                kernel_cmdline.push_str(&format!(" vol-{vol_idx}-path={guest_path}"));
+                kernel_cmdline.push_str(&format!(" vol-{vol_idx}-size={size}"));
             }
         }
-        vol_idx += 1;
     }
 
     if let Some(pci_device_id) = &data.pci_device_id {
@@ -155,16 +157,16 @@ pub async fn start_vmrt(
     }
 
     if runtime_dir.join(FILE_NVIDIA_FILES).exists() {
-        cmd.arg("-drive");
-        cmd.arg(
+        cmd.args([
+            "-drive",
             format!(
-                "file={},cache=unsafe,readonly=on,format=raw,if=virtio",
+                "file={},cache=unsafe,readonly=on,format=raw,id=vol-nvidia,if=none",
                 runtime_dir.join(FILE_NVIDIA_FILES).display()
             )
             .as_str(),
-        );
-
-        kernel_cmdline.push_str(&format!(" nvidia=true"));
+            "-device",
+            format!("virtio-blk-pci,drive=vol-nvidia,serial=vol-nvidia").as_ref(),
+        ]);
     }
 
     cmd.args(["-append", &kernel_cmdline]);
