@@ -3,6 +3,7 @@ use futures::lock::Mutex;
 use notify::event::{AccessKind, AccessMode};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -10,14 +11,15 @@ use std::time::Duration;
 use tokio::fs;
 use tokio::sync::Notify;
 use uuid::Uuid;
+use ya_client_model::activity::exe_script_command::{VolumeInfo, VolumeMount};
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 use ya_runtime_sdk::runtime_api::server::RuntimeHandler;
 use ya_runtime_sdk::{runtime_api::server, server::Server, Context, Error, ErrorExt, EventEmitter};
 use ya_runtime_sdk::{ProcessStatus, RunProcess, RuntimeStatus};
 
-use crate::deploy::Deployment;
+use crate::deploy::{Deployment, DeploymentMount};
 use crate::vmrt::{runtime_dir, RuntimeData};
-use crate::{Runtime, TestConfig};
+use crate::{qcow2_min, Runtime, TestConfig};
 
 const FILE_TEST_IMAGE: &str = "self-test.gvmi";
 const FILE_TEST_EXECUTABLE: &str = "ya-self-test";
@@ -137,10 +139,39 @@ async fn self_test_deployment(
     let package_file = fs::File::open(package_path.clone())
         .await
         .or_err("Error reading package file")?;
-    let deployment =
-        Deployment::try_from_input(package_file, cpu_cores, mem_mib, package_path.clone())
-            .await
-            .or_err("Error reading package metadata")?;
+    let deployment = Deployment::try_from_input(
+        package_file,
+        cpu_cores,
+        mem_mib,
+        package_path.clone(),
+        HashMap::from_iter([
+            (
+                "/golem/storage".to_string(),
+                VolumeInfo::Mount(VolumeMount::Storage {
+                    size: "10gi".parse().unwrap(),
+                    preallocate: None,
+                    errors: Some("remount-ro".to_string()),
+                }),
+            ),
+            (
+                "/golem/storage2".to_string(),
+                VolumeInfo::Mount(VolumeMount::Storage {
+                    size: "10ti".parse().unwrap(),
+                    preallocate: Some("128ki".parse().unwrap()),
+                    errors: None,
+                }),
+            ),
+            (
+                "/".to_string(),
+                VolumeInfo::Mount(VolumeMount::Ram {
+                    size: "1gi".parse().unwrap(),
+                }),
+            ),
+        ]),
+    )
+    .await
+    .or_err("Error reading package metadata")?;
+
     for vol in &deployment.volumes {
         let vol_dir = work_dir.join(&vol.name);
         log::debug!("Creating volume dir: {vol_dir:?} for path {}", vol.path);
@@ -148,6 +179,30 @@ async fn self_test_deployment(
             .await
             .or_err("Failed to create volume dir")?;
     }
+
+    for DeploymentMount {
+        name,
+        mount,
+        guest_path,
+    } in &deployment.mounts
+    {
+        let VolumeMount::Storage {
+            size, preallocate, ..
+        } = mount
+        else {
+            continue;
+        };
+
+        let qcow2_dir = work_dir.join(name);
+        log::debug!(
+            "Creating qcow2 image: {qcow2_dir:?} for path {guest_path} with parameters {mount:?}"
+        );
+        let file = fs::File::create(qcow2_dir).await?;
+        let qcow2 =
+            qcow2_min::Qcow2Image::new(size.as_u64(), preallocate.unwrap_or_default().as_u64());
+        qcow2.write(file).await?;
+    }
+
     Ok(deployment)
 }
 

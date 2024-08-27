@@ -10,11 +10,12 @@ use futures::FutureExt;
 use tokio::io::AsyncBufReadExt;
 use tokio::{io, process, spawn};
 
+use ya_client_model::activity::exe_script_command::VolumeMount;
 use ya_runtime_sdk::runtime_api::server;
 use ya_runtime_sdk::server::ContainerEndpoint;
 use ya_runtime_sdk::{serialize, ErrorExt, EventEmitter};
 
-use crate::deploy::Deployment;
+use crate::deploy::{Deployment, DeploymentMount};
 use crate::guest_agent_comm::{GuestAgent, Notification};
 
 const DIR_RUNTIME: &str = "runtime";
@@ -70,6 +71,8 @@ pub async fn start_vmrt(
     let vpn_remote = data.vpn.clone();
     let inet_remote = data.inet.clone();
 
+    let mut kernel_cmdline = "console=ttyS0 panic=1".to_string();
+
     let mut cmd = process::Command::new(runtime_dir.join(FILE_RUNTIME));
     cmd.current_dir(&runtime_dir);
     cmd.args([
@@ -85,8 +88,6 @@ pub async fn start_vmrt(
         "host",
         "-smp",
         deployment.cpu_cores.to_string().as_str(),
-        "-append",
-        "console=ttyS0 panic=1",
         "-device",
         "virtio-serial",
         "-device",
@@ -108,6 +109,41 @@ pub async fn start_vmrt(
         "-no-reboot",
     ]);
 
+    let mut vol_idx = 0;
+    let mut dev_idx = 0;
+    for DeploymentMount {
+        name,
+        guest_path,
+        mount,
+    } in &deployment.mounts
+    {
+        match mount {
+            VolumeMount::Storage { errors, .. } => {
+                let img_path = work_dir.join(name);
+                cmd.args([
+                    "-drive",
+                    format!(
+                        "file={},format=qcow2,media=disk,if=virtio",
+                        img_path.display()
+                    )
+                    .as_str(),
+                ]);
+                kernel_cmdline.push_str(&match errors {
+                    None => format!(" vol-{vol_idx}={guest_path}:{dev_idx}"),
+                    Some(errors) => {
+                        format!(" vol-{vol_idx}={guest_path},errors={errors}:{dev_idx}")
+                    }
+                });
+                dev_idx += 1;
+            }
+            VolumeMount::Ram { size } => {
+                let size = size.as_u64();
+                kernel_cmdline.push_str(&format!(" vol-{vol_idx}={guest_path},size={size}"));
+            }
+        }
+        vol_idx += 1;
+    }
+
     if let Some(pci_device_id) = &data.pci_device_id {
         for device_id in pci_device_id.iter() {
             cmd.arg("-device");
@@ -127,7 +163,11 @@ pub async fn start_vmrt(
             )
             .as_str(),
         );
+
+        kernel_cmdline.push_str(&format!(" nvidia=true"));
     }
+
+    cmd.args(["-append", &kernel_cmdline]);
 
     let (vpn, inet) =
     // backward-compatibility mode

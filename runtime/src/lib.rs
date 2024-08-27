@@ -1,11 +1,13 @@
 pub mod cpu;
 pub mod deploy;
 pub mod guest_agent_comm;
+mod qcow2_min;
 mod response_parser;
 mod self_test;
 pub mod vmrt;
 
 use bollard_stubs::models::ContainerConfig;
+use deploy::DeploymentMount;
 use futures::future::FutureExt;
 use futures::lock::Mutex;
 use futures::TryFutureExt;
@@ -21,8 +23,7 @@ use tokio::{
     io::{self, AsyncWriteExt},
 };
 use url::Url;
-use uuid::Uuid;
-use ya_client_model::activity::exe_script_command::VolumeInfo;
+use ya_client_model::activity::exe_script_command::{VolumeInfo, VolumeMount};
 
 use crate::{
     cpu::CpuInfo,
@@ -30,7 +31,7 @@ use crate::{
     guest_agent_comm::{RedirectFdType, RemoteCommandResult},
     vmrt::{start_vmrt, RuntimeData},
 };
-use ya_runtime_sdk::runtime_api::deploy::{ContainerEndpoint, ContainerVolume};
+use ya_runtime_sdk::runtime_api::deploy::ContainerEndpoint;
 
 use ya_runtime_sdk::{
     runtime_api::{
@@ -261,33 +262,35 @@ async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<Option<serialize::
     let volume_override = cli
         .volume_override
         .map(|vo_str| serde_json::from_str::<HashMap<String, VolumeInfo>>(&vo_str))
-        .transpose()?;
+        .transpose()?
+        .unwrap_or_default();
 
-    let mut deployment = Deployment::try_from_input(
+    let deployment = Deployment::try_from_input(
         package_file,
         cli.cpu_cores,
         (cli.mem_gib * 1024.) as usize,
         package_path,
+        volume_override,
     )
     .await
     .or_err("Error reading package metadata")?;
 
-    if let Some(volume_override) = volume_override {
-        deployment.volumes.clear();
-
-        for (guest_path, vol_info) in volume_override {
-            // Only VolumeInfo::Override creates a hole in the FS for transfers.
-            if matches!(&vol_info, VolumeInfo::Override {}) {
-                deployment.volumes.push(ContainerVolume {
-                    name: format!("vol-{}", Uuid::new_v4()),
-                    path: guest_path,
-                });
-            }
-        }
-    }
-
     for vol in &deployment.volumes {
         fs::create_dir_all(work_dir.join(&vol.name)).await?;
+    }
+
+    for DeploymentMount { name, mount, .. } in &deployment.mounts {
+        let VolumeMount::Storage {
+            size, preallocate, ..
+        } = mount
+        else {
+            continue;
+        };
+
+        let file = fs::File::create(work_dir.join(name)).await?;
+        let qcow2 =
+            qcow2_min::Qcow2Image::new(size.as_u64(), preallocate.unwrap_or_default().as_u64());
+        qcow2.write(file).await?;
     }
 
     fs::OpenOptions::new()
