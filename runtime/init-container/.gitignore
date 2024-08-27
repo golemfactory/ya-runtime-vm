@@ -4,3 +4,4 @@ vmlinuz-virt
 init
 initramfs.cpio.gz
 squashfs_drive
+busybox/mkfs.ext2

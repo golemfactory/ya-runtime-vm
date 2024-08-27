@@ -22,6 +22,9 @@ KERNEL_SHA256 ?= f3f7ca3421c5232e260b2a8a741bbf72c21881006afcf790aa3bc938e226271
 HEADERS_URL ?= https://ya-runtime.s3-eu-west-1.amazonaws.com/vm/kernel/linux-headers-5.7.8-r0.apk
 HEADERS_SHA256 ?= 0b0f0c30be30ff367f5d1eaee227e919efc4b7f442bc03b3190c6e0d1a165362
 
+BUSYBOX := busybox
+MKFS_NAME := mkfs.ext2
+
 UNPACKED_KERNEL := unpacked_kernel
 UNPACKED_HEADERS := unpacked_headers
 LIBURING_SUBMODULE ?= liburing
@@ -94,6 +97,13 @@ uring: $(UNPACKED_HEADERS)
 	(cd $(LIBURING_SUBMODULE) && CC=$(CC) CXX=$(CXX) ./configure > /dev/null)
 	$(MAKE) -e CC=$(CC) -e CFLAGS=-I"$(CURDIR)/$(UNPACKED_HEADERS)/usr/include" -C "$(LIBURING_SUBMODULE)/src" all
 
+mkfs:
+	cd $(BUSYBOX); \
+	docker build -t busybox .; \
+	docker create --name busybox-tmp busybox; \
+	docker cp busybox-tmp:/busybox/busybox_MKFS_EXT2 $(MKFS_NAME); \
+	docker rm -f busybox-tmp
+
 SHELL := /bin/bash
 $(CURDIR)/$(LIBSECCOMP_SUBMODULE)/src/.libs/libseccomp.a $(CURDIR)/$(LIBSECCOMP_SUBMODULE)/include/seccomp.h: $(UNPACKED_HEADERS) $(LIBSECCOMP_SUBMODULE)
 	set -euo pipefail; \
@@ -106,7 +116,7 @@ $(CURDIR)/$(LIBSECCOMP_SUBMODULE)/src/.libs/libseccomp.a $(CURDIR)/$(LIBSECCOMP_
 vmlinuz-virt: $(UNPACKED_KERNEL)
 	cp $(UNPACKED_KERNEL)/boot/vmlinuz-virt .
 
-initramfs.cpio.gz: init $(UNPACKED_KERNEL)
+initramfs.cpio.gz: init mkfs $(UNPACKED_KERNEL)
 	$(RM) -rf initramfs
 	mkdir initramfs
 	cp $< initramfs
@@ -129,6 +139,7 @@ initramfs.cpio.gz: init $(UNPACKED_KERNEL)
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/core/failover.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/ipv6/ipv6.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/packet/af_packet.ko initramfs
+	cp $(BUSYBOX)/$(MKFS_NAME) initramfs
 	mkdir initramfs/$(NEW_ROOT)
 	set -euo pipefail; cd initramfs && find . | cpio --quiet -o -H newc -R 0:0 | gzip -9 > ../$@
 	$(RM) -rf initramfs
