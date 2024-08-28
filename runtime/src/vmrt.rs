@@ -160,12 +160,12 @@ pub async fn start_vmrt(
         cmd.args([
             "-drive",
             format!(
-                "file={},cache=unsafe,readonly=on,format=raw,id=vol-nvidia,if=none",
+                "file={},cache=unsafe,readonly=on,format=raw,id=nvidia-files,if=none",
                 runtime_dir.join(FILE_NVIDIA_FILES).display()
             )
             .as_str(),
             "-device",
-            format!("virtio-blk-pci,drive=vol-nvidia,serial=vol-nvidia").as_ref(),
+            format!("virtio-blk-pci,drive=nvidia-files,serial=nvidia-files").as_ref(),
         ]);
     }
 
