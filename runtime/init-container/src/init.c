@@ -69,6 +69,8 @@
 #define MTU_VPN 1220
 #define MTU_INET 65521
 
+#define MKFS "mkfs.ext2"
+
 static int g_sysroot_fd = AT_FDCWD;
 
 struct new_process_args {
@@ -2114,6 +2116,65 @@ static int nvidia_gpu_count() {
     return counter;
 }
 
+static void mkfs_storage() {
+    static const char *block_dir = "/sys/class/block";
+
+    DIR* ptr_dir = opendir(block_dir);
+    CHECK_BOOL(ptr_dir != NULL);
+
+    int len = offsetof(struct dirent, d_name) + fpathconf(dirfd(ptr_dir), _PC_NAME_MAX) + 1;
+    struct dirent *prev = malloc(len);
+    struct dirent *curr = NULL;
+    CHECK_BOOL(prev != NULL);
+
+    for(;;) {
+        CHECK(readdir_r(ptr_dir, prev, &curr));
+        if(curr == NULL) {
+            break;
+        }
+
+        // virtio-blk device names are vdX, ignore others.
+        if(strncmp(curr->d_name, "vd", 2) != 0) {
+            continue;
+        }
+
+        int vdx_fd = openat(dirfd(ptr_dir), curr->d_name, O_RDONLY | O_DIRECTORY);
+        CHECK_BOOL(vdx_fd != -1);
+
+        int serial_fd = openat(vdx_fd, "serial", O_RDONLY);
+        if(serial_fd == -1) {
+            fprintf(stderr, "virtio-blk %s/%s/serial doesn't exist, skip\n", block_dir, curr->d_name);
+            continue;
+        }
+
+        char serial[128];
+        int bytes_read = read(serial_fd, serial, 127);
+        CHECK_BOOL(bytes_read != -1);
+        serial[bytes_read] = '\0';
+
+        if(strncmp(serial, "vol-", 4) != 0) {
+            fprintf(stderr, "Found virtio-blk: %s/%s with SN=%s, skip\n", block_dir, curr->d_name, serial);
+            continue;
+        } else {
+            fprintf(stderr, "Found virtio-blk: %s/%s with SN=%s, format as ext2\n", block_dir, curr->d_name, serial);
+        }
+
+        char path[64];
+        CHECK_BOOL(snprintf(path, 64, "/dev/%s", curr->d_name) >= 6);
+
+        pid_t pid = fork();
+        CHECK_BOOL(pid != -1);
+
+        if(pid == 0) {
+            execl("/" MKFS, MKFS, path, (char*) NULL);
+        } else {
+            waitpid(pid, NULL, 0);
+        }
+    }
+
+    free(prev);
+}
+
 int main(int argc, char **argv) {
     CHECK_BOOL(setvbuf(stdin, NULL, _IONBF, BUFSIZ) == 0);
     CHECK_BOOL(setvbuf(stdout, NULL, _IONBF, BUFSIZ) == 0);
@@ -2126,6 +2187,10 @@ int main(int argc, char **argv) {
     create_dir("/dev", DEFAULT_DIR_PERMS);
     CHECK(mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID,
                 "mode=0755,size=2M"));
+    create_dir("/sys", DEFAULT_DIR_PERMS);
+    CHECK(mount("sysfs", "/sys", "sysfs",
+                MS_NODEV | MS_NOSUID | MS_NOEXEC,
+                NULL));
 
     load_module("/failover.ko");
     load_module("/virtio.ko");
@@ -2183,6 +2248,8 @@ int main(int argc, char **argv) {
     CHECK(mkdir("/mnt/overlay", S_IRWXU));
     CHECK(mkdir(SYSROOT, DEFAULT_DIR_PERMS));
 
+    mkfs_storage();
+
     // 'workdir' and 'upperdir' have to be on the same filesystem
     CHECK(mount("tmpfs", "/mnt/overlay", "tmpfs",
                 MS_NOSUID | MS_NODEV,
@@ -2196,7 +2263,7 @@ int main(int argc, char **argv) {
         CHECK(mkdir("/mnt/overlay/work", statbuf.st_mode));
     }
 
-    if (access("/dev/vdb", R_OK) == 0) {
+    if (access("/dev/vdb", R_OK) == 0 && false) {
         CHECK(mkdir("/mnt/gpu-files", S_IRWXU));
         CHECK(mount("/dev/vdb", "/mnt/gpu-files", "squashfs", MS_RDONLY | MS_NODEV, ""));
         CHECK(mount("overlay", SYSROOT, "overlay", MS_NODEV,
