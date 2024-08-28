@@ -2116,7 +2116,71 @@ static int nvidia_gpu_count() {
     return counter;
 }
 
-static void mkfs_storage() {
+static const char* environ_get(const char* name) {
+    int name_len = strlen(name);
+    for(int k = 0; environ[k] != NULL; k += 1) {
+        if(strncmp(environ[k], name, name_len) == 0 && environ[k][name_len] == '=') {
+            return environ[k] + name_len + 1;
+        }
+    }
+
+    return "NOT FOUND";
+}
+
+struct storage_node_t {
+    struct storage_node_t *next;
+    const char *path;
+    const char *dev;
+    const char *fstype;
+    const char *data;
+    unsigned long flags;
+};
+
+static void storage_append(
+    struct storage_node_t **node,
+    const char *path,
+    const char *dev,
+    const char *fstype,
+    const char *data,
+    unsigned long flags
+) {
+    while (*node != NULL) {
+        node = &(*node)->next;
+    }
+
+    *node = malloc(sizeof(struct storage_node_t));
+    CHECK(*node != 0);
+
+    (*node)->next = NULL;
+    (*node)->path = path;
+    (*node)->dev = dev;
+    (*node)->fstype = fstype;
+    (*node)->data = data;
+    (*node)->flags = flags;
+}
+
+static void do_mkfs(const char *path) {
+    pid_t pid = fork();
+    CHECK_BOOL(pid != -1);
+
+    if(pid == 0) {
+        // Hide stdout
+        int null = open("/dev/null", O_WRONLY);
+        dup2(null, 1);
+        close(null);
+
+        execl("/" MKFS, MKFS, path, (char*) NULL);
+        // exit will only run if execl fails
+        exit(1);
+    } else {
+        int status;
+        waitpid(pid, &status, 0);
+        fprintf(stderr, MKFS " finished with status = %d\n", status);
+        CHECK_BOOL(status == 0);
+    }
+}
+
+static void scan_storage(struct storage_node_t **list) {
     static const char *block_dir = "/sys/class/block";
 
     DIR* ptr_dir = opendir(block_dir);
@@ -2143,6 +2207,8 @@ static void mkfs_storage() {
 
         int serial_fd = openat(vdx_fd, "serial", O_RDONLY);
         if(serial_fd == -1) {
+            CHECK_BOOL(errno == ENOENT);
+
             fprintf(stderr, "virtio-blk %s/%s/serial doesn't exist, skip\n", block_dir, curr->d_name);
             continue;
         }
@@ -2152,6 +2218,16 @@ static void mkfs_storage() {
         CHECK_BOOL(bytes_read != -1);
         serial[bytes_read] = '\0';
 
+        char *dev_path = malloc(16);
+        CHECK_BOOL(snprintf(dev_path, 64, "/dev/%s", curr->d_name) >= 6);
+
+        // nvidia-files does not require formatting
+        if(strcmp(serial, "nvidia-files") == 0 || strcmp(serial, "rootfs") == 0) {
+            fprintf(stderr, "Storage volume %s [%s] to be mounted at %s with data=\"\".\n", serial, dev_path, "/");
+            storage_append(list, "/", dev_path, "squashfs", "", MS_RDONLY | MS_NODEV);
+            continue;
+        }
+
         if(strncmp(serial, "vol-", 4) != 0) {
             fprintf(stderr, "Found virtio-blk: %s/%s with SN=%s, skip\n", block_dir, curr->d_name, serial);
             continue;
@@ -2159,17 +2235,22 @@ static void mkfs_storage() {
             fprintf(stderr, "Found virtio-blk: %s/%s with SN=%s, format as ext2\n", block_dir, curr->d_name, serial);
         }
 
-        char path[64];
-        CHECK_BOOL(snprintf(path, 64, "/dev/%s", curr->d_name) >= 6);
+        do_mkfs(dev_path);
 
-        pid_t pid = fork();
-        CHECK_BOOL(pid != -1);
+        int path_env_len = strlen(serial) + strlen("-path") + 1;
+        char *path_env = malloc(path_env_len);
+        snprintf(path_env, path_env_len, "%s-path", serial);
+        const char *mount_point = environ_get(path_env);
 
-        if(pid == 0) {
-            execl("/" MKFS, MKFS, path, (char*) NULL);
-        } else {
-            waitpid(pid, NULL, 0);
-        }
+        int errors_env_len = strlen(serial) + strlen("-errors") + 1;
+        char *errors_env = malloc(errors_env_len);
+        snprintf(errors_env, errors_env_len, "%s-errors", serial);
+
+        // hacky but avoids an extra allocation
+        const char *data = environ_get(errors_env) - strlen("errors=");
+
+        fprintf(stderr, "Storage volume %s [%s] to be mounted at %s with data=\"%s\".\n", serial, dev_path, mount_point, data);
+        storage_append(list, mount_point, dev_path, "ext4", data, MS_NODEV);
     }
 
     free(prev);
@@ -2248,7 +2329,8 @@ int main(int argc, char **argv) {
     CHECK(mkdir("/mnt/overlay", S_IRWXU));
     CHECK(mkdir(SYSROOT, DEFAULT_DIR_PERMS));
 
-    mkfs_storage();
+    struct storage_node_t *storage = NULL;
+    scan_storage(&storage);
 
     // 'workdir' and 'upperdir' have to be on the same filesystem
     CHECK(mount("tmpfs", "/mnt/overlay", "tmpfs",
