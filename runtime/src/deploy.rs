@@ -78,7 +78,7 @@ impl Deployment {
                     if !volume_present {
                         volumes.push(ContainerVolume {
                             name: format!("vol-{}", Uuid::new_v4()),
-                            path: path,
+                            path,
                         });
                     }
 

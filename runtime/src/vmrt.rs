@@ -107,7 +107,7 @@ pub async fn start_vmrt(
         )
         .as_str(),
         "-device",
-        format!("virtio-blk-pci,drive=rootfs,serial=rootfs").as_str(),
+        "virtio-blk-pci,drive=rootfs,serial=rootfs".to_string().as_str(),
         "-no-reboot",
     ]);
 
@@ -165,7 +165,7 @@ pub async fn start_vmrt(
             )
             .as_str(),
             "-device",
-            format!("virtio-blk-pci,drive=nvidia-files,serial=nvidia-files").as_ref(),
+            "virtio-blk-pci,drive=nvidia-files,serial=nvidia-files".to_string().as_ref(),
         ]);
     }
 

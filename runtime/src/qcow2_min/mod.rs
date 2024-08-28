@@ -60,8 +60,8 @@ impl Qcow2Image {
         let block: &'static [u8] = &[0; BLOCK_SZ as usize];
 
         while file_sz >= BLOCK_SZ {
-            writer.write_all(&block).await?;
-            file_sz -= BLOCK_SZ as u64;
+            writer.write_all(block).await?;
+            file_sz -= BLOCK_SZ;
         }
         if file_sz > 0 {
             writer.write_all(&block[0..file_sz as usize]).await?;

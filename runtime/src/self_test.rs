@@ -35,7 +35,7 @@ impl RaiiDir {
 
 impl Drop for RaiiDir {
     fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).expect(&format!("Couldn't remove {}", self.0.display()));
+        std::fs::remove_dir_all(&self.0).unwrap_or_else(|_| panic!("Couldn't remove {}", self.0.display()));
     }
 }
 
