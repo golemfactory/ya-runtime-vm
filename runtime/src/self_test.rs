@@ -24,6 +24,21 @@ use crate::{qcow2_min, Runtime, TestConfig};
 const FILE_TEST_IMAGE: &str = "self-test.gvmi";
 const FILE_TEST_EXECUTABLE: &str = "ya-self-test";
 
+struct RaiiDir(PathBuf);
+
+impl RaiiDir {
+    pub fn create(path: PathBuf) -> std::io::Result<Self> {
+        std::fs::create_dir(&path)?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for RaiiDir {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).expect(&format!("Couldn't remove {}", self.0.display()));
+    }
+}
+
 pub(crate) async fn test(
     pci_device_id: Option<Vec<String>>,
     test_config: TestConfig,
@@ -45,7 +60,10 @@ pub(crate) async fn run_self_test<HANDLER>(
 ) where
     HANDLER: Fn(anyhow::Result<Value>) -> anyhow::Result<String>,
 {
-    let work_dir = std::env::temp_dir();
+    let tmp = std::env::temp_dir();
+    let work_dir = tmp.join(format!("ya-runtime-vm-self-test-{}", Uuid::new_v4()));
+    let work_dir_handle =
+        RaiiDir::create(work_dir.clone()).expect("Failed to create workdir for self-test");
 
     let deployment = self_test_deployment(&work_dir, &test_config)
         .await
@@ -62,7 +80,8 @@ pub(crate) async fn run_self_test<HANDLER>(
 
     let runtime = self_test_runtime(deployment, pci_device_id);
 
-    server::run_async(|emitter| async {
+    let work_dir = &work_dir;
+    server::run_async(|emitter| async move {
         let ctx = Context::try_new().expect("Creates runtime context");
 
         log::info!("Starting runtime");
@@ -100,8 +119,9 @@ pub(crate) async fn run_self_test<HANDLER>(
         log::debug!("Deleting output files");
         std::fs::remove_dir_all(output_dir).expect("Removes self-test output dir");
 
+        // the server refuses to stop by itself; force quit
         tokio::spawn(async move {
-            // the server refuses to stop by itself; force quit
+            drop(work_dir_handle);
             std::process::exit(0);
         });
 
@@ -148,7 +168,7 @@ async fn self_test_deployment(
             (
                 "/golem/storage".to_string(),
                 VolumeInfo::Mount(VolumeMount::Storage {
-                    size: "10gi".parse().unwrap(),
+                    size: "1mi".parse().unwrap(),
                     preallocate: None,
                     errors: Some("remount-ro".to_string()),
                 }),
@@ -156,7 +176,7 @@ async fn self_test_deployment(
             (
                 "/golem/storage2".to_string(),
                 VolumeInfo::Mount(VolumeMount::Storage {
-                    size: "10ti".parse().unwrap(),
+                    size: "10mi".parse().unwrap(),
                     preallocate: Some("128ki".parse().unwrap()),
                     errors: None,
                 }),
