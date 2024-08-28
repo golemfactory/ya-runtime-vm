@@ -22,7 +22,6 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <sys/random.h>
 #include <sys/sendfile.h>
 #include <unistd.h>
 #include <inttypes.h>
@@ -31,7 +30,6 @@
 #include <linux/capability.h>
 #include <sched.h>
 #include <time.h>
-#include <glob.h>
 #include <dirent.h>
 
 #include "communication.h"
@@ -41,6 +39,7 @@
 #include "proto.h"
 #include "forward.h"
 #include "init-seccomp.h"
+
 #define SYSROOT "/mnt/newroot"
 
 #define CONTAINER_OF(ptr, type, member) (type*)((char*)(ptr) - offsetof(type, member))
@@ -136,7 +135,6 @@ static noreturn void die(void) {
     _x;                                                                 \
 })
 
-
 #define CHECK(x) ({                                                     \
     __typeof__(x) _x = (x);                                             \
     if (_x == -1) {                                                     \
@@ -148,14 +146,14 @@ static noreturn void die(void) {
 #pragma GCC poison _x
 
 static void load_module(const char* path) {
-    int fd = CHECK(open(path, O_RDONLY | O_CLOEXEC));
+    const int fd = CHECK(open(path, O_RDONLY | O_CLOEXEC));
     CHECK_BOOL(syscall(SYS_finit_module, fd, "", 0) == 0);
     CHECK_BOOL(close(fd) == 0);
 }
 
-int make_nonblocking(int fd) {
+int make_nonblocking(const int fd) {
     errno = 0;
-    int flags = fcntl(fd, F_GETFL);
+    const int flags = fcntl(fd, F_GETFL);
     if (flags == -1 && errno) {
         return -1;
     }
@@ -179,7 +177,7 @@ int make_cloexec(int fd) {
 }
 */
 
-static int open_relative(const char *path, uint64_t flags, uint64_t mode) {
+static int open_relative(const char *path, const uint64_t flags, const uint64_t mode) {
     /*
      * Arch's musl 1.2.4-1 doesn't include <linux/openat2.h>, so
      * open-code the parts that are needed.
@@ -188,12 +186,11 @@ static int open_relative(const char *path, uint64_t flags, uint64_t mode) {
         uint64_t flags;
         uint64_t mode;
         uint64_t resolve;
-    } how;
-    memset(&how, 0, sizeof how);
+    } how = {};
     how.flags = flags | O_NOCTTY | O_CLOEXEC;
     how.mode = mode;
     how.resolve = 0x10 /* RESOLVE_IN_ROOT */;
-    long r = syscall(SYS_openat2, g_sysroot_fd, path, &how, sizeof how);
+    const long r = syscall(SYS_openat2, g_sysroot_fd, path, &how, sizeof how);
     CHECK_BOOL(r >= -1 && r <= INT_MAX);
     return r;
 }
@@ -219,16 +216,16 @@ static void cleanup_fd_desc(struct redir_fd_desc* fd_desc) {
     fd_desc->type = REDIRECT_FD_INVALID;
 }
 
-static bool redir_buffers_empty(struct redir_fd_desc *redirs, size_t len) {
+static bool redir_buffers_empty(const struct redir_fd_desc *redirs, const size_t len) {
     for (size_t fd = 0; fd < len; ++fd) {
         switch (redirs[fd].type) {
-            case REDIRECT_FD_FILE:;
-                int this_fd = open_relative(redirs[fd].path, O_RDONLY, 0);
+            case REDIRECT_FD_FILE:
+                const int this_fd = open_relative(redirs[fd].path, O_RDONLY, 0);
                 if (this_fd == -1) {
                     continue;
                 }
                 struct stat statbuf;
-                int res = fstat(this_fd, &statbuf);
+                const int res = fstat(this_fd, &statbuf);
                 close(this_fd);
                 if (res != 0) {
                     continue;
@@ -263,8 +260,8 @@ struct exit_reason {
     uint8_t type;
 };
 
-static void send_process_died(uint64_t id, struct exit_reason reason) {
-    struct msg_hdr resp = {
+static void send_process_died(const uint64_t id, const struct exit_reason reason) {
+    const struct msg_hdr resp = {
         .msg_id = 0,
         .type = NOTIFY_PROCESS_DIED,
     };
@@ -275,7 +272,7 @@ static void send_process_died(uint64_t id, struct exit_reason reason) {
     CHECK(writen(g_cmds_fd, &reason.type, sizeof(reason.type)));
 }
 
-static struct exit_reason encode_status(int status, int type) {
+static struct exit_reason encode_status(const int status, const int type) {
     struct exit_reason exit_reason;
 
     switch (type) {
@@ -293,7 +290,7 @@ static struct exit_reason encode_status(int status, int type) {
             die();
     }
 
-    exit_reason.status = (status & 0xff);
+    exit_reason.status = status & 0xff;
 
     return exit_reason;
 }
@@ -317,7 +314,7 @@ static void handle_sigchld(void) {
         die();
     }
 
-    pid_t child_pid = (pid_t)siginfo.ssi_pid;
+    const pid_t child_pid = siginfo.ssi_pid;
     if (child_pid == global_zombie_pid) {
         /* This process is deliberately kept as a zombie, ignore it */
         return;
@@ -330,7 +327,7 @@ static void handle_sigchld(void) {
         return;
     }
 
-    pid_t w_pid = waitpid(child_pid, NULL, WNOHANG);
+    const pid_t w_pid = waitpid(child_pid, NULL, WNOHANG);
     if (w_pid != child_pid) {
         fprintf(stderr, "Error at waitpid: %d: %m\n", w_pid);
         return;
@@ -374,16 +371,15 @@ static void setup_sigfd(void) {
     g_sig_fd = CHECK(signalfd(g_sig_fd, &set, SFD_CLOEXEC));
 }
 
-static int create_dir_path(char* path, int perms, int *out_fd) {
+static int create_dir_path(char *path, const int perms, int *out_fd) {
     assert(path[0] == '/');
 
-    char* next = path;
+    char *next = path;
     int fd = g_sysroot_fd;
     int rc = -1;
-    char *prev;
     do {
         next++;
-        prev = next;
+        char *prev = next;
         next = strchr(next, '/');
         if (next != NULL) {
             *next = '\0';
@@ -393,18 +389,18 @@ static int create_dir_path(char* path, int perms, int *out_fd) {
             errno = EINVAL;
             goto fail;
         }
-        int ret = mkdirat(fd, prev, perms);
+        const int ret = mkdirat(fd, prev, perms);
         if (ret != 0 && errno != EEXIST) {
-            int tmp = errno;
+            const int tmp = errno;
             assert(errno != EBADF);
             fprintf(stderr, "mkdirat() failed: %m\n");
             errno = tmp;
             goto fail;
         }
 
-        int new_fd = openat(fd, prev, O_DIRECTORY | O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        const int new_fd = openat(fd, prev, O_DIRECTORY | O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
         if (new_fd == -1) {
-            int tmp = errno;
+            const int tmp = errno;
             assert(tmp != EBADF);
             fprintf(stderr, "openat() failed: %m\n");
             errno = tmp;
@@ -422,7 +418,7 @@ static int create_dir_path(char* path, int perms, int *out_fd) {
     }
 fail:
     if (fd != g_sysroot_fd) {
-        int save = errno;
+        const int save = errno;
         close(fd);
         errno = save;
     }
@@ -430,7 +426,7 @@ fail:
 }
 
 static void setup_agent_directories(void) {
-    char* path = strdup(OUTPUT_PATH_PREFIX);
+    char *path = strdup(OUTPUT_PATH_PREFIX);
     if (!path) {
         fprintf(stderr, "setup_agent_directories OOM\n");
         die();
@@ -441,7 +437,7 @@ static void setup_agent_directories(void) {
     free(path);
 }
 
-static int add_network_hosts(char *entries[][2], int n) {
+static int add_network_hosts(char *entries[][2], const int n) {
     FILE *f;
     if ((f = fopen(SYSROOT "/etc/hosts", "a")) == 0) {
         return -1;
@@ -466,7 +462,7 @@ static int add_network_hosts(char *entries[][2], int n) {
     return 0;
 }
 
-static int set_network_ns(char *entries[], int n) {
+static int set_network_ns(char *entries[], const int n) {
     FILE *f;
     if ((f = fopen(SYSROOT "/etc/resolv.conf", "w")) == 0) {
         return -1;
@@ -483,7 +479,7 @@ static int set_network_ns(char *entries[], int n) {
     return 0;
 }
 
-int write_sys(char *path, size_t value) {
+int write_sys(const char *path, const size_t value) {
     FILE *f;
     if ((f = fopen(path, "w")) == 0) {
         return -1;
@@ -527,7 +523,7 @@ static void setup_network(void) {
 
     // FIXME: VPORT_NET and VPORT_INET are only present when supervised by a legacy ExeUnit
     if (access(VPORT_NET, F_OK) == 0) {
-        int vpn_sz = 4 * (MTU_VPN + 14);
+        const int vpn_sz = 4 * (MTU_VPN + 14);
 
         g_vpn_fd = CHECK(open(VPORT_NET, O_RDWR | O_CLOEXEC));
         g_vpn_tap_fd = CHECK(net_create_tap(g_vpn_tap_name));
@@ -540,7 +536,7 @@ static void setup_network(void) {
     }
 
     if (access(VPORT_INET, F_OK) == 0) {
-        int inet_sz = MTU_INET + 14;
+        const int inet_sz = MTU_INET + 14;
 
         g_inet_fd = CHECK(open(VPORT_INET, O_RDWR | O_CLOEXEC));
         g_inet_tap_fd = CHECK(net_create_tap(g_inet_tap_name));
@@ -557,64 +553,64 @@ static void stop_network(void) {
     fwd_stop();
 }
 
-static void send_response_hdr(msg_id_t msg_id, enum GUEST_MSG_TYPE type) {
-    struct msg_hdr resp = {
+static void send_response_hdr(const msg_id_t msg_id, const enum GUEST_MSG_TYPE type) {
+    const struct msg_hdr resp = {
         .msg_id = msg_id,
         .type = type,
     };
     CHECK(writen(g_cmds_fd, &resp, sizeof(resp)));
 }
 
-static void send_response_ok(msg_id_t msg_id) {
+static void send_response_ok(const msg_id_t msg_id) {
     send_response_hdr(msg_id, RESP_OK);
 }
 
-static void send_response_err(msg_id_t msg_id, uint32_t ret_val) {
+static void send_response_err(const msg_id_t msg_id, const uint32_t ret_val) {
     send_response_hdr(msg_id, RESP_ERR);
     CHECK(writen(g_cmds_fd, &ret_val, sizeof(ret_val)));
 }
 
-static void send_response_u64(msg_id_t msg_id, uint64_t ret_val) {
+static void send_response_u64(const msg_id_t msg_id, const uint64_t ret_val) {
     send_response_hdr(msg_id, RESP_OK_U64);
     CHECK(writen(g_cmds_fd, &ret_val, sizeof(ret_val)));
 }
 
-static void send_response_bytes(msg_id_t msg_id, const char* buf, size_t len) {
+static void send_response_bytes(const msg_id_t msg_id, const char *buf, const size_t len) {
     send_response_hdr(msg_id, RESP_OK_BYTES);
     CHECK(send_bytes(g_cmds_fd, buf, len));
 }
 
-static void send_response_cyclic_buffer(msg_id_t msg_id, struct cyclic_buffer* cb, size_t len) {
+static void send_response_cyclic_buffer(const msg_id_t msg_id, struct cyclic_buffer *cb, const size_t len) {
     send_response_hdr(msg_id, RESP_OK_BYTES);
     CHECK(send_bytes_cyclic_buffer(g_cmds_fd, cb, len));
 }
 
-static noreturn void handle_quit(msg_id_t msg_id) {
+static noreturn void handle_quit(const msg_id_t msg_id) {
     send_response_ok(msg_id);
     die();
 }
 
-static int add_epoll_fd_desc(struct redir_fd_desc* redir_fd_desc,
-                             int fd,
-                             int src_fd,
-                             struct epoll_fd_desc** epoll_fd_desc_ptr) {
-    struct epoll_fd_desc* epoll_fd_desc = malloc(sizeof(*epoll_fd_desc));
+static int add_epoll_fd_desc(struct redir_fd_desc *redir_fd_desc,
+                             const int fd,
+                             const int src_fd,
+                             struct epoll_fd_desc **epoll_fd_desc_ptr) {
+    struct epoll_fd_desc *epoll_fd_desc = malloc(sizeof(*epoll_fd_desc));
     if (!epoll_fd_desc) {
         return -1;
     }
 
-    epoll_fd_desc->type = (src_fd == 0) ? EPOLL_FD_OUT : EPOLL_FD_IN;
+    epoll_fd_desc->type = src_fd == 0 ? EPOLL_FD_OUT : EPOLL_FD_IN;
     epoll_fd_desc->fd = fd;
     epoll_fd_desc->src_fd = src_fd;
     epoll_fd_desc->data = redir_fd_desc;
 
     struct epoll_event event = {
-        .events = (src_fd == 0) ? EPOLLOUT : EPOLLIN,
+        .events = src_fd == 0 ? EPOLLOUT : EPOLLIN,
         .data.ptr = epoll_fd_desc,
     };
 
     if (epoll_ctl(g_epoll_fd, EPOLL_CTL_ADD, fd, &event) < 0) {
-        int tmp = errno;
+        const int tmp = errno;
         free(epoll_fd_desc);
         errno = tmp;
         return -1;
@@ -624,7 +620,6 @@ static int add_epoll_fd_desc(struct redir_fd_desc* redir_fd_desc,
         *epoll_fd_desc_ptr = epoll_fd_desc;
     }
     return 0;
-
 }
 
 static int del_epoll_fd_desc(struct epoll_fd_desc* epoll_fd_desc) {
@@ -637,7 +632,7 @@ static int del_epoll_fd_desc(struct epoll_fd_desc* epoll_fd_desc) {
 
 /* Assumes fd is either 0, 1 or 2.
  * Returns whether call was successful (setting errno on failures). */
-static bool redirect_fd_to_path(int fd, const char* path) {
+static bool redirect_fd_to_path(const int fd, const char *path) {
     assert(fd == 0 || fd == 1 || fd == 2);
     if (path[0] != '/' || path[1] == '/') {
         errno = EINVAL;
@@ -658,13 +653,13 @@ static bool redirect_fd_to_path(int fd, const char* path) {
 
     if (source_fd != fd) {
         if (dup2(source_fd, fd) < 0) {
-            int tmp_errno = errno;
+            const int tmp_errno = errno;
             (void)close(source_fd);
             errno = tmp_errno;
             return false;
         }
         if (close(source_fd) < 0) {
-            int tmp_errno = errno;
+            const int tmp_errno = errno;
             (void)close(fd);
             errno = tmp_errno;
             return false;
@@ -682,11 +677,12 @@ static int child_pipe = -1;
                   CLONE_NEWNS | /* new mount namespace */ \
                   0)
 
-static int capset(cap_user_header_t hdrp, cap_user_data_t datap) {
+static int capset(const cap_user_header_t hdrp, const cap_user_data_t datap) {
     return syscall(SYS_capset, hdrp, datap);
 }
+
 static noreturn void child_wrapper(int parent_pipe[2],
-                                   struct new_process_args* new_proc_args,
+                                   const struct new_process_args *new_proc_args,
                                    struct redir_fd_desc fd_descs[3]) {
     child_pipe = parent_pipe[1];
 #define MASSIVEDEBUGGING
@@ -751,8 +747,8 @@ static noreturn void child_wrapper(int parent_pipe[2],
         }
     }
     if (global_pidfd != -1) {
-        int low_fd = global_userns_fd > global_mountns_fd ? global_mountns_fd : global_userns_fd;
-        int high_fd = global_userns_fd > global_mountns_fd ? global_userns_fd : global_mountns_fd;
+        const int low_fd = global_userns_fd > global_mountns_fd ? global_mountns_fd : global_userns_fd;
+        const int high_fd = global_userns_fd > global_mountns_fd ? global_userns_fd : global_mountns_fd;
         if (low_fd < 3)
             abort();
         if (low_fd > 3 && syscall(SYS_close_range, 3, (unsigned int)low_fd - 1, 0) != 0) {
@@ -803,12 +799,12 @@ static noreturn void child_wrapper(int parent_pipe[2],
         }
     }
 
-    gid_t gid = new_proc_args->gid;
+    const gid_t gid = new_proc_args->gid;
     if (setresgid(gid, gid, gid) < 0) {
         goto out;
     }
 
-    uid_t uid = new_proc_args->uid;
+    const uid_t uid = new_proc_args->uid;
     if (setresuid(uid, uid, uid) < 0) {
         goto out;
     }
@@ -863,12 +859,12 @@ static noreturn void child_wrapper(int parent_pipe[2],
                 // case CAP_SYSLOG:
                 case CAP_WAKE_ALARM:
                 {
-                    data[i / 32].permitted |= (UINT32_C(1) << (i % 32));
-                    data[i / 32].effective |= (UINT32_C(1) << (i % 32));
+                    data[i / 32].permitted |= UINT32_C(1) << i % 32;
+                    data[i / 32].effective |= UINT32_C(1) << i % 32;
                     break;
                 }
-                default:;
-                    int res = prctl(PR_CAPBSET_DROP, i);
+                default:
+                    const int res = prctl(PR_CAPBSET_DROP, i);
                     if (res != 0 && (res != -1 && errno == EINVAL))
                         goto out;
             }
@@ -882,7 +878,7 @@ static noreturn void child_wrapper(int parent_pipe[2],
     /* If execve returns we know an error happened. */
     (void)execve(new_proc_args->bin,
                  new_proc_args->argv,
-                 new_proc_args->envp ?: environ);
+                 new_proc_args->envp ? NULL : environ);
 
 
 out:
@@ -901,14 +897,14 @@ static uint64_t get_next_id(void) {
     return ++id;
 }
 
-static int create_process_fds_dir(uint64_t id) {
+static int create_process_fds_dir(const uint64_t id) {
     char* path = NULL;
     if (asprintf(&path, OUTPUT_PATH_PREFIX "/%llu", id) < 0) {
         return -1;
     }
 
     if (create_dir_path(path, S_IRWXU, NULL) < 0) {
-        int tmp = errno;
+        const int tmp = errno;
         free(path);
         errno = tmp;
         return -1;
@@ -918,7 +914,7 @@ static int create_process_fds_dir(uint64_t id) {
     return 0;
 }
 
-static char* construct_output_path(uint64_t id, unsigned int fd) {
+static char* construct_output_path(const uint64_t id, const unsigned int fd) {
     char* path = NULL;
     if (asprintf(&path, OUTPUT_PATH_PREFIX "/%llu/%u", id, fd) < 0) {
         return NULL;
@@ -928,7 +924,7 @@ static char* construct_output_path(uint64_t id, unsigned int fd) {
 
 // This is recursive, but will only ever run on trusted input.
 // FIXME: get this fixed in upstream Linux.
-static void copy_initramfs_recursive(int dirfd, int newdirfd, const char *skip_name) {
+static void copy_initramfs_recursive(const int dirfd, const int newdirfd, const char *skip_name) {
     CHECK_BOOL(newdirfd != dirfd);
     DIR *d = fdopendir(dirfd);
     CHECK_BOOL(d != NULL);
@@ -965,10 +961,10 @@ static void copy_initramfs_recursive(int dirfd, int newdirfd, const char *skip_n
             }
             case S_IFREG: {
                 uint64_t size = statbuf.st_size;
-                int srcfd = CHECK(openat(dirfd, entry->d_name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC));
-                int dstfd = CHECK(openat(newdirfd, entry->d_name, O_WRONLY | O_NOFOLLOW | O_CLOEXEC | O_CREAT, statbuf.st_mode & 07777));
+                const int srcfd = CHECK(openat(dirfd, entry->d_name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC));
+                const int dstfd = CHECK(openat(newdirfd, entry->d_name, O_WRONLY | O_NOFOLLOW | O_CLOEXEC | O_CREAT, statbuf.st_mode & 07777));
                 while (size > 0) {
-                    size_t res = (size_t)CHECK(sendfile(dstfd, srcfd, NULL, size > SIZE_MAX ? SIZE_MAX : size));
+                    const size_t res = CHECK(sendfile(dstfd, srcfd, NULL, size > SIZE_MAX ? SIZE_MAX : size));
                     size -= res;
                 }
                 close(dstfd);
@@ -976,9 +972,9 @@ static void copy_initramfs_recursive(int dirfd, int newdirfd, const char *skip_n
                 break;
             }
             case S_IFDIR: {
-                int old_child_dirfd = CHECK(openat(dirfd, entry->d_name, O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC | O_RDONLY));
+                const int old_child_dirfd = CHECK(openat(dirfd, entry->d_name, O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC | O_RDONLY));
                 CHECK(mkdirat(newdirfd, entry->d_name, statbuf.st_mode & 07777));
-                int new_child_dirfd = CHECK(openat(newdirfd, entry->d_name, O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC | O_RDONLY));
+                const int new_child_dirfd = CHECK(openat(newdirfd, entry->d_name, O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC | O_RDONLY));
                 copy_initramfs_recursive(old_child_dirfd, new_child_dirfd, "");
                 break;
             }
@@ -993,11 +989,11 @@ static void copy_initramfs_recursive(int dirfd, int newdirfd, const char *skip_n
 }
 
 static void copy_initramfs(void) {
-    int rootfd = CHECK(open("/", O_DIRECTORY | O_NOFOLLOW | O_RDONLY | O_CLOEXEC));
+    const int rootfd = CHECK(open("/", O_DIRECTORY | O_NOFOLLOW | O_RDONLY | O_CLOEXEC));
     struct stat stats;
     CHECK(fstat(rootfd, &stats));
     CHECK_BOOL(mount("", "/" NEW_ROOT, "tmpfs", 0, "") == 0);
-    int newdirfd = CHECK(open("/" NEW_ROOT, O_DIRECTORY | O_NOFOLLOW | O_RDONLY | O_CLOEXEC));
+    const int newdirfd = CHECK(open("/" NEW_ROOT, O_DIRECTORY | O_NOFOLLOW | O_RDONLY | O_CLOEXEC));
     copy_initramfs_recursive(rootfd, newdirfd, NEW_ROOT);
     CHECK_BOOL(chdir("/" NEW_ROOT) == 0);
     CHECK_BOOL(mount(".", "/", NULL, MS_MOVE, NULL) == 0);
@@ -1005,7 +1001,7 @@ static void copy_initramfs(void) {
     CHECK_BOOL(mount(NULL, "/", NULL, MS_SHARED, NULL) == 0);
 }
 
-static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
+static uint32_t spawn_new_process(const struct new_process_args *new_proc_args,
                                   struct redir_fd_desc fd_descs[3],
                                   uint64_t* id) {
     uint32_t ret = 0;
@@ -1060,7 +1056,7 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
                         fprintf(stderr, "Cannot construct output path: %m\n");
                         goto out_err;
                     }
-                    int tmp_fd = open_relative(proc_desc->redirs[fd].path,
+                    const int tmp_fd = open_relative(proc_desc->redirs[fd].path,
                                       O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOCTTY,
                                       S_IRWXU);
                     if (tmp_fd < 0 || close(tmp_fd) < 0) {
@@ -1096,7 +1092,8 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
         ret = errno;
         fprintf(stderr, "Failed to fork: %m\n");
         goto out_err;
-    } else if (p == 0) {
+    }
+    if (p == 0) {
         child_wrapper(status_pipe, new_proc_args, proc_desc->redirs);
     }
 
@@ -1104,12 +1101,13 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
     status_pipe[1] = -1;
 
     char c;
-    ssize_t x = read(status_pipe[0], &c, sizeof(c));
+    const ssize_t x = read(status_pipe[0], &c, sizeof(c));
     if (x < 0) {
         ret = errno;
         fprintf(stderr, "Failed to read from pipe: %m\n");
         goto out_err;
-    } else if (x > 0) {
+    }
+    if (x > 0) {
         fprintf(stderr, "Failed to spawn process\n");
         /* Process failed to spawn. */
         int status = 0;
@@ -1126,7 +1124,6 @@ static uint32_t spawn_new_process(struct new_process_args* new_proc_args,
 
     CHECK(close(status_pipe[0]));
     status_pipe[0] = -1;
-
 
     for (size_t fd = 0; fd < 3; ++fd) {
         if (proc_desc->redirs[fd].type == REDIRECT_FD_PIPE_BLOCKING
@@ -1187,8 +1184,8 @@ out_err:
     return ret;
 }
 
-static bool is_fd_buf_size_valid(size_t size) {
-    return size > 0 && (size % PAGE_SIZE) == 0;
+static bool is_fd_buf_size_valid(const size_t size) {
+    return size > 0 && size % PAGE_SIZE == 0;
 }
 
 static uint32_t parse_fd_redir(struct redir_fd_desc fd_descs[3]) {
@@ -1237,7 +1234,7 @@ static uint32_t parse_fd_redir(struct redir_fd_desc fd_descs[3]) {
     return 0;
 }
 
-static void handle_run_process(msg_id_t msg_id) {
+static void handle_run_process(const msg_id_t msg_id) {
     bool done = false;
     uint32_t ret = 0;
     struct new_process_args new_proc_args = {
@@ -1285,7 +1282,7 @@ static void handle_run_process(msg_id_t msg_id) {
                 /* This error is recoverable - we report the first one found. We
                  * still need to consume the rest of sub-messages to keep
                  * the state consistent though. */
-                uint32_t tmp_ret = parse_fd_redir(fd_descs);
+                const uint32_t tmp_ret = parse_fd_redir(fd_descs);
                 if (!ret) {
                     ret = tmp_ret;
                 }
@@ -1333,7 +1330,7 @@ out:
     }
 }
 
-static uint32_t do_kill_process(uint64_t id) {
+static uint32_t do_kill_process(const uint64_t id) {
     struct process_desc* proc_desc = find_process_by_id(id);
     if (!proc_desc) {
         return EINVAL;
@@ -1350,7 +1347,7 @@ static uint32_t do_kill_process(uint64_t id) {
     return 0;
 }
 
-static void handle_kill_process(msg_id_t msg_id) {
+static void handle_kill_process(const msg_id_t msg_id) {
     bool done = false;
     uint32_t ret = 0;
     uint64_t id = 0;
@@ -1407,7 +1404,7 @@ static uint32_t do_mount(const char* tag, char* path) {
     return res;
 }
 
-static void handle_mount(msg_id_t msg_id) {
+static void handle_mount(const msg_id_t msg_id) {
     bool done = false;
     uint32_t ret = 0;
     char* tag = NULL;
@@ -1452,18 +1449,18 @@ out:
     }
 }
 
-static uint32_t do_query_output_path(char* path, uint64_t off, char** buf_ptr,
-                                     uint64_t* len_ptr) {
+static uint32_t do_query_output_path(const char *path, const uint64_t off, char **buf_ptr,
+                                     uint64_t *len_ptr) {
     uint32_t ret = 0;
     char* buf = MAP_FAILED;
     size_t len = 0;
 
-    int fd = open_relative(path, O_RDONLY, 0);
+    const int fd = open_relative(path, O_RDONLY, 0);
     if (fd < 0) {
         return errno;
     }
 
-    off_t ls = lseek(fd, 0, SEEK_END);
+    const off_t ls = lseek(fd, 0, SEEK_END);
     if (ls == (off_t)-1) {
         ret = errno;
         goto out;
@@ -1492,8 +1489,8 @@ static uint32_t do_query_output_path(char* path, uint64_t off, char** buf_ptr,
         goto out;
     }
 
-again: ;
-    ssize_t real_len = read(fd, buf, len);
+again:
+    const ssize_t real_len = read(fd, buf, len);
     if (real_len < 0) {
         if (errno == EINTR) {
             goto again;
@@ -1514,7 +1511,7 @@ out:
     return ret;
 }
 
-static void handle_query_output(msg_id_t msg_id) {
+static void handle_query_output(const msg_id_t msg_id) {
     bool done = false;
     uint32_t ret = 0;
     uint64_t id = 0;
@@ -1578,7 +1575,7 @@ static void handle_query_output(msg_id_t msg_id) {
                 ret = EINVAL;
                 goto out_err;
             }
-            bool was_full = cyclic_buffer_free_size(&proc_desc->redirs[fd].buffer.cb) == 0;
+            const bool was_full = cyclic_buffer_free_size(&proc_desc->redirs[fd].buffer.cb) == 0;
             send_response_cyclic_buffer(msg_id, &proc_desc->redirs[fd].buffer.cb, len);
             if (was_full) {
                 if (add_epoll_fd_desc(&proc_desc->redirs[fd],
@@ -1605,8 +1602,8 @@ out_err:
     send_response_err(msg_id, ret);
 }
 
-static void send_output_available_notification(uint64_t id, uint32_t fd) {
-    struct msg_hdr resp = {
+static void send_output_available_notification(const uint64_t id, const uint32_t fd) {
+    const struct msg_hdr resp = {
         .msg_id = 0,
         .type = NOTIFY_OUTPUT_AVAILABLE,
     };
@@ -1616,29 +1613,29 @@ static void send_output_available_notification(uint64_t id, uint32_t fd) {
     CHECK(writen(g_cmds_fd, &fd, sizeof(fd)));
 }
 
-static void handle_output_available(struct epoll_fd_desc** epoll_fd_desc_ptr) {
+static void handle_output_available(struct epoll_fd_desc **epoll_fd_desc_ptr) {
     struct epoll_fd_desc* epoll_fd_desc = *epoll_fd_desc_ptr;
     struct cyclic_buffer* cb = &epoll_fd_desc->data->buffer.cb;
-    size_t to_read = cyclic_buffer_free_size(cb);
-    bool needs_notification = cyclic_buffer_data_size(cb) == 0;
+    const size_t to_read = cyclic_buffer_free_size(cb);
+    const bool needs_notification = cyclic_buffer_data_size(cb) == 0;
 
     if (to_read == 0) {
-        /* Buffer is full, deregister `epoll_fd_desc` untill it get's emptied. */
+        /* Buffer is full, deregister `epoll_fd_desc` until it gets emptied. */
         CHECK(del_epoll_fd_desc(epoll_fd_desc));
         *epoll_fd_desc_ptr = NULL;
         return;
     }
 
-    ssize_t ret = cyclic_buffer_read(epoll_fd_desc->fd, cb, to_read);
+    const ssize_t ret = cyclic_buffer_read(epoll_fd_desc->fd, cb, to_read);
     if (ret < 0) {
         if (errno == EAGAIN) {
             /* This was a spurious wakeup. */
             return;
-        } else {
-            fprintf(stderr, "Unexpected error while reading in handle_output_available: %m\n");
-            die();
         }
-    } else if (ret == 0) {
+        fprintf(stderr, "Unexpected error while reading in handle_output_available: %m\n");
+        die();
+    }
+    if (ret == 0) {
         /* EOF. This actually cannot happen, since if we came here, there must
          * have been some output available and space in the buffer. Maybe just
          * print an error and die() here? */
@@ -1648,13 +1645,13 @@ static void handle_output_available(struct epoll_fd_desc** epoll_fd_desc_ptr) {
 
     if (needs_notification) {
         /* XXX: this is ugly, but for now there is no other way of obtaining process id here. */
-        int fd = epoll_fd_desc->src_fd;
+        const int fd = epoll_fd_desc->src_fd;
         struct process_desc* process_desc = CONTAINER_OF(epoll_fd_desc->data, struct process_desc, redirs[fd]);
         send_output_available_notification(process_desc->id, fd);
     }
 }
 
-static void handle_net_ctl(msg_id_t msg_id) {
+static void handle_net_ctl(const msg_id_t msg_id) {
     bool done = false;
     uint16_t flags = 0;
     char* addr = NULL;
@@ -1699,8 +1696,8 @@ static void handle_net_ctl(msg_id_t msg_id) {
         }
     }
 
-    if (addr && (strlen(addr) == 0)) addr = NULL;
-    if (mask && (strlen(mask) == 0)) mask = NULL;
+    if (addr && strlen(addr) == 0) addr = NULL;
+    if (mask && strlen(mask) == 0) mask = NULL;
 
     switch (if_kind) {
         case SUB_MSG_NET_IF_INET:
@@ -1766,12 +1763,10 @@ static void handle_net_ctl(msg_id_t msg_id) {
         if (strstr(gateway, ":")) {
             if ((ret = net_route6(if_name, addr, gateway)) < 0) {
                 perror("Error setting IPv6 route");
-                goto out_err;
             }
         } else {
             if ((ret = net_route(if_name, addr, mask, gateway)) < 0) {
                 perror("Error setting IPv4 route");
-                goto out_err;
             }
         }
     }
@@ -1787,7 +1782,7 @@ out_err:
         : send_response_err(msg_id, ret);
 }
 
-static void handle_net_host(msg_id_t msg_id) {
+static void handle_net_host(const msg_id_t msg_id) {
     bool done = false;
     size_t cap = 8;
     size_t sz = 0;
@@ -1828,14 +1823,14 @@ static void handle_net_host(msg_id_t msg_id) {
         }
     }
 
-    ret = add_network_hosts((*hosts), sz);
+    ret = add_network_hosts(*hosts, sz);
 
 out_err:
     for (int i = sz - 1; i >= 0; --i) {
         free((*hosts)[i][0]);
         free((*hosts)[i][1]);
     }
-    free((*hosts));
+    free(*hosts);
 
     ret == 0
         ? send_response_ok(msg_id)
@@ -1932,7 +1927,7 @@ static noreturn void main_loop(void) {
             die();
         }
 
-        if ((event.events & EPOLLERR) && epoll_fd_desc->type != EPOLL_FD_OUT) {
+        if (event.events & EPOLLERR && epoll_fd_desc->type != EPOLL_FD_OUT) {
             fprintf(stderr, "Got EPOLLERR on fd: %d, type: %d\n",
                     epoll_fd_desc->fd, epoll_fd_desc->type);
             die();
@@ -1970,7 +1965,7 @@ static noreturn void main_loop(void) {
     }
 }
 
-static void create_dir(const char *pathname, mode_t mode) {
+static void create_dir(const char *pathname, const mode_t mode) {
     if (mkdirat(g_sysroot_fd, pathname, mode) < 0 && errno != EEXIST) {
         fprintf(stderr, "mkdir(%s) failed with: %m\n", pathname);
         die();
@@ -2045,7 +2040,7 @@ bad:
     CHECK_BOOL(snprintf_res >= (int)sizeof("/proc/1/uid_map") - 1);
     CHECK_BOOL(snprintf_res < (int)sizeof buf);
     for (int i = 0; i < 2; ++i) {
-        int uidmapfd = CHECK(open(buf, O_NOFOLLOW | O_CLOEXEC | O_NOCTTY | O_WRONLY));
+        const int uidmapfd = CHECK(open(buf, O_NOFOLLOW | O_CLOEXEC | O_NOCTTY | O_WRONLY));
 #define UIDMAP "0 0 4294967295"
         CHECK_BOOL(write(uidmapfd, UIDMAP, sizeof UIDMAP - 1) == sizeof UIDMAP - 1);
         CHECK_BOOL(close(uidmapfd) == 0);
@@ -2074,15 +2069,14 @@ static int find_device_major(const char *name) {
     FILE *f;
     char *line = NULL;
     size_t line_size; /* size of the buffer */
-    ssize_t line_len;
-    char entry_name[32];
     int entry_major;
     int major = -1;
 
     if ((f = fopen("/proc/devices", "r")) == 0)
         return -1;
 
-    while ((line_len = getline(&line, &line_size, f)) != -1) {
+    while (getline(&line, &line_size, f) != -1) {
+        char entry_name[32];
         if (strcmp(line, "Character devices:\n") == 0) {
             /* initial header, nothing to do yet */
         } else if (strcmp(line, "\n") == 0 ||
@@ -2101,11 +2095,10 @@ static int find_device_major(const char *name) {
 
 static int nvidia_gpu_count() {
     int counter;
-    int res;
-    char buf[sizeof "sys/class/drm/card000"];
 
     for (counter = 0; counter < 256; counter++) {
-        res = snprintf(buf, sizeof buf, "sys/class/drm/card%d", counter);
+        char buf[sizeof "sys/class/drm/card000"];
+        const int res = snprintf(buf, sizeof buf, "sys/class/drm/card%d", counter);
         CHECK_BOOL(res > 0);
         CHECK_BOOL(res < (int)sizeof buf);
         /* iterate as long as devices are there, nothing unloads/unbinds
@@ -2434,12 +2427,12 @@ int main(int argc, char **argv) {
             do_sandbox = false;
         }
     }
+
     for (char **p = environ; *p; ++p) {
         fprintf(stderr, "Environment variable: %s\n", *p);
     }
 
     if (nvidia_loaded) {
-        char buf[sizeof "dev/nvidia000"];
         if (do_sandbox == false) {
             fprintf(stderr, "Sandboxing is disabled, refusing to enable Nvidia GPU passthrough.\n");
             fprintf(stderr, "Please re-run the container with sandboxing enabled or disable GPU passthrough.\n");
@@ -2447,8 +2440,9 @@ int main(int argc, char **argv) {
             CHECK_BOOL(0);
         }
         int nvidia_major = CHECK(find_device_major("nvidia-frontend"));
-        int nvidia_count = nvidia_gpu_count();
+        const int nvidia_count = nvidia_gpu_count();
         for (int i = 0; i < nvidia_count; i++) {
+            char buf[sizeof "dev/nvidia000"];
             res = snprintf(buf, sizeof buf, "dev/nvidia%d", i);
             CHECK_BOOL(res >= (int)sizeof "dev/nvidia" && res < (int)sizeof buf);
             res = mknodat(g_sysroot_fd, buf, S_IFCHR | (0666 & 0777), nvidia_major << 8 | i);

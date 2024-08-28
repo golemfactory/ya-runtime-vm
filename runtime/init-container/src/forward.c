@@ -1,17 +1,9 @@
-#include <ctype.h>
 #include <errno.h>
-#include <fcntl.h>
-#include <linux/if_ether.h>
-#include <net/if.h>
-#include <netinet/in.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdlib.h>
-#include <string.h>
-#include <sys/stat.h>
 #include <sys/types.h>
 #include <threads.h>
-#include <unistd.h>
 
 typedef struct cpu_set_t { unsigned long __bits[128/sizeof(long)]; } cpu_set_t;
 
@@ -42,14 +34,14 @@ union b_u16 {
 int fwd(void *data);
 
 int fwd_start(
-    int rfd,
-    int wfd,
-    uint16_t read_sz,
-    char read_hdr,
-    char write_hdr
+    const int rfd,
+    const int wfd,
+    const uint16_t read_sz,
+    const char read_hdr,
+    const char write_hdr
 ) {
     thrd_t th;
-    int ret, *fds = 0;
+    int ret, *fds;
     struct fwd_args *args = 0;
 
     if (!(fds = malloc(2 * sizeof(int)))) {
@@ -68,7 +60,7 @@ int fwd_start(
     args->read_hdr = read_hdr;
     args->write_hdr = write_hdr;
 
-    if ((ret = thrd_create(&th, fwd, (void*) args)) != thrd_success) {
+    if ((ret = thrd_create(&th, fwd, args)) != thrd_success) {
         goto err;
     }
     return thrd_detach(th);
@@ -85,16 +77,15 @@ void fwd_stop() {
 
 int read_fd(
     struct io_uring *ring,
-    int fd,
+    const int fd,
     char *dst,
-    uint16_t count,
-    char exact
+    const uint16_t count,
+    const char exact
 ) {
     struct io_uring_sqe *sqe;
     struct io_uring_cqe *cqe;
 
-    int ret = 0;
-    uint16_t rc = 0;
+    int ret;
     uint16_t ro = 0;
 
     while (working && ro < count) {
@@ -110,7 +101,7 @@ int read_fd(
             return ret;
         }
 
-        rc = cqe->res;
+        const uint16_t rc = cqe->res;
         io_uring_cqe_seen(ring, cqe);
         if (rc <= 0) {
             thrd_sleep(&sleep_tsc, 0);
@@ -128,15 +119,14 @@ int read_fd(
 
 int write_fd(
     struct io_uring *ring,
-    int fd,
-    char *src,
-    uint16_t count
+    const int fd,
+    const char *src,
+    const uint16_t count
 ) {
     struct io_uring_sqe *sqe;
     struct io_uring_cqe *cqe;
 
-    int ret = 0;
-    int wc = 0;
+    int ret;
     size_t wo = 0;
 
     while (working && wo < count) {
@@ -152,7 +142,7 @@ int write_fd(
             return ret;
         }
 
-        wc = cqe->res;
+        const int wc = cqe->res;
         io_uring_cqe_seen(ring, cqe);
         if (wc < 0) {
             return -2;
@@ -166,12 +156,11 @@ int write_fd(
 
 int fwd(void *data) {
     struct io_uring ring;
-    struct fwd_args *args = (struct fwd_args*) data;
+    struct fwd_args *args = data;
 
-    union b_u16 sz;
-    int  ret = 0, rfd = 0, wfd = 1;
-    char exact = 0;
-    char *buf = 0;
+    int  ret;
+    char exact;
+    char *buf;
 
     if (!(buf = malloc(args->read_sz))) {
         ret = -ENOMEM;
@@ -184,6 +173,9 @@ int fwd(void *data) {
     }
 
     while (working) {
+        union b_u16 sz;
+        const int rfd = 0;
+        const int wfd = 1;
         if (args->read_hdr) {
             exact = 1;
             if ((ret = read_fd(&ring, rfd, buf, 2, exact)) < 0) {
