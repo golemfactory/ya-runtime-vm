@@ -8,7 +8,7 @@ on:
 env:
   self-test-img_tag: v0.1.4
   self-test-img_repository: golemfactory/ya-self-test-img
-  rust_stable: 1.80.0
+  rust_stable: 1.70.0
 
 jobs:
   create-release:
