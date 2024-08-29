@@ -2124,15 +2124,15 @@ static const char* environ_get(const char* name) {
         }
     }
 
-    return "NOT FOUND";
+    return NULL;
 }
 
 struct storage_node_t {
     struct storage_node_t *next;
-    const char *path;
-    const char *dev;
-    const char *fstype;
-    const char *data;
+    char *path;
+    char *dev;
+    char *fstype;
+    char *data;
     unsigned long flags;
 };
 
@@ -2152,11 +2152,37 @@ static void storage_append(
     CHECK(*node != 0);
 
     (*node)->next = NULL;
-    (*node)->path = path;
-    (*node)->dev = dev;
-    (*node)->fstype = fstype;
-    (*node)->data = data;
+
+    (*node)->path = malloc(strlen(path) + 1);
+    CHECK_BOOL((*node)->path != NULL);
+    strcpy((*node)->path, path);
+
+    (*node)->dev = malloc(strlen(dev) + 1);
+    CHECK_BOOL((*node)->dev != NULL);
+    strcpy((*node)->dev, dev);
+
+    (*node)->fstype = malloc(strlen(fstype) + 1);
+    CHECK_BOOL((*node)->fstype != NULL);
+    strcpy((*node)->fstype, fstype);
+
+    (*node)->data = malloc(strlen(data) + 1);
+    CHECK_BOOL((*node)->data != NULL);
+    strcpy((*node)->data, data);
+
     (*node)->flags = flags;
+}
+
+static void storage_free(struct storage_node_t *node) {
+    while (node != NULL) {
+        struct storage_node_t *to_free = node;
+        node = node->next;
+
+        free(to_free->path);
+        free(to_free->dev);
+        free(to_free->fstype);
+        free(to_free->data);
+        free(to_free);
+    }
 }
 
 static void do_mkfs(const char *path) {
@@ -2218,13 +2244,13 @@ static void scan_storage(struct storage_node_t **list) {
         CHECK_BOOL(bytes_read != -1);
         serial[bytes_read] = '\0';
 
-        char *dev_path = malloc(16);
-        CHECK_BOOL(snprintf(dev_path, 64, "/dev/%s", curr->d_name) >= 6);
+        char dev_path[16];
+        CHECK_BOOL(snprintf(dev_path, 16, "/dev/%s", curr->d_name) >= 6);
 
         // nvidia-files does not require formatting
         if(strcmp(serial, "nvidia-files") == 0 || strcmp(serial, "rootfs") == 0) {
-            fprintf(stderr, "Storage volume %s [%s] to be mounted at %s with data=\"\".\n", serial, dev_path, "/");
             storage_append(list, "/", dev_path, "squashfs", "", MS_RDONLY | MS_NODEV);
+            fprintf(stderr, "Storage volume %s [%s] to be mounted at %s with data=\"\".\n", serial, dev_path, "/");
             continue;
         }
 
@@ -2241,16 +2267,23 @@ static void scan_storage(struct storage_node_t **list) {
         char *path_env = malloc(path_env_len);
         snprintf(path_env, path_env_len, "%s-path", serial);
         const char *mount_point = environ_get(path_env);
+        CHECK_BOOL(mount_point != NULL);
+        free(path_env);
 
         int errors_env_len = strlen(serial) + strlen("-errors") + 1;
         char *errors_env = malloc(errors_env_len);
         snprintf(errors_env, errors_env_len, "%s-errors", serial);
+        const char *errors = environ_get(errors_env);
+        CHECK_BOOL(errors != NULL);
+        free(errors_env);
 
-        // hacky but avoids an extra allocation
-        const char *data = environ_get(errors_env) - strlen("errors=");
+        int data_len = strlen("errors=") + strlen(errors) + 1;
+        char *data = malloc(data_len);
+        snprintf(data, data_len, "errors=%s", errors);
 
-        fprintf(stderr, "Storage volume %s [%s] to be mounted at %s with data=\"%s\".\n", serial, dev_path, mount_point, data);
         storage_append(list, mount_point, dev_path, "ext4", data, MS_NODEV);
+        fprintf(stderr, "Storage volume %s [%s] to be mounted at %s with data=\"%s\".\n", serial, dev_path, mount_point, data);
+        free(data);
     }
 
     free(prev);
@@ -2331,6 +2364,7 @@ int main(int argc, char **argv) {
 
     struct storage_node_t *storage = NULL;
     scan_storage(&storage);
+    storage_free(storage);
 
     // 'workdir' and 'upperdir' have to be on the same filesystem
     CHECK(mount("tmpfs", "/mnt/overlay", "tmpfs",
