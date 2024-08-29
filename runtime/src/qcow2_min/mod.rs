@@ -36,7 +36,7 @@ impl Qcow2Image {
     /// Writes a valid qcow2 image according to the parameters.
     ///
     /// Resultant `qemu-img info`:
-    /// ```
+    /// ```plain
     /// cluster_size: 65536
     /// Format specific information:
     ///     compat: 1.1
