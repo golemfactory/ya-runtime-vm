@@ -2352,6 +2352,8 @@ int main(int argc, char **argv) {
     load_module("/rng-core.ko");
     load_module("/virtio-rng.ko");
     load_module("/virtio_blk.ko");
+    load_module("/mbcache.ko");
+    load_module("/ext2.ko");
     load_module("/squashfs.ko");
     load_module("/overlay.ko");
     if (access("/netfs.ko", R_OK) == 0)
