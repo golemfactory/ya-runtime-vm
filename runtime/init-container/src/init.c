@@ -71,6 +71,16 @@
 #define MKFS "mkfs.ext2"
 
 static int g_sysroot_fd = AT_FDCWD;
+static struct storage_node_t *g_storage = NULL;
+
+struct storage_node_t {
+    struct storage_node_t *next;
+    char *path;
+    char *dev;
+    char *fstype;
+    char *data;
+    unsigned long flags;
+};
 
 struct new_process_args {
     char* bin;
@@ -2119,15 +2129,6 @@ static const char* environ_get(const char* name) {
 
     return NULL;
 }
-
-struct storage_node_t {
-    struct storage_node_t *next;
-    char *path;
-    char *dev;
-    char *fstype;
-    char *data;
-    unsigned long flags;
-};
 
 static void storage_append(
     struct storage_node_t **node,
