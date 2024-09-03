@@ -838,7 +838,7 @@ static noreturn void child_wrapper(int parent_pipe[2],
                 case CAP_LEASE:
                 case CAP_LINUX_IMMUTABLE:
                 // case CAP_MKNOD:
-                // cas CAP_NET_ADMIN:
+                // case CAP_NET_ADMIN:
                 case CAP_NET_BIND_SERVICE:
                 case CAP_NET_BROADCAST:
                 case CAP_NET_RAW:
@@ -2188,10 +2188,14 @@ int main(int argc, char **argv) {
                 MS_NOSUID | MS_NODEV,
                 "mode=0700,size=128M"));
 
-    CHECK(mkdir("/mnt/overlay/upper", S_IRWXU));
-    CHECK(mkdir("/mnt/overlay/work", S_IRWXU));
-
     CHECK(mount("/dev/vda", "/mnt/image", "squashfs", MS_RDONLY | MS_NODEV, ""));
+    {
+        struct stat statbuf;
+        CHECK(stat("/mnt/image", &statbuf));
+        CHECK(mkdir("/mnt/overlay/upper", statbuf.st_mode));
+        CHECK(mkdir("/mnt/overlay/work", statbuf.st_mode));
+    }
+
     if (access("/dev/vdb", R_OK) == 0) {
         CHECK(mkdir("/mnt/gpu-files", S_IRWXU));
         CHECK(mount("/dev/vdb", "/mnt/gpu-files", "squashfs", MS_RDONLY | MS_NODEV, ""));
@@ -2220,6 +2224,9 @@ int main(int argc, char **argv) {
     CHECK(mount("devtmpfs", SYSROOT "/dev", "devtmpfs",
                 MS_NOSUID,
                 "mode=0755,size=2M"));
+
+    CHECK(symlinkat("/proc/self/fd", AT_FDCWD, SYSROOT "/dev/fd"));
+
     CHECK(mount("tmpfs", SYSROOT "/tmp", "tmpfs",
                 MS_NOSUID,
                 "mode=0777"));
@@ -2234,7 +2241,7 @@ int main(int argc, char **argv) {
                 MS_NODEV | MS_NOSUID | MS_NOEXEC,
                 NULL));
 
-    bool do_sandbox = true;
+    bool do_sandbox = nvidia_loaded;
     for (int i = 1; i < argc; ++i) {
         fprintf(stderr, "Command line argument: %s\n", argv[i]);
         if (strcmp(argv[i], "sandbox=yes") == 0) {
