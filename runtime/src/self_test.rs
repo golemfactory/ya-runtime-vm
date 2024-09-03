@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::fs;
 use tokio::sync::Notify;
 use uuid::Uuid;
-use ya_client_model::activity::exe_script_command::{VolumeInfo, VolumeMount};
+use ya_client_model::activity::exe_script_command::VolumeMount;
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 use ya_runtime_sdk::runtime_api::server::RuntimeHandler;
 use ya_runtime_sdk::{runtime_api::server, server::Server, Context, Error, ErrorExt, EventEmitter};
@@ -168,25 +168,25 @@ async fn self_test_deployment(
         HashMap::from_iter([
             (
                 "/golem/storage".to_string(),
-                VolumeInfo::Mount(VolumeMount::Storage {
+                VolumeMount::Storage {
                     size: "1mi".parse().unwrap(),
                     preallocate: None,
                     errors: Some("remount-ro".to_string()),
-                }),
+                },
             ),
             (
                 "/golem/storage2".to_string(),
-                VolumeInfo::Mount(VolumeMount::Storage {
+                VolumeMount::Storage {
                     size: "10mi".parse().unwrap(),
                     preallocate: Some("128ki".parse().unwrap()),
                     errors: None,
-                }),
+                },
             ),
             (
                 "/".to_string(),
-                VolumeInfo::Mount(VolumeMount::Ram {
+                VolumeMount::Ram {
                     size: "1gi".parse().unwrap(),
-                }),
+                },
             ),
         ]),
     )

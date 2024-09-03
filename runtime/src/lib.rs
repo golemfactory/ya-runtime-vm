@@ -23,7 +23,7 @@ use tokio::{
     io::{self, AsyncWriteExt},
 };
 use url::Url;
-use ya_client_model::activity::exe_script_command::{VolumeInfo, VolumeMount};
+use ya_client_model::activity::exe_script_command::VolumeMount;
 
 use crate::{
     cpu::CpuInfo,
@@ -261,7 +261,7 @@ async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<Option<serialize::
     let package_file = fs::File::open(&package_path).await?;
     let volume_override = cli
         .volume_override
-        .map(|vo_str| serde_json::from_str::<HashMap<String, VolumeInfo>>(&vo_str))
+        .map(|vo_str| serde_json::from_str::<HashMap<String, VolumeMount>>(&vo_str))
         .transpose()?
         .unwrap_or_default();
 

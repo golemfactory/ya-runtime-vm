@@ -3208,7 +3208,7 @@ dependencies = [
 [[package]]
 name = "ya-client-model"
 version = "0.6.0"
-source = "git+https://github.com/golemfactory/ya-client.git?rev=8d1a7e549b9febeda20008215e08bea5e8375751#8d1a7e549b9febeda20008215e08bea5e8375751"
+source = "git+https://github.com/golemfactory/ya-client.git?rev=44746845a559d40faa2a81d41c6f663d38361286#44746845a559d40faa2a81d41c6f663d38361286"
 dependencies = [
  "bigdecimal",
  "bytesize",

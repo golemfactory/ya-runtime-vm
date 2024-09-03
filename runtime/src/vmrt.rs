@@ -123,6 +123,9 @@ pub async fn start_vmrt(
     ) in deployment.mounts.iter().enumerate()
     {
         match mount {
+            VolumeMount::Host {} => {
+                log::warn!("DeploymentMount::mount should never be VolumeMount::Host");
+            }
             VolumeMount::Storage { errors, .. } => {
                 let errors = errors.as_deref().unwrap_or("continue");
 

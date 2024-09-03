@@ -9,7 +9,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 use tokio_byteorder::LittleEndian;
 use uuid::Uuid;
 
-use ya_client_model::activity::exe_script_command::{VolumeInfo, VolumeMount};
+use ya_client_model::activity::exe_script_command::VolumeMount;
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -39,7 +39,7 @@ impl Deployment {
         cpu_cores: usize,
         mem_mib: usize,
         task_package: PathBuf,
-        volume_override: HashMap<String, VolumeInfo>,
+        volume_override: HashMap<String, VolumeMount>,
     ) -> Result<Self, anyhow::Error>
     where
         Input: AsyncRead + AsyncSeek + Unpin,
@@ -72,8 +72,8 @@ impl Deployment {
 
         let mounts = volume_override
             .into_iter()
-            .filter_map(|(path, vol_info)| match vol_info {
-                VolumeInfo::Override {} => {
+            .filter_map(|(path, vol_mount)| match vol_mount {
+                VolumeMount::Host {} => {
                     let volume_present = volumes.iter().any(|vol| vol.path == path);
                     if !volume_present {
                         volumes.push(ContainerVolume {
@@ -85,15 +85,21 @@ impl Deployment {
                     None
                 }
 
-                VolumeInfo::Mount(mount) => {
+                VolumeMount::Ram { .. } => {
                     volumes.retain(|vol| vol.path != path);
                     Some(DeploymentMount {
-                        name: match mount {
-                            VolumeMount::Ram { .. } => format!("tmpfs-{}", Uuid::new_v4()),
-                            VolumeMount::Storage { .. } => format!("vol-{}.img", Uuid::new_v4()),
-                        },
+                        name: format!("tmpfs-{}", Uuid::new_v4()),
                         guest_path: path,
-                        mount,
+                        mount: vol_mount,
+                    })
+                }
+
+                VolumeMount::Storage { .. } => {
+                    volumes.retain(|vol| vol.path != path);
+                    Some(DeploymentMount {
+                        name: format!("vol-{}.img", Uuid::new_v4()),
+                        guest_path: path,
+                        mount: vol_mount,
                     })
                 }
             })
