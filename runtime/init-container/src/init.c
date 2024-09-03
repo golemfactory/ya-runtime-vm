@@ -2222,17 +2222,10 @@ static void scan_storage(struct storage_node_t **list) {
     DIR* ptr_dir = opendir(block_dir);
     CHECK_BOOL(ptr_dir != NULL);
 
-    int len = offsetof(struct dirent, d_name) + fpathconf(dirfd(ptr_dir), _PC_NAME_MAX) + 1;
-    struct dirent *prev = malloc(len);
-    struct dirent *curr = NULL;
-    CHECK_BOOL(prev != NULL);
+    struct dirent *curr;
 
-    for(;;) {
-        CHECK(readdir_r(ptr_dir, prev, &curr));
-        if(curr == NULL) {
-            break;
-        }
-
+    while ((curr = readdir(ptr_dir)) != NULL)
+    {
         // virtio-blk device names are vdX, ignore others.
         if(strncmp(curr->d_name, "vd", 2) != 0) {
             continue;
@@ -2257,7 +2250,7 @@ static void scan_storage(struct storage_node_t **list) {
         char dev_path[16];
         CHECK_BOOL(snprintf(dev_path, 16, "/dev/%s", curr->d_name) >= 6);
 
-        // nvidia-files does not require formatting
+        // nvidia-files and rootfs does not require formatting
         if(strcmp(serial, "nvidia-files") == 0 || strcmp(serial, "rootfs") == 0) {
             storage_append(list, "/", dev_path, "squashfs", "", MS_RDONLY | MS_NODEV);
             fprintf(stderr, "Storage volume %s [%s] to be mounted at %s with data=\"\".\n", serial, dev_path, "/");
@@ -2267,9 +2260,9 @@ static void scan_storage(struct storage_node_t **list) {
         if(strncmp(serial, "vol-", 4) != 0) {
             fprintf(stderr, "Found virtio-blk: %s/%s with SN=%s, skip\n", block_dir, curr->d_name, serial);
             continue;
-        } else {
-            fprintf(stderr, "Found virtio-blk: %s/%s with SN=%s, format as ext2\n", block_dir, curr->d_name, serial);
         }
+
+        fprintf(stderr, "Found virtio-blk: %s/%s with SN=%s, format as ext2\n", block_dir, curr->d_name, serial);
 
         do_mkfs(dev_path);
 
@@ -2291,12 +2284,13 @@ static void scan_storage(struct storage_node_t **list) {
         char *data = malloc(data_len);
         snprintf(data, data_len, "errors=%s", errors);
 
-        storage_append(list, mount_point, dev_path, "ext4", data, MS_NODEV);
         fprintf(stderr, "Storage volume %s [%s] to be mounted at %s with data=\"%s\".\n", serial, dev_path, mount_point, data);
+        storage_append(list, mount_point, dev_path, "ext2", data, MS_NODEV);
         free(data);
     }
 
-    free(prev);
+    fflush(stderr);
+
 }
 
 int main(int argc, char **argv) {
