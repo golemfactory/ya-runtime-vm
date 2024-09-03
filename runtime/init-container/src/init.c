@@ -2291,6 +2291,34 @@ static void scan_storage(struct storage_node_t **list) {
 
     fflush(stderr);
 
+    for (char **p = environ; *p; ++p) {
+        char *env = *p;
+
+        if (strncmp(env, "vol-", 4) == 0 && strstr(env, "-size=") != NULL) {
+            int volume_id = -1;
+            sscanf(env, "vol-%d-size=", &volume_id);
+            char *vol_path = find_volume_path_in_env(volume_id);
+
+            if (vol_path == NULL) {
+                fprintf(stderr, "ERROR: Found volume size argument '%s' without vol-%d-path", env, volume_id);
+                continue;
+            }
+
+            char *vol_path_equal_sign = strchr(vol_path, '=');
+            vol_path = vol_path_equal_sign + 1;
+
+            char *temp = NULL;
+            size_t vol_size = 0;
+            sscanf(env, "%64[^=]=%ld", temp, &vol_size);
+
+            fprintf(stderr, "Found tmpfs volume '%d': '%s', size: %ld\n", volume_id, vol_path, vol_size);
+
+            char opt_buffer[sizeof "mode=0700,size=00000000000"] = {};
+            snprintf(opt_buffer, sizeof opt_buffer, "mode=0700,size=%ld", vol_size);
+
+            storage_append(list, vol_path, "tmpfs", "tmpfs", opt_buffer, MS_NODEV);
+        }
+    }
 }
 
 int main(int argc, char **argv) {
