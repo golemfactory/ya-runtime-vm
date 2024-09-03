@@ -156,6 +156,7 @@ static noreturn void die(void) {
 #pragma GCC poison _x
 
 static void load_module(const char* path) {
+    fprintf(stderr, "Loading kernel module '%s'\n", path);
     const int fd = CHECK(open(path, O_RDONLY | O_CLOEXEC));
     CHECK_BOOL(syscall(SYS_finit_module, fd, "", 0) == 0);
     CHECK_BOOL(close(fd) == 0);
