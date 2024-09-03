@@ -2201,6 +2201,21 @@ static void do_mkfs(const char *path) {
     }
 }
 
+static char *find_volume_path_in_env(int volume_id) {
+    char buffer[sizeof "vol-000-path"] = {};
+    snprintf(buffer, sizeof buffer, "vol-%d-path", volume_id);
+    const size_t len = strlen(buffer);
+    for (char **p = environ; *p; ++p) {
+        char *env = *p;
+
+        if (strncmp(env, buffer, len) == 0) {
+            return env;
+        }
+    }
+
+    return NULL;
+}
+
 static void scan_storage(struct storage_node_t **list) {
     static const char *block_dir = "/sys/class/block";
 
