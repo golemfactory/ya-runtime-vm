@@ -2396,16 +2396,27 @@ int main(int argc, char **argv) {
     CHECK(mkdir("/mnt/overlay", S_IRWXU));
     CHECK(mkdir(SYSROOT, DEFAULT_DIR_PERMS));
 
-    struct storage_node_t *storage = NULL;
-    scan_storage(&storage);
-    storage_free(storage);
+    scan_storage(&g_storage);
 
     // 'workdir' and 'upperdir' have to be on the same filesystem
     CHECK(mount("tmpfs", "/mnt/overlay", "tmpfs",
                 MS_NOSUID | MS_NODEV,
                 "mode=0700,size=128M"));
 
-    CHECK(mount("/dev/vda", "/mnt/image", "squashfs", MS_RDONLY | MS_NODEV, ""));
+    struct storage_node_t *storage = g_storage;
+
+    while (storage != NULL) {
+        if (strcmp(storage->path, "/") != 0) {
+            storage = storage->next;
+            continue;
+        }
+
+        fprintf(stderr, "Mounting rootfs '%s' to '/mnt/image' fstype: %s, data: %s\n", storage->dev, storage->fstype, storage->data);
+        CHECK(mount(storage->dev, "/mnt/image", storage->fstype, storage->flags, storage->data));
+
+        break;
+    }
+
     {
         struct stat statbuf;
         CHECK(stat("/mnt/image", &statbuf));
@@ -2414,14 +2425,46 @@ int main(int argc, char **argv) {
     }
 
     if (access("/dev/vdb", R_OK) == 0 && false) {
-        CHECK(mkdir("/mnt/gpu-files", S_IRWXU));
-        CHECK(mount("/dev/vdb", "/mnt/gpu-files", "squashfs", MS_RDONLY | MS_NODEV, ""));
+        CHECK(mkdir("/mnt/gpu-runtime", S_IRWXU));
+        CHECK(mount("/dev/vdb", "/mnt/gpu-runtime", "squashfs", MS_RDONLY | MS_NODEV, ""));
         CHECK(mount("overlay", SYSROOT, "overlay", MS_NODEV,
-                    "lowerdir=/mnt/gpu-files:/mnt/image,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work"));
+                    "lowerdir=/mnt/gpu-runtime:/mnt/image,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work"));
     } else {
         CHECK(mount("overlay", SYSROOT, "overlay", MS_NODEV,
                     "lowerdir=/mnt/image,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work"));
     }
+
+    storage = g_storage;
+
+    struct stat upper_statbuf;
+    CHECK(stat("/mnt/overlay/upper", &upper_statbuf));
+
+    while (storage != NULL) {
+        if (strcmp(storage->path, "/") == 0) {
+            storage = storage->next;
+            continue;
+        }
+
+        const size_t length = sizeof(SYSROOT) + strlen(storage->path) + 1;
+        char *storage_path = malloc(length);
+        snprintf(storage_path, length, SYSROOT "%s", storage->path);
+        fprintf(stderr, " storage-final-path: %s\n", storage_path);
+
+        char *storage_path_dup = strdup(storage_path);
+        CHECK(create_dir_path(storage_path_dup, upper_statbuf.st_mode, NULL));
+        free(storage_path_dup);
+
+        fprintf(stderr, "Mounting '%s' to '%s' fstype: %s, data: %s\n", storage->dev, storage_path, storage->fstype, storage->data);
+        CHECK(mount(storage->dev, storage_path, storage->fstype, storage->flags, storage->data));
+
+        free(storage_path);
+
+        storage = storage->next;
+    }
+
+    storage = NULL;
+    storage_free(g_storage);
+    g_storage = NULL;
 
     g_sysroot_fd = CHECK(open(SYSROOT, O_RDONLY | O_DIRECTORY | O_CLOEXEC));
     assert(g_sysroot_fd >= 3);
