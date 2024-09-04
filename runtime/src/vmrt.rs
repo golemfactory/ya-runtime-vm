@@ -85,7 +85,7 @@ pub async fn start_vmrt(
         FILE_INITRAMFS,
         "-enable-kvm",
         "-cpu",
-        "host",
+        "host,-sgx",
         "-smp",
         deployment.cpu_cores.to_string().as_str(),
         "-device",
@@ -107,9 +107,7 @@ pub async fn start_vmrt(
         )
         .as_str(),
         "-device",
-        "virtio-blk-pci,drive=rootfs,serial=rootfs"
-            .to_string()
-            .as_str(),
+        "virtio-blk-pci,drive=rootfs,serial=rootfs".as_ref(),
         "-no-reboot",
     ]);
 
@@ -178,26 +176,21 @@ pub async fn start_vmrt(
 
     cmd.args(["-append", &kernel_cmdline]);
 
-    let (vpn, inet) =
-    // backward-compatibility mode
-    if vpn_remote.is_none() && inet_remote.is_none() {
-        cmd.args(["-net", "none"]);
-
-        let vpn = configure_chardev_endpoint(&mut cmd, "vpn", &temp_dir, &uid)?;
-        let inet = configure_chardev_endpoint(&mut cmd, "inet", &temp_dir, &uid)?;
-        (vpn, inet)
-    // virtio-net (preferred)
-    } else {
+    if vpn_remote.is_some() || inet_remote.is_some() {
         let mut pair = SocketPairConf::default();
+
         pair.probe().await?;
 
-        let vpn = configure_netdev_endpoint(&mut cmd, "vpn", &vpn_remote, pair.first)?;
-        let inet = configure_netdev_endpoint(&mut cmd, "inet", &inet_remote, pair.second)?;
-        (vpn, inet)
-    };
+        if let Some(vpn_remote) = vpn_remote {
+            let vpn = configure_netdev_endpoint(&mut cmd, "vpn", &vpn_remote, pair.first)?;
+            data.inet.replace(vpn);
+        }
 
-    data.vpn.replace(vpn);
-    data.inet.replace(inet);
+        if let Some(inet_remote) = inet_remote {
+            let inet = configure_netdev_endpoint(&mut cmd, "inet", &inet_remote, pair.second)?;
+            data.inet.replace(inet);
+        }
+    }
 
     for (idx, volume) in volumes.iter().enumerate() {
         cmd.arg("-virtfs");

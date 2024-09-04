@@ -32,7 +32,8 @@ SRC_DIR ?= src
 TEST_DIR ?= tests
 
 OBJECTS = $(addprefix $(SRC_DIR)/,init.o communication.o process_bookkeeping.o cyclic_buffer.o seccomp.o)
-OBJECTS_EXT = $(addprefix $(SRC_DIR)/,network.o forward.o)
+OBJECTS_EXT = $(addprefix $(SRC_DIR)/,network.o)
+OBJECTS_EXT = $(addprefix $(SRC_DIR)/,network.o)
 
 # Add headers to object dependencies for conditional recompilation on header change
 SOURCES = $(wildcard $(SRC_DIR)/*.c)
@@ -60,20 +61,13 @@ $(SRC_DIR)/network.o: $(SRC_DIR)/network.c
 	    -o $@ -c $<
 
 $(SRC_DIR)/seccomp.o: $(CURDIR)/$(LIBSECCOMP_SUBMODULE)/include/seccomp.h
-$(SRC_DIR)/forward.o: $(SRC_DIR)/forward.c uring $(CURDIR)/$(LIBSECCOMP_SUBMODULE)/src/.libs/libseccomp.a
-	$(QUIET_CC)$(CC) -MMD -O2 -Wall -Wextra -Werror -fPIE -pie \
-	    -I"$(CURDIR)/$(UNPACKED_HEADERS)/usr/include/" \
-        -I"$(CURDIR)/$(LIBURING_SUBMODULE)/src/include/" \
-        -Iinclude/ \
-        -lstdthreads \
-	    -o $@ -c $<
 
 %.o: %.c
 	$(QUIET_CC)$(CC) $(CFLAGS) -o $@ -c $<
 
-init: $(UNPACKED_HEADERS) uring $(OBJECTS) $(OBJECTS_EXT) $(CURDIR)/$(LIBSECCOMP_SUBMODULE)/src/.libs/libseccomp.a
+init: $(UNPACKED_HEADERS) $(OBJECTS) $(OBJECTS_EXT) $(CURDIR)/$(LIBSECCOMP_SUBMODULE)/src/.libs/libseccomp.a
 	@echo init
-	$(QUIET_CC)$(CC) $(CFLAGS) -static -o $@ $(wordlist 3, $(words $^), $^) "$(CURDIR)/$(LIBURING_SUBMODULE)/src/liburing.a" "$(CURDIR)/$(LIBSECCOMP_SUBMODULE)/src/.libs/libseccomp.a"
+	$(QUIET_CC)$(CC) $(CFLAGS) -static -o $@ $(wordlist 2, $(words $^), $^)
 	@# default musl libs on some distros have debug symbols, lets strip them (and everything else)
 	strip $@
 

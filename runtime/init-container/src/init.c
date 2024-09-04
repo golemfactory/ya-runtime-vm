@@ -37,7 +37,6 @@
 #include "network.h"
 #include "process_bookkeeping.h"
 #include "proto.h"
-#include "forward.h"
 #include "init-seccomp.h"
 
 #define SYSROOT "/mnt/newroot"
@@ -532,36 +531,12 @@ static void setup_network(void) {
     CHECK(write_sys("/proc/sys/net/core/wmem_default", NET_MEM_DEFAULT));
     CHECK(write_sys("/proc/sys/net/core/wmem_max", NET_MEM_MAX));
 
-    // FIXME: VPORT_NET and VPORT_INET are only present when supervised by a legacy ExeUnit
-    if (access(VPORT_NET, F_OK) == 0) {
-        const int vpn_sz = 4 * (MTU_VPN + 14);
-
-        g_vpn_fd = CHECK(open(VPORT_NET, O_RDWR | O_CLOEXEC));
-        g_vpn_tap_fd = CHECK(net_create_tap(g_vpn_tap_name));
-
-        CHECK(net_if_mtu(g_vpn_tap_name, MTU_VPN));
-        CHECK(fwd_start(g_vpn_tap_fd, g_vpn_fd, vpn_sz, false, true));
-        CHECK(fwd_start(g_vpn_fd, g_vpn_tap_fd, vpn_sz, true, false));
-    } else {
-        net_if_mtu(DEV_VPN, MTU_VPN);
-    }
-
-    if (access(VPORT_INET, F_OK) == 0) {
-        const int inet_sz = MTU_INET + 14;
-
-        g_inet_fd = CHECK(open(VPORT_INET, O_RDWR | O_CLOEXEC));
-        g_inet_tap_fd = CHECK(net_create_tap(g_inet_tap_name));
-
-        CHECK(net_if_mtu(g_inet_tap_name, MTU_INET));
-        CHECK(fwd_start(g_inet_tap_fd, g_inet_fd, inet_sz, false, true));
-        CHECK(fwd_start(g_inet_fd, g_inet_tap_fd, inet_sz, true, false));
-    } else {
-        net_if_mtu(DEV_INET, MTU_INET);
-    }
+    net_if_mtu(DEV_VPN, MTU_VPN);
+    net_if_mtu(DEV_INET, MTU_INET);
 }
 
 static void stop_network(void) {
-    fwd_stop();
+
 }
 
 static void send_response_hdr(const msg_id_t msg_id, const enum GUEST_MSG_TYPE type) {
