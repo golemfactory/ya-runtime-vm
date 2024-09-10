@@ -56,7 +56,8 @@ pub struct Cli {
             ("command", "run")
         ])
     )]
-    task_package: Option<PathBuf>,
+    #[structopt(multiple = true)]
+    task_package: Option<Vec<PathBuf>>,
     /// Number of logical CPU cores
     #[structopt(long, default_value = "1")]
     cpu_cores: usize,
@@ -257,8 +258,13 @@ impl ya_runtime_sdk::Runtime for Runtime {
 
 async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<Option<serialize::json::Value>> {
     let work_dir = normalize_path(&workdir).await?;
-    let package_path = normalize_path(&cli.task_package.unwrap()).await?;
-    let package_file = fs::File::open(&package_path).await?;
+    let task_packages = cli.task_package.unwrap();
+    let mut package_paths = Vec::new();
+    for path in task_packages.iter() {
+        let path = normalize_path(&path).await?;
+        package_paths.push(path);
+    }
+    let package_file = fs::File::open(&package_paths[0]).await?;
     let volume_override = cli
         .volume_override
         .map(|vo_str| serde_json::from_str::<HashMap<String, VolumeMount>>(&vo_str))
@@ -269,7 +275,7 @@ async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<Option<serialize::
         package_file,
         cli.cpu_cores,
         (cli.mem_gib * 1024.) as usize,
-        package_path,
+        &package_paths,
         volume_override,
     )
     .await

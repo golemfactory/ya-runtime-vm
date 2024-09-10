@@ -2457,6 +2457,20 @@ static const char *environ_get(const char *name)
     return NULL;
 }
 
+static size_t storage_count_rootfs_layers(struct storage_node_t *node)
+{
+    size_t count = 0;
+
+    while (node != NULL)
+    {
+        count += !!!strncmp(node->path, "/mnt/image-", 11);
+
+        node = node->next;
+    }
+
+    return count;
+}
+
 static void storage_append(
     struct storage_node_t **node,
     const char *path,
@@ -2536,7 +2550,7 @@ static void do_mkfs(const char *path)
 
 static char *find_volume_path_in_env(int volume_id)
 {
-    char buffer[sizeof "vol-000-path"] = {};
+    char buffer[sizeof "vol-000-path"];
     snprintf(buffer, sizeof buffer, "vol-%d-path", volume_id);
     const size_t len = strlen(buffer);
     for (char **p = environ; *p; ++p)
@@ -2589,11 +2603,18 @@ static void scan_storage(struct storage_node_t **list)
         char dev_path[16];
         CHECK_BOOL(snprintf(dev_path, 16, "/dev/%s", curr->d_name) >= 6);
 
-        // nvidia-files and rootfs does not require formatting
-        if (strcmp(serial, "nvidia-files") == 0 || strcmp(serial, "rootfs") == 0)
+        // rootfs layers does not require formatting
+        if (strncmp(serial, "rootfs-", 7) == 0)
         {
-            storage_append(list, "/", dev_path, "squashfs", "", MS_RDONLY | MS_NODEV);
-            fprintf(stderr, "Storage volume %s [%s] to be mounted at %s with data=\"\".\n", serial, dev_path, "/");
+            char *temp = NULL;
+            size_t rootfs_layer = 0;
+            sscanf(serial, "%64[^-]-%ld", temp, &rootfs_layer);
+
+            char rootfs_mount[sizeof "/mnt/image-000"];
+            snprintf(rootfs_mount, sizeof rootfs_mount, "/mnt/image-%ld", rootfs_layer);
+
+            storage_append(list, rootfs_mount, dev_path, "squashfs", "", MS_RDONLY | MS_NODEV);
+            fprintf(stderr, "Storage volume %s [%s] to be mounted at %s with data=''.\n", serial, dev_path, rootfs_mount);
             continue;
         }
 
@@ -2625,7 +2646,7 @@ static void scan_storage(struct storage_node_t **list)
         char *data = malloc(data_len);
         snprintf(data, data_len, "errors=%s", errors);
 
-        fprintf(stderr, "Storage volume %s [%s] to be mounted at %s with data=\"%s\".\n", serial, dev_path, mount_point, data);
+        fprintf(stderr, "Storage volume %s [%s] to be mounted at %s with data='%s'.\n", serial, dev_path, mount_point, data);
         storage_append(list, mount_point, dev_path, "ext2", data, MS_NODEV);
         free(data);
     }
@@ -2657,7 +2678,7 @@ static void scan_storage(struct storage_node_t **list)
 
             fprintf(stderr, "Found tmpfs volume '%d': '%s', size: %ld\n", volume_id, vol_path, vol_size);
 
-            char opt_buffer[sizeof "mode=0700,size=00000000000"] = {};
+            char opt_buffer[sizeof "mode=0700,size=00000000000"];
             snprintf(opt_buffer, sizeof opt_buffer, "mode=0700,size=%ld", vol_size);
 
             storage_append(list, vol_path, "tmpfs", "tmpfs", opt_buffer, MS_NODEV);
@@ -2738,18 +2759,23 @@ int main(int argc, char **argv)
 
     CHECK(mkdir("/mnt", S_IRWXU));
     CHECK(mkdir("/proc", S_IRWXU));
-    CHECK(mkdir("/mnt/image", S_IRWXU));
     CHECK(mkdir("/mnt/overlay", S_IRWXU));
     CHECK(mkdir(SYSROOT, DEFAULT_DIR_PERMS));
 
     scan_storage(&g_storage);
 
-    // 'workdir' and 'upperdir' have to be on the same filesystem
-    CHECK(mount("tmpfs", "/mnt/overlay", "tmpfs",
-                MS_NOSUID | MS_NODEV,
-                "mode=0700,size=128M"));
-
     struct storage_node_t *storage = g_storage;
+
+    fprintf(stderr, "Found storage:\n");
+    while (storage != NULL)
+    {
+        fprintf(stderr, " path = '%8s' @ '%s' fstype = '%s' data = '%s' flags = '%ld'\n", storage->dev, storage->path, storage->fstype, storage->data, storage->flags);
+        storage = storage->next;
+    }
+
+    storage = g_storage;
+
+    char *overlay_data = "mode=0700,size=128M";
 
     while (storage != NULL)
     {
@@ -2759,30 +2785,75 @@ int main(int argc, char **argv)
             continue;
         }
 
-        fprintf(stderr, "Mounting rootfs '%s' to '/mnt/image' fstype: %s, data: %s\n", storage->dev, storage->fstype, storage->data);
-        CHECK(mount(storage->dev, "/mnt/image", storage->fstype, storage->flags, storage->data));
+        overlay_data = storage->data;
 
         break;
     }
 
+    // 'workdir' and 'upperdir' have to be on the same filesystem
+    fprintf(stderr, "Mounting tmpfs to /mnt/overlay data: '%s'\n", overlay_data);
+    CHECK(mount("tmpfs", "/mnt/overlay", "tmpfs", MS_NOSUID | MS_NODEV, overlay_data));
+
+    storage = g_storage;
+
+    while (storage != NULL)
+    {
+        if (strncmp(storage->path, "/mnt/image-", 11) != 0)
+        {
+            storage = storage->next;
+            continue;
+        }
+
+        CHECK(mkdir(storage->path, S_IRWXU));
+        fprintf(stderr, "Mounting rootfs '%s' to '%s' fstype: %s, data: '%s'\n", storage->dev, storage->path, storage->fstype, storage->data);
+        CHECK(mount(storage->dev, storage->path, storage->fstype, storage->flags, storage->data));
+
+        storage = storage->next;
+    }
+
     {
         struct stat statbuf;
-        CHECK(stat("/mnt/image", &statbuf));
+        CHECK(stat("/mnt/image-0", &statbuf));
         CHECK(mkdir("/mnt/overlay/upper", statbuf.st_mode));
         CHECK(mkdir("/mnt/overlay/work", statbuf.st_mode));
     }
 
-    if (access("/dev/vdb", R_OK) == 0 && false)
     {
-        CHECK(mkdir("/mnt/gpu-runtime", S_IRWXU));
-        CHECK(mount("/dev/vdb", "/mnt/gpu-runtime", "squashfs", MS_RDONLY | MS_NODEV, ""));
-        CHECK(mount("overlay", SYSROOT, "overlay", MS_NODEV,
-                    "lowerdir=/mnt/gpu-runtime:/mnt/image,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work"));
-    }
-    else
-    {
-        CHECK(mount("overlay", SYSROOT, "overlay", MS_NODEV,
-                    "lowerdir=/mnt/image,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work"));
+        const size_t rootfs_layers_count = storage_count_rootfs_layers(g_storage);
+        const size_t lowerdirs_size =
+            rootfs_layers_count * sizeof("/mnt/image-000") + rootfs_layers_count;
+        char *const lowerdirs = malloc(lowerdirs_size);
+
+        char *temp = lowerdirs;
+
+        for (size_t layer = 0; layer < rootfs_layers_count; ++layer)
+        {
+            char layer_name[sizeof "/mnt/image-000"];
+            snprintf(layer_name, sizeof layer_name, "/mnt/image-%ld", layer);
+
+            const size_t layer_size = strlen(layer_name);
+            memcpy(temp, layer_name, layer_size);
+
+            temp += layer_size;
+
+            if (layer < rootfs_layers_count - 1)
+            {
+                *temp++ = ':';
+            }
+        }
+        *temp = '\0';
+
+        const char *const overlay_data_format =
+            "lowerdir=%s,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work";
+        const size_t overlay_data_size = strlen(overlay_data_format) + strlen(lowerdirs);
+        char *const overlay_data = malloc(overlay_data_size);
+        snprintf(overlay_data, overlay_data_size, overlay_data_format, lowerdirs);
+
+        fprintf(stderr, "Mounting overlay to '%s' data: %s\n", SYSROOT, overlay_data);
+        CHECK(mount("overlay", SYSROOT, "overlay", MS_NODEV, overlay_data));
+
+        free(lowerdirs);
+        free(overlay_data);
     }
 
     storage = g_storage;
@@ -2792,7 +2863,7 @@ int main(int argc, char **argv)
 
     while (storage != NULL)
     {
-        if (strcmp(storage->path, "/") == 0)
+        if (strncmp(storage->path, "/mnt/image-", 11) == 0 || strcmp(storage->path, "/") == 0)
         {
             storage = storage->next;
             continue;
@@ -2801,13 +2872,12 @@ int main(int argc, char **argv)
         const size_t length = sizeof(SYSROOT) + strlen(storage->path) + 1;
         char *storage_path = malloc(length);
         snprintf(storage_path, length, SYSROOT "%s", storage->path);
-        fprintf(stderr, " storage-final-path: %s\n", storage_path);
 
         char *storage_path_dup = strdup(storage_path);
         CHECK(create_dir_path(storage_path_dup, upper_statbuf.st_mode, NULL));
         free(storage_path_dup);
 
-        fprintf(stderr, "Mounting '%s' to '%s' fstype: %s, data: %s\n", storage->dev, storage_path, storage->fstype, storage->data);
+        fprintf(stderr, "Mounting '%s' to '%s' fstype: '%s', data: '%s'\n", storage->dev, storage_path, storage->fstype, storage->data);
         CHECK(mount(storage->dev, storage_path, storage->fstype, storage->flags, storage->data));
 
         free(storage_path);
@@ -2867,11 +2937,6 @@ int main(int argc, char **argv)
             fprintf(stderr, "WARNING: Disabling sandboxing.\n");
             do_sandbox = false;
         }
-    }
-
-    for (char **p = environ; *p; ++p)
-    {
-        fprintf(stderr, "Environment variable: %s\n", *p);
     }
 
     if (nvidia_loaded)

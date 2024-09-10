@@ -26,7 +26,7 @@ pub struct Deployment {
     #[serde(default)]
     pub mem_mib: usize,
     #[serde(default)]
-    pub task_package: PathBuf,
+    pub task_packages: Vec<PathBuf>,
     pub user: (u32, u32),
     pub volumes: Vec<ContainerVolume>,
     pub mounts: Vec<DeploymentMount>,
@@ -38,7 +38,7 @@ impl Deployment {
         mut input: Input,
         cpu_cores: usize,
         mem_mib: usize,
-        task_package: PathBuf,
+        task_packages: &[PathBuf],
         volume_override: HashMap<String, VolumeMount>,
     ) -> Result<Self, anyhow::Error>
     where
@@ -108,7 +108,7 @@ impl Deployment {
         Ok(Deployment {
             cpu_cores,
             mem_mib,
-            task_package,
+            task_packages: task_packages.into(),
             user: parse_user(config.user.as_ref()).unwrap_or((0, 0)),
             volumes,
             mounts,

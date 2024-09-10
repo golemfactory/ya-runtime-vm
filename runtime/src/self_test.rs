@@ -22,6 +22,8 @@ use crate::vmrt::{runtime_dir, RuntimeData};
 use crate::{qcow2_min, Runtime, TestConfig};
 
 const FILE_TEST_IMAGE: &str = "self-test.gvmi";
+const FILE_TEST_LAYER_1_IMAGE: &str = "self-test-layer-1.gvmi";
+const FILE_TEST_LAYER_2_IMAGE: &str = "self-test-layer-2.gvmi";
 const FILE_TEST_EXECUTABLE: &str = "ya-self-test";
 
 struct RaiiDir(PathBuf);
@@ -152,19 +154,33 @@ async fn self_test_deployment(
         .join(FILE_TEST_IMAGE)
         .canonicalize()
         .expect("Test image not found");
+    let package_path_layer_1 = runtime_dir()
+        .expect("Runtime directory not found")
+        .join(FILE_TEST_LAYER_1_IMAGE)
+        .canonicalize()
+        .expect("Test image not found");
+    let package_path_layer_2 = runtime_dir()
+        .expect("Runtime directory not found")
+        .join(FILE_TEST_LAYER_2_IMAGE)
+        .canonicalize()
+        .expect("Test image not found");
+    let package_paths = [package_path, package_path_layer_1, package_path_layer_2];
 
     let cpu_cores = test_config.test_cpu_cores;
     let mem_gib = test_config.test_mem_gib;
-    log::info!("Task package: {}", package_path.display());
+    log::info!("Task packages:");
+    for path in package_paths.iter() {
+        log::info!("{}", path.display());
+    }
     let mem_mib = (mem_gib * 1024.) as usize;
-    let package_file = fs::File::open(package_path.clone())
+    let package_file = fs::File::open(package_paths[0].clone())
         .await
         .or_err("Error reading package file")?;
     let deployment = Deployment::try_from_input(
         package_file,
         cpu_cores,
         mem_mib,
-        package_path.clone(),
+        &package_paths,
         HashMap::from_iter([
             (
                 "/golem/storage".to_string(),
