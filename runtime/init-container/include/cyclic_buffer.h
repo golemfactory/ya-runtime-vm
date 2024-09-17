@@ -34,30 +34,30 @@ int cyclic_buffer_init(struct cyclic_buffer* cb, size_t size);
 int cyclic_buffer_deinit(struct cyclic_buffer* cb);
 
 /* Returns the size of data in the buffer. */
-size_t cyclic_buffer_data_size(struct cyclic_buffer* cb);
+size_t cyclic_buffer_data_size(const struct cyclic_buffer* cb);
 /* Returns the size of the free space in the buffer. */
-size_t cyclic_buffer_free_size(struct cyclic_buffer* cb);
+size_t cyclic_buffer_free_size(const struct cyclic_buffer* cb);
 
 /*
  * Reads at most `count` bytes from `fd` into the buffer.
- * This functions has exactly same sematics as `read`, except that it handles
+ * This functions has exactly same semantics as `read`, except that it handles
  * `EINTR` internally.
  * Note that `count` could be greater than the buffer capacity, in which case
- * least recently read data will be overwritten (if there is enought data to be
+ * least recently read data will be overwritten (if there is enough data to be
  * read).
  * If this `fd` is in blocking mode this might block, even if there is some
- * (but less than `count`) data available, thus non-blocking mode is prefered.
+ * (but less than `count`) data available, thus non-blocking mode is preferred.
  */
 ssize_t cyclic_buffer_read(int fd, struct cyclic_buffer* cb, size_t count);
 
 /*
  * Writes at most `count` bytes from buffer into `fd`.
- * This functions has exactly same sematics as `write`, except that it handles
+ * This functions has exactly same semantics as `write`, except that it handles
  * `EINTR` internally.
- * Might write less data than requests if there is not enought data in buffer
+ * Might write fewer data than requests if there is not enough data in buffer
  * or due to normal short write.
  * If this `fd` is in blocking mode this might block, even if some bytes (but
- * less than `count`) were already written, thus non-blocking mode is prefered.
+ * less than `count`) were already written, thus non-blocking mode is preferred.
  */
 ssize_t cyclic_buffer_write(int fd, struct cyclic_buffer* cb, size_t count);
 

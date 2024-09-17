@@ -1,7 +1,7 @@
 #ifndef _NETWORK_H
 #define _NETWORK_H
 
-int net_create_lo(char *name);
+int net_create_lo(const char *name);
 int net_create_tap(char *name);
 
 int net_if_up(const char *name, int up);

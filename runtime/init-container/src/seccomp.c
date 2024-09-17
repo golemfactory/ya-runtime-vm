@@ -1,14 +1,11 @@
 #define _GNU_SOURCE
-#include <assert.h>
 #include <errno.h>
 #include <seccomp.h>
 #include <fcntl.h>
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <stdnoreturn.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -17,7 +14,6 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <inttypes.h>
-#include <limits.h>
 #include <time.h>
 #include "init-seccomp.h"
 
@@ -457,13 +453,13 @@ static const char *eperm_syscalls[] = {
 #define ARRAY_SIZE(x) (sizeof(x)/sizeof(x[0]))
 
 static void
-ya_runtime_add_syscalls(scmp_filter_ctx ctx, const char *const *syscalls,
-                        size_t count, uint32_t arch, uint32_t action) {
+ya_runtime_add_syscalls(const scmp_filter_ctx ctx, const char *const *syscalls,
+                        const size_t count, const uint32_t arch, const uint32_t action) {
     for (size_t i = 0; i < count; ++i) {
-        int syscall_number = seccomp_syscall_resolve_name_rewrite(arch, syscalls[i]);
+        const int syscall_number = seccomp_syscall_resolve_name_rewrite(arch, syscalls[i]);
         if (syscall_number == __NR_SCMP_ERROR)
             abort();
-        int status = seccomp_rule_add(ctx, action, syscall_number, 0);
+        const int status = seccomp_rule_add(ctx, action, syscall_number, 0);
         if (status != 0)
             abort();
     }
@@ -479,8 +475,8 @@ void setup_sandbox(void) {
         abort();
 
     ya_runtime_add_syscalls(ctx, allow_syscalls, ARRAY_SIZE(allow_syscalls), arch, SCMP_ACT_ALLOW);
-    int status = seccomp_rule_add(ctx, SCMP_ACT_ALLOW,
-                                  SCMP_SYS(personality), 1, SCMP_CMP64(0, SCMP_CMP_EQ, 0, 0));
+    const int status = seccomp_rule_add(ctx, SCMP_ACT_ALLOW,
+                                        SCMP_SYS(personality), 1, SCMP_CMP64(0, SCMP_CMP_EQ, 0, 0));
     if (status != 0) {
         abort();
     }
@@ -500,7 +496,7 @@ void setup_sandbox(void) {
     }
 
     ya_runtime_add_syscalls(ctx, eperm_syscalls, ARRAY_SIZE(eperm_syscalls), arch, SCMP_ACT_ERRNO(EPERM));
-    int fd = memfd_create("fake", MFD_CLOEXEC);
+    const int fd = memfd_create("fake", MFD_CLOEXEC);
     if (fd < 3)
         abort();
     if (seccomp_export_bpf(ctx, fd))

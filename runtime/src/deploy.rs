@@ -9,7 +9,15 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 use tokio_byteorder::LittleEndian;
 use uuid::Uuid;
 
+use ya_client_model::activity::exe_script_command::VolumeMount;
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DeploymentMount {
+    pub name: String,
+    pub guest_path: String,
+    pub mount: VolumeMount,
+}
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Deployment {
@@ -18,9 +26,10 @@ pub struct Deployment {
     #[serde(default)]
     pub mem_mib: usize,
     #[serde(default)]
-    pub task_package: PathBuf,
+    pub task_packages: Vec<PathBuf>,
     pub user: (u32, u32),
     pub volumes: Vec<ContainerVolume>,
+    pub mounts: Vec<DeploymentMount>,
     pub config: ContainerConfig,
 }
 
@@ -29,7 +38,8 @@ impl Deployment {
         mut input: Input,
         cpu_cores: usize,
         mem_mib: usize,
-        task_package: PathBuf,
+        task_packages: &[PathBuf],
+        volume_override: HashMap<String, VolumeMount>,
     ) -> Result<Self, anyhow::Error>
     where
         Input: AsyncRead + AsyncSeek + Unpin,
@@ -57,12 +67,51 @@ impl Deployment {
         }
 
         let config: ContainerConfig = serde_json::from_str(&json)?;
+
+        let mut volumes = parse_volumes(config.volumes.as_ref());
+
+        let mounts = volume_override
+            .into_iter()
+            .filter_map(|(path, vol_mount)| match vol_mount {
+                VolumeMount::Host {} => {
+                    let volume_present = volumes.iter().any(|vol| vol.path == path);
+                    if !volume_present {
+                        volumes.push(ContainerVolume {
+                            name: format!("vol-{}", Uuid::new_v4()),
+                            path,
+                        });
+                    }
+
+                    None
+                }
+
+                VolumeMount::Ram { .. } => {
+                    volumes.retain(|vol| vol.path != path);
+                    Some(DeploymentMount {
+                        name: format!("tmpfs-{}", Uuid::new_v4()),
+                        guest_path: path,
+                        mount: vol_mount,
+                    })
+                }
+
+                VolumeMount::Storage { .. } => {
+                    volumes.retain(|vol| vol.path != path);
+                    Some(DeploymentMount {
+                        name: format!("vol-{}.img", Uuid::new_v4()),
+                        guest_path: path,
+                        mount: vol_mount,
+                    })
+                }
+            })
+            .collect();
+
         Ok(Deployment {
             cpu_cores,
             mem_mib,
-            task_package,
+            task_packages: task_packages.into(),
             user: parse_user(config.user.as_ref()).unwrap_or((0, 0)),
-            volumes: parse_volumes(config.volumes.as_ref()),
+            volumes,
+            mounts,
             config,
         })
     }
@@ -72,7 +121,7 @@ impl Deployment {
             .env
             .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect())
-            .unwrap_or_else(Vec::new)
+            .unwrap_or_default()
     }
 }
 

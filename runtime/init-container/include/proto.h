@@ -8,7 +8,7 @@
 /*
  * Host -> Guest
  *
- * - u64 message ID (non zero),
+ * - u64 message ID (non-zero),
  * - 1 byte type,
  * - stream of sub-messages ended with `SUB_MSG_END`; each sub-message
  *   consists of 1 byte subtype subtype-specific body (described near each
@@ -37,7 +37,7 @@ struct msg_hdr {
     uint8_t type;
 };
 
-/* All of the messages can respond with RESP_ERR in addition to what's listed
+/* All the messages can respond with RESP_ERR in addition to what's listed
  * below. */
 enum HOST_MSG_TYPE {
     /* Expected response: RESP_OK */
@@ -91,7 +91,7 @@ enum SUB_MSG_RUN_PROCESS_TYPE {
     /* Gid to run as. (u32) */
     SUB_MSG_RUN_PROCESS_GID,
     /* Redirect a fd to the given path. (u32 + REDIRECT_FD_TYPE (1-byte)
-     * + type sepcific data). */
+     * + type specific data). */
     SUB_MSG_RUN_PROCESS_RFD,
     /* Path to set as current working directory. (BYTES) */
     SUB_MSG_RUN_PROCESS_CWD,

@@ -12,7 +12,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 #include "network.h"
@@ -43,7 +42,7 @@ int net_if_alias(struct ifreq *ifr, const char *name) {
     return 0;
 }
 
-int net_create_lo(char *name) {
+int net_create_lo(const char *name) {
     struct ifreq ifr;
     int fd, ret;
 
@@ -146,7 +145,7 @@ int net_if_addr(const char *name, const char *ip, const char *mask) {
     memset(&ifr, 0, sizeof(ifr));
     strncpy(ifr.ifr_name, name, sizeof(ifr.ifr_name) - 1);
 
-    if ((ret = ioctl(fd, SIOCGIFADDR, &ifr)) == 0) {
+    if (ioctl(fd, SIOCGIFADDR, &ifr) == 0) {
         if ((ret = net_if_alias(&ifr, name)) < 0) {
             goto end;
         }
@@ -169,9 +168,7 @@ int net_if_addr(const char *name, const char *ip, const char *mask) {
     }
 
     ifr.ifr_flags = IFF_UP;
-    if ((ret = ioctl(fd, SIOCSIFFLAGS, &ifr)) < 0) {
-        goto end;
-    }
+    ret = ioctl(fd, SIOCSIFFLAGS, &ifr);
 
 end:
     close(fd);
@@ -195,7 +192,7 @@ int net_if_addr6(const char *name, const char *ip6) {
         goto end;
     }
 
-    if ((ret = ioctl(fd, SIOCGIFADDR, &ifr)) == 0) {
+    if (ioctl(fd, SIOCGIFADDR, &ifr) == 0) {
         if ((ret = net_if_alias(&ifr, name)) < 0) {
             goto end;
         }
@@ -208,7 +205,7 @@ int net_if_addr6(const char *name, const char *ip6) {
     ifr6.ifindex = ifr.ifr_ifindex;
     ifr6.prefixlen = pl;
 
-    if ((ret = inet_pton(AF_INET6, ip6, (void *) &ifr6.addr)) < 0) {
+    if ((ret = inet_pton(AF_INET6, ip6, &ifr6.addr)) < 0) {
         goto end;
     }
     if ((ret = ioctl(fd, SIOCSIFADDR, &ifr6)) < 0) {
@@ -216,9 +213,8 @@ int net_if_addr6(const char *name, const char *ip6) {
     }
 
     ifr.ifr_flags |= IFF_UP;
-    if ((ret = ioctl(fd, SIOCSIFFLAGS, &ifr)) < 0) {
-        goto end;
-    }
+    ret = ioctl(fd, SIOCSIFFLAGS, &ifr);
+
 end:
     close(fd);
     return ret;
@@ -226,7 +222,7 @@ end:
 
 int net_if_addr_to_hw_addr(const char *ip, char *mac) {
     struct ifreq ifr;
-    int ret = 0;
+    int ret;
 
     struct sockaddr_in* sa = (struct sockaddr_in*) &ifr.ifr_addr;
     sa->sin_family = AF_INET;
@@ -235,7 +231,7 @@ int net_if_addr_to_hw_addr(const char *ip, char *mac) {
         goto end;
     }
 
-    char *p = (char *)(void *) &sa->sin_addr;
+    const char *p = (void *) &sa->sin_addr;
 
     mac[0] = 0x90;
     mac[1] = 0x13;
@@ -251,13 +247,13 @@ end:
 
 int net_if_addr6_to_hw_addr(const char *ip, char *mac) {
     struct ifreq6_stub ifr6;
-    int ret = 0;
+    int ret;
 
-    if ((ret = inet_pton(AF_INET6, ip, (void *) &ifr6.addr)) < 0) {
+    if ((ret = inet_pton(AF_INET6, ip, &ifr6.addr)) < 0) {
         goto end;
     }
 
-    char *p = ((char *)(void *) &ifr6.addr) + 12;
+    const char *p = (char *)(void *) &ifr6.addr + 12;
 
     mac[0] = 0x90;
     mac[1] = 0x13;
@@ -272,7 +268,7 @@ end:
 
 int net_if_hw_addr(const char *name, const char mac[6]) {
     struct ifreq ifr;
-    int fd, ret = 0;
+    int fd;
 
     if ((fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL))) < 0) {
         return fd;
@@ -282,19 +278,15 @@ int net_if_hw_addr(const char *name, const char mac[6]) {
     memcpy(ifr.ifr_hwaddr.sa_data, mac, 6);
 
     strncpy(ifr.ifr_name, name, sizeof(ifr.ifr_name) - 1);
-    if ((ret = ioctl(fd, SIOCSIFHWADDR, &ifr)) < 0) {
-        goto err;
-    }
+    const int ret = ioctl(fd, SIOCSIFHWADDR, &ifr);
 
-err:
     close(fd);
     return ret;
 }
 
 int net_route(const char *name, const char *ip, const char *mask, const char *via) {
     struct rtentry rt;
-    struct sockaddr_in *addr;
-    int fd, ret = 0;
+    int fd, ret;
 
     if ((fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP)) < 0) {
         return -1;
@@ -310,7 +302,7 @@ int net_route(const char *name, const char *ip, const char *mask, const char *vi
     }
     memcpy(rt.rt_dev, name, strlen(name) + 1);
 
-    addr = (struct sockaddr_in *) &rt.rt_gateway;
+    struct sockaddr_in *addr = (struct sockaddr_in *) &rt.rt_gateway;
     addr->sin_family = AF_INET;
     addr->sin_addr.s_addr = inet_addr(via);
 
@@ -334,9 +326,8 @@ int net_route(const char *name, const char *ip, const char *mask, const char *vi
         addr->sin_addr.s_addr = inet_addr(mask);
     }
 
-    if ((ret = ioctl(fd, SIOCADDRT, (void *) &rt)) < 0) {
-        goto end;
-    }
+    ret = ioctl(fd, SIOCADDRT, (void *) &rt);
+
 end:
     if (rt.rt_dev) free(rt.rt_dev);
     close(fd);
@@ -346,7 +337,7 @@ end:
 int net_route6(const char *name, const char *ip6, const char *via) {
     struct ifreq ifr;
     struct in6_rtmsg rt;
-    int fd, pl, ret = 0;
+    int fd, pl, ret;
 
     if ((fd = socket(AF_INET6, SOCK_DGRAM, 0)) < 0) {
         return -1;
@@ -371,17 +362,16 @@ int net_route6(const char *name, const char *ip6, const char *via) {
     rt.rtmsg_ifindex = ifr.ifr_ifindex;
     rt.rtmsg_flags |= RTF_UP | RTF_GATEWAY;
 
-    if ((ret = inet_pton(AF_INET6, via, (void *) &(rt.rtmsg_gateway))) < 0) {
+    if ((ret = inet_pton(AF_INET6, via, &rt.rtmsg_gateway)) < 0) {
         goto end;
     }
 
-    if ((ret = inet_pton(AF_INET6, ip6, (void *) &(rt.rtmsg_dst))) < 0) {
+    if ((ret = inet_pton(AF_INET6, ip6, &rt.rtmsg_dst)) < 0) {
         goto end;
     }
 
-    if ((ret = ioctl(fd, SIOCADDRT, (void *) &rt)) < 0) {
-        goto end;
-    }
+    ret = ioctl(fd, SIOCADDRT, (void *) &rt);
+
 end:
     close(fd);
     return ret;

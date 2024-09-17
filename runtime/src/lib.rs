@@ -1,14 +1,17 @@
 pub mod cpu;
 pub mod deploy;
 pub mod guest_agent_comm;
+mod qcow2_min;
 mod response_parser;
 mod self_test;
 pub mod vmrt;
 
 use bollard_stubs::models::ContainerConfig;
+use deploy::DeploymentMount;
 use futures::future::FutureExt;
 use futures::lock::Mutex;
 use futures::TryFutureExt;
+use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::env;
 use std::path::{Component, Path, PathBuf};
@@ -20,6 +23,7 @@ use tokio::{
     io::{self, AsyncWriteExt},
 };
 use url::Url;
+use ya_client_model::activity::exe_script_command::VolumeMount;
 
 use crate::{
     cpu::CpuInfo,
@@ -52,7 +56,8 @@ pub struct Cli {
             ("command", "run")
         ])
     )]
-    task_package: Option<PathBuf>,
+    #[structopt(multiple = true)]
+    task_package: Option<Vec<PathBuf>>,
     /// Number of logical CPU cores
     #[structopt(long, default_value = "1")]
     cpu_cores: usize,
@@ -72,6 +77,8 @@ pub struct Cli {
     /// PCI device identifier
     #[structopt(long, env = "YA_RUNTIME_VM_PCI_DEVICE")]
     pci_device: Option<Vec<String>>,
+    #[structopt(long, env = "YA_RUNTIME_VOLUME_OVERRIDE")]
+    volume_override: Option<String>,
     #[structopt(flatten)]
     test_config: TestConfig,
 }
@@ -227,7 +234,6 @@ impl ya_runtime_sdk::Runtime for Runtime {
             pci_device_id,
             test_config,
         )
-        // Dead code. ya_runtime_api::server::run_async requires killing the process to stop app
         .map(|_| Ok(None))
         .boxed_local()
     }
@@ -251,20 +257,45 @@ impl ya_runtime_sdk::Runtime for Runtime {
 
 async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<Option<serialize::json::Value>> {
     let work_dir = normalize_path(&workdir).await?;
-    let package_path = normalize_path(&cli.task_package.unwrap()).await?;
-    let package_file = fs::File::open(&package_path).await?;
+    let task_packages = cli.task_package.unwrap();
+    let mut package_paths = Vec::new();
+    for path in task_packages.iter() {
+        let path = normalize_path(&path).await?;
+        package_paths.push(path);
+    }
+    let package_file = fs::File::open(&package_paths[0]).await?;
+    let volume_override = cli
+        .volume_override
+        .map(|vo_str| serde_json::from_str::<HashMap<String, VolumeMount>>(&vo_str))
+        .transpose()?
+        .unwrap_or_default();
 
     let deployment = Deployment::try_from_input(
         package_file,
         cli.cpu_cores,
         (cli.mem_gib * 1024.) as usize,
-        package_path,
+        &package_paths,
+        volume_override,
     )
     .await
     .or_err("Error reading package metadata")?;
 
     for vol in &deployment.volumes {
         fs::create_dir_all(work_dir.join(&vol.name)).await?;
+    }
+
+    for DeploymentMount { name, mount, .. } in &deployment.mounts {
+        let VolumeMount::Storage {
+            size, preallocate, ..
+        } = mount
+        else {
+            continue;
+        };
+
+        let file = fs::File::create(work_dir.join(name)).await?;
+        let qcow2 =
+            qcow2_min::Qcow2Image::new(size.as_u64(), preallocate.unwrap_or_default().as_u64());
+        qcow2.write(file).await?;
     }
 
     fs::OpenOptions::new()

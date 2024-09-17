@@ -7,9 +7,9 @@
 #include "communication.h"
 #include "cyclic_buffer.h"
 
-int readn(int fd, void* buf, size_t size) {
+int readn(const int fd, void* buf, size_t size) {
     while (size) {
-        ssize_t ret = read(fd, buf, size);
+        const ssize_t ret = read(fd, buf, size);
         if (ret == 0) {
             puts("Waiting for host connection ...");
             sleep(1);
@@ -28,24 +28,24 @@ int readn(int fd, void* buf, size_t size) {
     return 0;
 }
 
-int recv_u64(int fd, uint64_t* res) {
+int recv_u64(const int fd, uint64_t* res) {
     return readn(fd, res, sizeof(*res));
 }
 
-int recv_u32(int fd, uint32_t* res) {
+int recv_u32(const int fd, uint32_t* res) {
     return readn(fd, res, sizeof(*res));
 }
 
-int recv_u16(int fd, uint16_t* res) {
+int recv_u16(const int fd, uint16_t* res) {
     return readn(fd, res, sizeof(*res));
 }
 
-int recv_u8(int fd, uint8_t* res) {
+int recv_u8(const int fd, uint8_t* res) {
     return readn(fd, res, sizeof(*res));
 }
 
-int recv_bytes(int fd, char** buf_ptr, uint64_t* size_ptr,
-                      bool is_cstring) {
+int recv_bytes(const int fd, char** buf_ptr, uint64_t* size_ptr,
+                      const bool is_cstring) {
     uint64_t size = 0;
 
     if (recv_u64(fd, &size) < 0) {
@@ -58,7 +58,7 @@ int recv_bytes(int fd, char** buf_ptr, uint64_t* size_ptr,
     }
 
     if (readn(fd, buf, size) < 0) {
-        int tmp_errno = errno;
+        const int tmp_errno = errno;
         free(buf);
         errno = tmp_errno;
         return -1;
@@ -87,7 +87,7 @@ void free_strings_array(char** array) {
     free(array);
 }
 
-int recv_strings_array(int fd, char*** array_ptr) {
+int recv_strings_array(const int fd, char*** array_ptr) {
     uint64_t size = 0;
     int ret = -1;
 
@@ -112,16 +112,16 @@ int recv_strings_array(int fd, char*** array_ptr) {
 
 out:
     if (array) {
-        int tmp_errno = errno;
+        const int tmp_errno = errno;
         free_strings_array(array);
         errno = tmp_errno;
     }
     return ret;
 }
 
-int writen(int fd, const void* buf, size_t size) {
+int writen(const int fd, const void* buf, size_t size) {
     while (size) {
-        ssize_t ret = write(fd, buf, size);
+        const ssize_t ret = write(fd, buf, size);
         if (ret == 0) {
             puts("Waiting for host connection ...");
             sleep(1);
@@ -140,7 +140,7 @@ int writen(int fd, const void* buf, size_t size) {
     return 0;
 }
 
-int send_bytes(int fd, const char* buf, uint64_t size) {
+int send_bytes(const int fd, const char* buf, const uint64_t size) {
     if (writen(fd, &size, sizeof(size)) < 0) {
         return -1;
     }
@@ -148,8 +148,8 @@ int send_bytes(int fd, const char* buf, uint64_t size) {
     return writen(fd, buf, size);
 }
 
-int send_bytes_cyclic_buffer(int fd, struct cyclic_buffer* cb, uint64_t size) {
-    size_t cb_data_size = cyclic_buffer_data_size(cb);
+int send_bytes_cyclic_buffer(const int fd, struct cyclic_buffer* cb, uint64_t size) {
+    const size_t cb_data_size = cyclic_buffer_data_size(cb);
     if (size > cb_data_size) {
         size = cb_data_size;
     }
@@ -159,7 +159,7 @@ int send_bytes_cyclic_buffer(int fd, struct cyclic_buffer* cb, uint64_t size) {
     }
 
     while (size) {
-        ssize_t ret = cyclic_buffer_write(fd, cb, size);
+        const ssize_t ret = cyclic_buffer_write(fd, cb, size);
         if (ret == 0) {
             puts("Waiting for host connection ...");
             sleep(1);

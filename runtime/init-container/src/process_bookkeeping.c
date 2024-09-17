@@ -13,7 +13,7 @@ void add_process(struct process_desc* proc_desc) {
     g_all_processes = proc_desc;
 }
 
-void remove_process(struct process_desc* proc_desc) {
+void remove_process(const struct process_desc* proc_desc) {
     if (g_all_processes == proc_desc) {
         g_all_processes = proc_desc->next;
         if (g_all_processes) {
@@ -29,7 +29,7 @@ void remove_process(struct process_desc* proc_desc) {
     }
 }
 
-struct process_desc* find_process_by_id(uint64_t id) {
+struct process_desc* find_process_by_id(const uint64_t id) {
     struct process_desc* proc_desc = g_all_processes;
     while (proc_desc) {
         if (proc_desc->id == id) {
@@ -40,7 +40,7 @@ struct process_desc* find_process_by_id(uint64_t id) {
     return NULL;
 }
 
-struct process_desc* find_process_by_pid(pid_t pid) {
+struct process_desc* find_process_by_pid(const pid_t pid) {
     struct process_desc* proc_desc = g_all_processes;
     while (proc_desc) {
         if (proc_desc->pid == pid) {

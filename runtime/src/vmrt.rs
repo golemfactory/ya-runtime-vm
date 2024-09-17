@@ -1,5 +1,5 @@
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering::Relaxed;
@@ -10,11 +10,12 @@ use futures::FutureExt;
 use tokio::io::AsyncBufReadExt;
 use tokio::{io, process, spawn};
 
+use ya_client_model::activity::exe_script_command::VolumeMount;
 use ya_runtime_sdk::runtime_api::server;
 use ya_runtime_sdk::server::ContainerEndpoint;
 use ya_runtime_sdk::{serialize, ErrorExt, EventEmitter};
 
-use crate::deploy::Deployment;
+use crate::deploy::{Deployment, DeploymentMount};
 use crate::guest_agent_comm::{GuestAgent, Notification};
 
 const DIR_RUNTIME: &str = "runtime";
@@ -70,43 +71,101 @@ pub async fn start_vmrt(
     let vpn_remote = data.vpn.clone();
     let inet_remote = data.inet.clone();
 
+    let mut kernel_cmdline = "console=ttyS0 panic=1".to_string();
+
     let mut cmd = process::Command::new(runtime_dir.join(FILE_RUNTIME));
     cmd.current_dir(&runtime_dir);
-    cmd.args([
-        "-m",
-        format!("{}M", deployment.mem_mib).as_str(),
+    let memory_size = format!("{}M", deployment.mem_mib);
+    let cpu_cores = deployment.cpu_cores.to_string();
+    let manager_sock_path = format!(
+        "socket,path={},server=on,wait=off,id=manager_cdev",
+        manager_sock.display()
+    );
+    let mut args = vec![
         "-nographic",
+        "-no-reboot",
+        "-m",
+        memory_size.as_str(),
         "-kernel",
         FILE_VMLINUZ,
         "-initrd",
         FILE_INITRAMFS,
         "-enable-kvm",
         "-cpu",
-        "host",
+        "host,-sgx",
         "-smp",
-        deployment.cpu_cores.to_string().as_str(),
-        "-append",
-        "console=ttyS0 panic=1",
+        cpu_cores.as_str(),
         "-device",
         "virtio-serial",
         "-device",
         "virtio-rng-pci",
         "-chardev",
-        format!(
-            "socket,path={},server=on,wait=off,id=manager_cdev",
-            manager_sock.display()
-        )
-        .as_str(),
+        manager_sock_path.as_str(),
         "-device",
         "virtserialport,chardev=manager_cdev,name=manager_port",
-        "-drive",
-        format!(
-            "file={},cache=unsafe,readonly=on,format=raw,if=virtio",
-            deployment.task_package.display()
-        )
-        .as_str(),
-        "-no-reboot",
-    ]);
+    ];
+
+    let rootfs_devices: Vec<(String, String)> = deployment
+        .task_packages
+        .iter()
+        .enumerate()
+        .map(|(i, path)| {
+            let drive = format!(
+                "file={},cache=unsafe,readonly=on,format=raw,id=rootfs-{},if=none",
+                path.display(),
+                i
+            );
+            let device = format!("virtio-blk-pci,drive=rootfs-{},serial=rootfs-{}", i, i);
+            (drive, device)
+        })
+        .collect();
+
+    for (drive, device) in rootfs_devices.iter() {
+        args.push("-drive");
+        args.push(drive);
+        args.push("-device");
+        args.push(device);
+    }
+
+    cmd.args(args);
+
+    for (
+        vol_idx,
+        DeploymentMount {
+            name,
+            guest_path,
+            mount,
+        },
+    ) in deployment.mounts.iter().enumerate()
+    {
+        match mount {
+            VolumeMount::Host {} => {
+                log::warn!("DeploymentMount::mount should never be VolumeMount::Host");
+            }
+            VolumeMount::Storage { errors, .. } => {
+                let errors = errors.as_deref().unwrap_or("continue");
+
+                let img_path = work_dir.join(name);
+                cmd.args([
+                    "-drive",
+                    format!(
+                        "file={},format=qcow2,media=disk,id=vol-{vol_idx},if=none",
+                        img_path.display()
+                    )
+                    .as_str(),
+                    "-device",
+                    format!("virtio-blk-pci,drive=vol-{vol_idx},serial=vol-{vol_idx}").as_ref(),
+                ]);
+                kernel_cmdline.push_str(&format!(" vol-{vol_idx}-path={guest_path}"));
+                kernel_cmdline.push_str(&format!(" vol-{vol_idx}-errors={errors}"));
+            }
+            VolumeMount::Ram { size } => {
+                let size = size.as_u64();
+                kernel_cmdline.push_str(&format!(" vol-{vol_idx}-path={guest_path}"));
+                kernel_cmdline.push_str(&format!(" vol-{vol_idx}-size={size}"));
+            }
+        }
+    }
 
     if let Some(pci_device_id) = &data.pci_device_id {
         for device_id in pci_device_id.iter() {
@@ -119,36 +178,37 @@ pub async fn start_vmrt(
     }
 
     if runtime_dir.join(FILE_NVIDIA_FILES).exists() {
-        cmd.arg("-drive");
-        cmd.arg(
+        cmd.args([
+            "-drive",
             format!(
-                "file={},cache=unsafe,readonly=on,format=raw,if=virtio",
+                "file={},cache=unsafe,readonly=on,format=raw,id=nvidia-files,if=none",
                 runtime_dir.join(FILE_NVIDIA_FILES).display()
             )
             .as_str(),
-        );
+            "-device",
+            "virtio-blk-pci,drive=nvidia-files,serial=nvidia-files"
+                .to_string()
+                .as_ref(),
+        ]);
     }
 
-    let (vpn, inet) =
-    // backward-compatibility mode
-    if vpn_remote.is_none() && inet_remote.is_none() {
-        cmd.args(["-net", "none"]);
+    cmd.args(["-append", &kernel_cmdline]);
 
-        let vpn = configure_chardev_endpoint(&mut cmd, "vpn", &temp_dir, &uid)?;
-        let inet = configure_chardev_endpoint(&mut cmd, "inet", &temp_dir, &uid)?;
-        (vpn, inet)
-    // virtio-net (preferred)
-    } else {
+    if vpn_remote.is_some() || inet_remote.is_some() {
         let mut pair = SocketPairConf::default();
+
         pair.probe().await?;
 
-        let vpn = configure_netdev_endpoint(&mut cmd, "vpn", &vpn_remote, pair.first)?;
-        let inet = configure_netdev_endpoint(&mut cmd, "inet", &inet_remote, pair.second)?;
-        (vpn, inet)
-    };
+        if let Some(vpn_remote) = vpn_remote {
+            let vpn = configure_netdev_endpoint(&mut cmd, "vpn", &vpn_remote, pair.first)?;
+            data.vpn.replace(vpn);
+        }
 
-    data.vpn.replace(vpn);
-    data.inet.replace(inet);
+        if let Some(inet_remote) = inet_remote {
+            let inet = configure_netdev_endpoint(&mut cmd, "inet", &inet_remote, pair.second)?;
+            data.inet.replace(inet);
+        }
+    }
 
     for (idx, volume) in volumes.iter().enumerate() {
         cmd.arg("-virtfs");
@@ -237,70 +297,42 @@ impl SocketPairConf {
     }
 }
 
-fn configure_chardev_endpoint(
-    cmd: &mut process::Command,
-    id: &str,
-    temp_dir: impl AsRef<Path>,
-    uid: &str,
-) -> anyhow::Result<ContainerEndpoint> {
-    let sock = temp_dir.as_ref().join(format!("{}_{}.sock", uid, id));
-
-    cmd.arg("-chardev");
-    cmd.arg(format!(
-        "socket,path={},server,wait=off,id={id}_cdev",
-        sock.display()
-    ));
-
-    cmd.arg("-device");
-    cmd.arg(format!("virtserialport,chardev={id}_cdev,name={id}_port"));
-
-    Ok(ContainerEndpoint::UnixStream(sock))
-}
-
 fn configure_netdev_endpoint(
     cmd: &mut process::Command,
     id: &str,
-    endpoint: &Option<ContainerEndpoint>,
+    endpoint: &ContainerEndpoint,
     conf: SocketConf,
 ) -> anyhow::Result<ContainerEndpoint> {
     static COUNTER: AtomicU32 = AtomicU32::new(1);
 
     let ipv4 = conf.ip;
-    let endpoint = if let Some(endpoint) = endpoint {
-        match endpoint {
-            ContainerEndpoint::UdpDatagram(remote_addr) => {
-                let port = conf.udp;
 
-                cmd.arg("-netdev");
-                cmd.arg(format!(
-                    "socket,id={id},udp={remote_addr},localaddr={ipv4}:{port}"
-                ));
+    let endpoint = match endpoint {
+        ContainerEndpoint::UdpDatagram(remote_addr) => {
+            let port = conf.udp;
 
-                ContainerEndpoint::UdpDatagram(SocketAddrV4::new(ipv4, port).into())
-            }
-            ContainerEndpoint::TcpStream(remote_addr) => {
-                cmd.arg("-netdev");
-                cmd.arg(format!("socket,id={id},connect={remote_addr}"));
+            cmd.arg("-netdev");
+            cmd.arg(format!(
+                "socket,id={id},udp={remote_addr},localaddr={ipv4}:{port}"
+            ));
 
-                ContainerEndpoint::TcpStream(*remote_addr)
-            }
-            ContainerEndpoint::TcpListener(_) => {
-                let port = conf.tcp;
-
-                cmd.arg("-netdev");
-                cmd.arg(format!("socket,id={id},listen={ipv4}:{port}"));
-
-                ContainerEndpoint::TcpStream(SocketAddrV4::new(ipv4, port).into())
-            }
-            _ => return Err(anyhow::anyhow!("Unsupported remote VPN VM endpoint")),
+            ContainerEndpoint::UdpDatagram(SocketAddrV4::new(ipv4, port).into())
         }
-    } else {
-        let port = conf.tcp;
+        ContainerEndpoint::TcpStream(remote_addr) => {
+            cmd.arg("-netdev");
+            cmd.arg(format!("socket,id={id},connect={remote_addr}"));
 
-        cmd.arg("-netdev");
-        cmd.arg(format!("socket,id={id},listen={ipv4}:{port}"));
+            ContainerEndpoint::TcpStream(*remote_addr)
+        }
+        ContainerEndpoint::TcpListener(_) => {
+            let port = conf.tcp;
 
-        ContainerEndpoint::TcpListener(SocketAddrV4::new(ipv4, port).into())
+            cmd.arg("-netdev");
+            cmd.arg(format!("socket,id={id},listen={ipv4}:{port}"));
+
+            ContainerEndpoint::TcpStream(SocketAddrV4::new(ipv4, port).into())
+        }
+        _ => return Err(anyhow::anyhow!("Unsupported remote VPN VM endpoint")),
     };
 
     let counter = COUNTER.fetch_add(1, Relaxed);

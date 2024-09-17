@@ -31,7 +31,7 @@ struct process_desc {
 };
 
 void add_process(struct process_desc* proc_desc);
-void remove_process(struct process_desc* proc_desc);
+void remove_process(const struct process_desc* proc_desc);
 struct process_desc* find_process_by_id(uint64_t id);
 struct process_desc* find_process_by_pid(pid_t pid);
 
