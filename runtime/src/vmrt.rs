@@ -75,10 +75,17 @@ pub async fn start_vmrt(
 
     let mut cmd = process::Command::new(runtime_dir.join(FILE_RUNTIME));
     cmd.current_dir(&runtime_dir);
-    cmd.args([
-        "-m",
-        format!("{}M", deployment.mem_mib).as_str(),
+    let memory_size = format!("{}M", deployment.mem_mib);
+    let cpu_cores = deployment.cpu_cores.to_string();
+    let manager_sock_path = format!(
+        "socket,path={},server=on,wait=off,id=manager_cdev",
+        manager_sock.display()
+    );
+    let mut args = vec![
         "-nographic",
+        "-no-reboot",
+        "-m",
+        memory_size.as_str(),
         "-kernel",
         FILE_VMLINUZ,
         "-initrd",
@@ -87,29 +94,40 @@ pub async fn start_vmrt(
         "-cpu",
         "host,-sgx",
         "-smp",
-        deployment.cpu_cores.to_string().as_str(),
+        cpu_cores.as_str(),
         "-device",
         "virtio-serial",
         "-device",
         "virtio-rng-pci",
         "-chardev",
-        format!(
-            "socket,path={},server=on,wait=off,id=manager_cdev",
-            manager_sock.display()
-        )
-        .as_str(),
+        manager_sock_path.as_str(),
         "-device",
         "virtserialport,chardev=manager_cdev,name=manager_port",
-        "-drive",
-        format!(
-            "file={},cache=unsafe,readonly=on,format=raw,id=rootfs,if=none",
-            deployment.task_package.display()
-        )
-        .as_str(),
-        "-device",
-        "virtio-blk-pci,drive=rootfs,serial=rootfs".as_ref(),
-        "-no-reboot",
-    ]);
+    ];
+
+    let rootfs_devices: Vec<(String, String)> = deployment
+        .task_packages
+        .iter()
+        .enumerate()
+        .map(|(i, path)| {
+            let drive = format!(
+                "file={},cache=unsafe,readonly=on,format=raw,id=rootfs-{},if=none",
+                path.display(),
+                i
+            );
+            let device = format!("virtio-blk-pci,drive=rootfs-{},serial=rootfs-{}", i, i);
+            (drive, device)
+        })
+        .collect();
+
+    for (drive, device) in rootfs_devices.iter() {
+        args.push("-drive");
+        args.push(drive);
+        args.push("-device");
+        args.push(device);
+    }
+
+    cmd.args(args);
 
     for (
         vol_idx,

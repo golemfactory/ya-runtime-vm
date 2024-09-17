@@ -49,7 +49,6 @@ pub(crate) async fn test(
     test_config: TestConfig,
 ) -> Result<(), Error> {
     run_self_test(verify_status, pci_device_id, test_config).await;
-    // Dead code. ya_runtime_api::server::run_async requires killing a process to stop
     Ok(())
 }
 
@@ -164,18 +163,23 @@ async fn self_test_deployment(
         .canonicalize()
         .expect("Test image not found");
 
+    let package_paths = [package_path];
+
     let cpu_cores = test_config.test_cpu_cores;
     let mem_gib = test_config.test_mem_gib;
-    log::info!("Task package: {}", package_path.display());
+    log::info!("Task packages:");
+    for path in package_paths.iter() {
+        log::info!("{}", path.display());
+    }
     let mem_mib = (mem_gib * 1024.) as usize;
-    let package_file = fs::File::open(package_path.clone())
+    let package_file = fs::File::open(package_paths[0].clone())
         .await
         .or_err("Error reading package file")?;
     let deployment = Deployment::try_from_input(
         package_file,
         cpu_cores,
         mem_mib,
-        package_path.clone(),
+        &package_paths,
         HashMap::from_iter([
             (
                 "/golem/storage".to_string(),
@@ -189,14 +193,6 @@ async fn self_test_deployment(
                 "/golem/storage2".to_string(),
                 VolumeMount::Ram {
                     size: "1gi".parse().unwrap(),
-                },
-            ),
-            (
-                "/".to_string(),
-                VolumeMount::Storage {
-                    size: "10mi".parse().unwrap(),
-                    preallocate: Some("128ki".parse().unwrap()),
-                    errors: None,
                 },
             ),
         ]),
