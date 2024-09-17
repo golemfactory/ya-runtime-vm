@@ -1381,7 +1381,7 @@ static uint32_t do_mount(const char* tag, char* path) {
     CHECK_BOOL(fd > 2);
     int res = snprintf(buf, sizeof buf, "/proc/self/fd/%d", fd);
     CHECK_BOOL(res >= (int)sizeof "/proc/self/fd/" && res < (int)sizeof buf);
-    if (mount(tag, buf, "9p", 0, "trans=virtio,version=9p2000.L") < 0) {
+    if (mount(tag, buf, "9p", 0, "trans=virtio,version=9p2000.L,msize=104857600") < 0) {
         res = errno;
     } else {
         res = 0;
@@ -2123,22 +2123,10 @@ static void storage_append(
 
     (*node)->next = NULL;
 
-    (*node)->path = malloc(strlen(path) + 1);
-    CHECK_BOOL((*node)->path != NULL);
-    strcpy((*node)->path, path);
-
-    (*node)->dev = malloc(strlen(dev) + 1);
-    CHECK_BOOL((*node)->dev != NULL);
-    strcpy((*node)->dev, dev);
-
-    (*node)->fstype = malloc(strlen(fstype) + 1);
-    CHECK_BOOL((*node)->fstype != NULL);
-    strcpy((*node)->fstype, fstype);
-
-    (*node)->data = malloc(strlen(data) + 1);
-    CHECK_BOOL((*node)->data != NULL);
-    strcpy((*node)->data, data);
-
+    (*node)->path = strdup(path);
+    (*node)->dev = strdup(dev);
+    (*node)->fstype = strdup(fstype);
+    (*node)->data = strdup(data);
     (*node)->flags = flags;
 }
 
@@ -2227,7 +2215,7 @@ static void scan_storage(struct storage_node_t **list) {
 
         // nvidia-files and rootfs does not require formatting
         if(strcmp(serial, "nvidia-files") == 0 || strcmp(serial, "rootfs") == 0) {
-            storage_append(list, "/", dev_path, "squashfs", "", MS_RDONLY | MS_NODEV);
+            storage_prepend(list, "/", dev_path, "squashfs", "", MS_RDONLY | MS_NODEV);
             fprintf(stderr, "Storage volume %s [%s] to be mounted at %s with data=\"\".\n", serial, dev_path, "/");
             continue;
         }
@@ -2241,11 +2229,9 @@ static void scan_storage(struct storage_node_t **list) {
 
         do_mkfs(dev_path);
 
-        int path_env_len = strlen(serial) + strlen("-path") + 1;
-        char *path_env = malloc(path_env_len);
-        snprintf(path_env, path_env_len, "%s-path", serial);
+        char *path_env = NULL;
+        asprintf(&path_env, "%s-path", serial);
         const char *mount_point = environ_get(path_env);
-        CHECK_BOOL(mount_point != NULL);
         free(path_env);
 
         int errors_env_len = strlen(serial) + strlen("-errors") + 1;
@@ -2374,10 +2360,6 @@ int main(int argc, char **argv) {
     scan_storage(&g_storage);
 
     // 'workdir' and 'upperdir' have to be on the same filesystem
-    CHECK(mount("tmpfs", "/mnt/overlay", "tmpfs",
-                MS_NOSUID | MS_NODEV,
-                "mode=0700,size=128M"));
-
     struct storage_node_t *storage = g_storage;
 
     while (storage != NULL) {
@@ -2388,9 +2370,10 @@ int main(int argc, char **argv) {
 
         fprintf(stderr, "Mounting rootfs '%s' to '/mnt/image' fstype: %s, data: %s\n", storage->dev, storage->fstype, storage->data);
         CHECK(mount(storage->dev, "/mnt/image", storage->fstype, storage->flags, storage->data));
-
-        break;
+        storage = storage->next;
     }
+
+    CHECK(mount("/dev/vda", "/mnt/image", "squashfs", MS_RDONLY | MS_NODEV, ""));
 
     {
         struct stat statbuf;

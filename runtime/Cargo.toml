@@ -68,7 +68,7 @@ assets = [
 ]
 
 [dependencies.ya-runtime-sdk]
-version = "0.4"
+workspace = true
 features = ["macros", "logger"]
 
 [dependencies]
@@ -101,7 +101,7 @@ tokio = { version = "1.21.2", features = [
 tokio-byteorder = "0.3"
 uuid = { version = "1.1", features = ["v4"] }
 url = "2.3"
-ya-client-model = { git = "https://github.com/golemfactory/ya-client.git", rev = "44746845a559d40faa2a81d41c6f663d38361286" }
+ya-client-model.workspace = true
 
 [dev-dependencies]
 env_logger = "0.10"

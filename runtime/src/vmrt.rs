@@ -1,5 +1,5 @@
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering::Relaxed;
@@ -183,7 +183,7 @@ pub async fn start_vmrt(
 
         if let Some(vpn_remote) = vpn_remote {
             let vpn = configure_netdev_endpoint(&mut cmd, "vpn", &vpn_remote, pair.first)?;
-            data.inet.replace(vpn);
+            data.vpn.replace(vpn);
         }
 
         if let Some(inet_remote) = inet_remote {
@@ -279,70 +279,42 @@ impl SocketPairConf {
     }
 }
 
-fn configure_chardev_endpoint(
-    cmd: &mut process::Command,
-    id: &str,
-    temp_dir: impl AsRef<Path>,
-    uid: &str,
-) -> anyhow::Result<ContainerEndpoint> {
-    let sock = temp_dir.as_ref().join(format!("{}_{}.sock", uid, id));
-
-    cmd.arg("-chardev");
-    cmd.arg(format!(
-        "socket,path={},server,wait=off,id={id}_cdev",
-        sock.display()
-    ));
-
-    cmd.arg("-device");
-    cmd.arg(format!("virtserialport,chardev={id}_cdev,name={id}_port"));
-
-    Ok(ContainerEndpoint::UnixStream(sock))
-}
-
 fn configure_netdev_endpoint(
     cmd: &mut process::Command,
     id: &str,
-    endpoint: &Option<ContainerEndpoint>,
+    endpoint: &ContainerEndpoint,
     conf: SocketConf,
 ) -> anyhow::Result<ContainerEndpoint> {
     static COUNTER: AtomicU32 = AtomicU32::new(1);
 
     let ipv4 = conf.ip;
-    let endpoint = if let Some(endpoint) = endpoint {
-        match endpoint {
-            ContainerEndpoint::UdpDatagram(remote_addr) => {
-                let port = conf.udp;
 
-                cmd.arg("-netdev");
-                cmd.arg(format!(
-                    "socket,id={id},udp={remote_addr},localaddr={ipv4}:{port}"
-                ));
+    let endpoint = match endpoint {
+        ContainerEndpoint::UdpDatagram(remote_addr) => {
+            let port = conf.udp;
 
-                ContainerEndpoint::UdpDatagram(SocketAddrV4::new(ipv4, port).into())
-            }
-            ContainerEndpoint::TcpStream(remote_addr) => {
-                cmd.arg("-netdev");
-                cmd.arg(format!("socket,id={id},connect={remote_addr}"));
+            cmd.arg("-netdev");
+            cmd.arg(format!(
+                "socket,id={id},udp={remote_addr},localaddr={ipv4}:{port}"
+            ));
 
-                ContainerEndpoint::TcpStream(*remote_addr)
-            }
-            ContainerEndpoint::TcpListener(_) => {
-                let port = conf.tcp;
-
-                cmd.arg("-netdev");
-                cmd.arg(format!("socket,id={id},listen={ipv4}:{port}"));
-
-                ContainerEndpoint::TcpStream(SocketAddrV4::new(ipv4, port).into())
-            }
-            _ => return Err(anyhow::anyhow!("Unsupported remote VPN VM endpoint")),
+            ContainerEndpoint::UdpDatagram(SocketAddrV4::new(ipv4, port).into())
         }
-    } else {
-        let port = conf.tcp;
+        ContainerEndpoint::TcpStream(remote_addr) => {
+            cmd.arg("-netdev");
+            cmd.arg(format!("socket,id={id},connect={remote_addr}"));
 
-        cmd.arg("-netdev");
-        cmd.arg(format!("socket,id={id},listen={ipv4}:{port}"));
+            ContainerEndpoint::TcpStream(*remote_addr)
+        }
+        ContainerEndpoint::TcpListener(_) => {
+            let port = conf.tcp;
 
-        ContainerEndpoint::TcpListener(SocketAddrV4::new(ipv4, port).into())
+            cmd.arg("-netdev");
+            cmd.arg(format!("socket,id={id},listen={ipv4}:{port}"));
+
+            ContainerEndpoint::TcpStream(SocketAddrV4::new(ipv4, port).into())
+        }
+        _ => return Err(anyhow::anyhow!("Unsupported remote VPN VM endpoint")),
     };
 
     let counter = COUNTER.fetch_add(1, Relaxed);

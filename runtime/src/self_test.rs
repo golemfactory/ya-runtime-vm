@@ -1,9 +1,13 @@
 use anyhow::bail;
+use futures::future::BoxFuture;
 use futures::lock::Mutex;
+use futures::FutureExt;
 use notify::event::{AccessKind, AccessMode};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::future;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -14,7 +18,7 @@ use uuid::Uuid;
 use ya_client_model::activity::exe_script_command::VolumeMount;
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 use ya_runtime_sdk::runtime_api::server::RuntimeHandler;
-use ya_runtime_sdk::{runtime_api::server, server::Server, Context, Error, ErrorExt, EventEmitter};
+use ya_runtime_sdk::{runtime_api::server, Error, ErrorExt, EventEmitter};
 use ya_runtime_sdk::{ProcessStatus, RunProcess, RuntimeStatus};
 
 use crate::deploy::{Deployment, DeploymentMount};
@@ -61,6 +65,20 @@ pub(crate) async fn run_self_test<HANDLER>(
 ) where
     HANDLER: Fn(anyhow::Result<Value>) -> anyhow::Result<String>,
 {
+    struct Emitter;
+
+    impl RuntimeHandler for Emitter {
+        fn on_process_status<'a>(&self, _: ProcessStatus) -> BoxFuture<'a, ()> {
+            future::ready(()).boxed()
+        }
+
+        fn on_runtime_status<'a>(&self, _: RuntimeStatus) -> BoxFuture<'a, ()> {
+            future::ready(()).boxed()
+        }
+    }
+
+    let emitter = Emitter;
+
     let tmp = std::env::temp_dir();
     let work_dir = tmp.join(format!("ya-runtime-vm-self-test-{}", Uuid::new_v4()));
     let work_dir_handle =
@@ -82,53 +100,46 @@ pub(crate) async fn run_self_test<HANDLER>(
     let runtime = self_test_runtime(deployment, pci_device_id);
 
     let work_dir = &work_dir;
-    server::run_async(|emitter| async move {
-        let ctx = Context::try_new().expect("Creates runtime context");
 
-        log::info!("Starting runtime");
-        let start_response = start_runtime(emitter, work_dir.clone(), runtime.data.clone())
-            .await
-            .expect("Starts runtime");
-        log::info!("Runtime start response {:?}", start_response);
-
-        log::info!("Runtime: {:?}", runtime.data);
-        log::info!("Running self test command");
-        let timeout = test_config.test_timeout();
-        run_self_test_command(
-            runtime.data.clone(),
-            &output_dir,
-            &output_file,
-            &output_file_vm,
-            timeout,
-        )
+    log::info!("Starting runtime");
+    let start_response = start_runtime(emitter, work_dir.clone(), runtime.data.clone())
         .await
-        .expect("Can run self-test command");
+        .expect("Starts runtime");
+    log::info!("Runtime start response {:?}", start_response);
 
-        log::info!("Stopping runtime");
-        crate::stop(runtime.data.clone())
-            .await
-            .expect("Stops runtime");
+    log::info!("Runtime: {:?}", runtime.data);
+    log::info!("Running self test command");
+    let timeout = test_config.test_timeout();
+    run_self_test_command(
+        runtime.data.clone(),
+        &output_dir,
+        &output_file,
+        &output_file_vm,
+        timeout,
+    )
+    .await
+    .expect("Can run self-test command");
 
-        log::info!("Handling result");
-        let out_result = read_json(&output_file);
-        let result = handle_result(out_result).expect("Handles test result");
-        if !result.is_empty() {
-            // the server refuses to stop by itself; print output to stdout
-            print!("{result}");
-        }
+    log::info!("Stopping runtime");
+    crate::stop(runtime.data.clone())
+        .await
+        .expect("Stops runtime");
 
-        log::debug!("Deleting output files");
-        std::fs::remove_dir_all(output_dir).expect("Removes self-test output dir");
+    log::info!("Handling result");
+    let out_result = read_json(&output_file);
+    let result = handle_result(out_result).expect("Handles test result");
+    if !result.is_empty() {
+        // the server refuses to stop by itself; print output to stdout
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(result.as_bytes()).unwrap();
+        stdout.write_all(b"\n").unwrap();
+        stdout.flush().unwrap();
+    }
 
-        // the server refuses to stop by itself; force quit
-        tokio::spawn(async move {
-            drop(work_dir_handle);
-            std::process::exit(0);
-        });
+    log::debug!("Deleting output files");
+    std::fs::remove_dir_all(output_dir).expect("Removes self-test output dir");
 
-        Server::new(runtime, ctx)
-    })
-    .await;
+    drop(work_dir_handle);
 }
 
 fn self_test_runtime(deployment: Deployment, pci_device_id: Option<Vec<String>>) -> Runtime {
@@ -176,16 +187,16 @@ async fn self_test_deployment(
             ),
             (
                 "/golem/storage2".to_string(),
-                VolumeMount::Storage {
-                    size: "10mi".parse().unwrap(),
-                    preallocate: Some("128ki".parse().unwrap()),
-                    errors: None,
+                VolumeMount::Ram {
+                    size: "1gi".parse().unwrap(),
                 },
             ),
             (
                 "/".to_string(),
-                VolumeMount::Ram {
-                    size: "1gi".parse().unwrap(),
+                VolumeMount::Storage {
+                    size: "10mi".parse().unwrap(),
+                    preallocate: Some("128ki".parse().unwrap()),
+                    errors: None,
                 },
             ),
         ]),
