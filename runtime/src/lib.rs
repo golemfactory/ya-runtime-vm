@@ -427,8 +427,8 @@ fn offer(self_test_result: serde_json::Value) -> anyhow::Result<serde_json::Valu
         .or_err("Unable to read offer template as a map")?;
 
     if is_gpu_supported(&self_test_result) {
-        properties.insert("golem.!exp.gap-35.v1.inf".into(), self_test_result);
-        runtime_capabilities.push("!exp:gpu");
+        properties.insert("golem.inf".into(), self_test_result);
+        runtime_capabilities.push("gpu");
     }
 
     properties.insert(
