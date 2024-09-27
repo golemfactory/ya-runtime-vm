@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::io::SeekFrom;
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
+use std::{collections::HashMap, path::Path};
 
 use bollard_stubs::models::ContainerConfig;
 use crc::crc32;
@@ -69,6 +70,18 @@ impl Deployment {
         let config: ContainerConfig = serde_json::from_str(&json)?;
 
         let mut volumes = parse_volumes(config.volumes.as_ref());
+
+        // Host mount type is not permitted for rootfs
+        for (path, mount) in &volume_override {
+            if let VolumeMount::Host {} = mount {
+                // catches `/` as well as `` and `///`  etc.
+                if path.bytes().all(|b| b == b'/') {
+                    return Err(anyhow::anyhow!(
+                        r#"Volume of type `host` specified for path="/""#
+                    ));
+                }
+            }
+        }
 
         let mounts = volume_override
             .into_iter()

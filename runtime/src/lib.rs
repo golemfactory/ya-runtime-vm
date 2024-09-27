@@ -395,6 +395,8 @@ pub(crate) async fn stop(
         convert_result(ga.quit().await, "Sending quit")?;
     }
 
+    runtime.kill().await.expect("Sending kill to runtime failed");
+
     runtime
         .wait()
         .await
