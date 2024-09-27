@@ -192,6 +192,8 @@ pub async fn start_vmrt(
         ]);
     }
 
+    kernel_cmdline.push_str(&format!(" hostname={}", deployment.hostname));
+
     cmd.args(["-append", &kernel_cmdline]);
 
     if vpn_remote.is_some() || inet_remote.is_some() {
