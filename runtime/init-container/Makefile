@@ -65,9 +65,16 @@ $(SRC_DIR)/seccomp.o: $(CURDIR)/$(LIBSECCOMP_SUBMODULE)/include/seccomp.h
 %.o: %.c
 	$(QUIET_CC)$(CC) $(CFLAGS) -o $@ -c $<
 
-init: $(UNPACKED_HEADERS) $(OBJECTS) $(OBJECTS_EXT) $(CURDIR)/$(LIBSECCOMP_SUBMODULE)/src/.libs/libseccomp.a
-	@echo init
+cinit: $(UNPACKED_HEADERS) $(OBJECTS) $(OBJECTS_EXT) $(CURDIR)/$(LIBSECCOMP_SUBMODULE)/src/.libs/libseccomp.a
+	@echo cinit
 	$(QUIET_CC)$(CC) $(CFLAGS) -static -o $@ $(wordlist 2, $(words $^), $^)
+	@# default musl libs on some distros have debug symbols, lets strip them (and everything else)
+	strip $@
+
+init: $(UNPACKED_HEADERS)
+	@echo init
+	cargo build --color always --target=x86_64-unknown-linux-musl --manifest-path rinit/Cargo.toml -p rinit --release --bin rinit
+	cp ../../target/x86_64-unknown-linux-musl/release/rinit init
 	@# default musl libs on some distros have debug symbols, lets strip them (and everything else)
 	strip $@
 
@@ -112,6 +119,7 @@ vmlinuz-virt: $(UNPACKED_KERNEL)
 
 initramfs.cpio.gz: init mkfs $(UNPACKED_KERNEL)
 	$(RM) -rf initramfs
+	echo "Building initramfs.cpio.gz"
 	mkdir initramfs
 	cp $< initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/drivers/virtio/virtio.ko initramfs
