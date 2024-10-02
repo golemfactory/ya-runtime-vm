@@ -128,6 +128,11 @@ pub fn send_i32(fd: i32, value: i32) {
     let _result = write_fd(fd, &buf);
 }
 
+pub fn send_u64(fd: i32, value: u64) {
+    let buf = value.to_ne_bytes();
+    let _result = write_fd(fd, &buf);
+}
+
 fn send_response_header(message_id: u64, msg_type: Response) {
     let header = MessageHeader {
         msg_id: message_id,
@@ -144,6 +149,14 @@ fn send_response_header(message_id: u64, msg_type: Response) {
 
     let result = write_n(cmds_fd.as_raw_fd(), &header.to_ne_bytes());
     println!("result: {:?} errno: {:?}", result, Errno::last());
+}
+
+pub fn send_response_u64(message_id: u64, value: u64) {
+    send_response_header(message_id, Response::Ok);
+
+    let cmds_fd = unsafe { CMDS_FD.as_ref().expect("CMDS_FD should be initialized") };
+
+    send_u64(cmds_fd.as_raw_fd(), value);
 }
 
 pub fn send_response_ok(message_id: u64) {
