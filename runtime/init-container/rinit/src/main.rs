@@ -27,6 +27,7 @@ mod initramfs;
 mod io;
 mod kernel_modules;
 mod network;
+mod process;
 mod storage;
 mod utils;
 

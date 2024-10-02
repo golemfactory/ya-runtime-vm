@@ -8,8 +8,9 @@ use crate::{
     fs::mount_volume,
     io::{
         read_n, recv_bytes, recv_strings_array, recv_u32, recv_u64, recv_u8, send_response_error,
-        send_response_ok, MessageHeader,
+        send_response_ok, send_response_u64, MessageHeader,
     },
+    process::{spawn_new_process, NewProcessArgs},
     CMDS_FD, SIG_FD,
 };
 
@@ -18,12 +19,7 @@ fn handle_run_process(msg_id: u64) -> std::io::Result<()> {
 
     let cmds_fd = unsafe { CMDS_FD.as_ref().expect("CMDS_FD should be initialized") }.as_raw_fd();
 
-    let mut uid = 0;
-    let mut gid = 0;
-    let mut path = String::new();
-    let mut args: Vec<String> = Vec::new();
-    let mut env: Vec<String> = Vec::new();
-    let mut cwd = String::new();
+    let mut new_process_args = NewProcessArgs::default();
 
     while !done {
         let cmd = recv_u8(cmds_fd).expect("Failed to read command");
@@ -37,28 +33,29 @@ fn handle_run_process(msg_id: u64) -> std::io::Result<()> {
             MessageRunProcessType::Bin => {
                 println!("    Binary");
                 let bin = recv_bytes(cmds_fd)?;
-                path = String::from_utf8(bin).expect("Failed to convert binary name to string");
-                println!("     Binary: {}", path);
+                new_process_args.bin =
+                    String::from_utf8(bin).expect("Failed to convert binary name to string");
+                println!("     Binary: {}", new_process_args.bin);
             }
             MessageRunProcessType::Arg => {
                 println!("    Arg");
-                args = recv_strings_array(cmds_fd)?;
-                println!("     Args: {:?}", args);
+                new_process_args.args = recv_strings_array(cmds_fd)?;
+                println!("     Args: {:?}", new_process_args.args);
             }
             MessageRunProcessType::Env => {
                 println!("    Env");
-                env = recv_strings_array(cmds_fd)?;
-                println!("     Env: {:?}", env);
+                new_process_args.envp = recv_strings_array(cmds_fd)?;
+                println!("     Env: {:?}", new_process_args.envp);
             }
             MessageRunProcessType::Uid => {
                 println!("    Uid");
-                uid = recv_u32(cmds_fd)?;
-                println!("     Uid: {}", uid);
+                new_process_args.uid = recv_u32(cmds_fd)?;
+                println!("     Uid: {}", new_process_args.uid);
             }
             MessageRunProcessType::Gid => {
                 println!("    Gid");
-                gid = recv_u32(cmds_fd)?;
-                println!("     Gid: {}", gid);
+                new_process_args.gid = recv_u32(cmds_fd)?;
+                println!("     Gid: {}", new_process_args.gid);
             }
             MessageRunProcessType::Rfd => {
                 println!("    Rfd");
@@ -68,20 +65,38 @@ fn handle_run_process(msg_id: u64) -> std::io::Result<()> {
             MessageRunProcessType::Cwd => {
                 println!("    Cwd");
                 let buf = recv_bytes(cmds_fd)?;
-                cwd = String::from_utf8(buf).expect("Failed to convert cwd to string");
-                println!("     Cwd: {}", cwd);
+                new_process_args.cwd =
+                    String::from_utf8(buf).expect("Failed to convert cwd to string");
+                println!("     Cwd: {}", new_process_args.cwd);
             }
             MessageRunProcessType::Ent => {
                 println!("    Ent");
                 println!("     Entrypoint -> true");
+                new_process_args.is_entrypoint = true;
             }
         }
     }
 
     println!(
-        "    Spawning process '{}' with: uid={}, gid={}, args={:?}, env={:?}, cwd='{}'",
-        path, uid, gid, args, env, cwd
+        "    Spawning process '{}' with: uid={}, gid={}, args={:?}, env={:?}, cwd='{}', entry_point='{}'",
+        new_process_args.bin,
+        new_process_args.uid,
+        new_process_args.gid,
+        new_process_args.args,
+        new_process_args.envp,
+        new_process_args.cwd,
+        new_process_args.is_entrypoint,
     );
+
+    if new_process_args.bin.is_empty() || new_process_args.args.is_empty() {
+        send_response_error(msg_id, libc::EFAULT as i32);
+        return Ok(());
+    }
+
+    match spawn_new_process(new_process_args) {
+        Ok(proc_id) => send_response_u64(msg_id, proc_id),
+        Err(e) => send_response_error(msg_id, e.raw_os_error().unwrap_or(libc::EIO)),
+    }
 
     Ok(())
 }
@@ -95,22 +110,25 @@ fn parse_fd_redit() -> std::io::Result<()> {
 
     let mut path = String::new();
 
-    println!(" Parsing fd redirect: {} -> {:?}", desc_type_u8, desc_type);
+    println!(
+        "     Parsing fd redirect: {} -> {:?}",
+        desc_type_u8, desc_type
+    );
 
     match desc_type {
         RedirectFdType::File => {
-            println!("    File");
+            println!("         File");
             let buf = recv_bytes(cmds_fd)?;
             path = String::from_utf8(buf).expect("Failed to convert path to string");
-            println!("     Path: {}", path);
+            println!("          Path: {}", path);
         }
         RedirectFdType::PipeBlocking | RedirectFdType::PipeCyclic => {
-            println!("    Pipe");
+            println!("        Pipe");
             let pipe = recv_u64(cmds_fd)?;
-            println!("     Pipe: {}", pipe);
+            println!("         Pipe: {}", pipe);
         }
         RedirectFdType::Invalid => {
-            println!("    Invalid");
+            println!("        Invalid");
             todo!();
         }
     }
