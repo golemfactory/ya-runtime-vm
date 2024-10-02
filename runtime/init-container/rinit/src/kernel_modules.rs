@@ -11,7 +11,7 @@ fn load_module(module: &str) -> std::io::Result<()> {
 
     let file = File::open(path)?;
 
-    let params = CString::new("").unwrap();
+    let params = c"";
 
     unsafe {
         let result = libc::syscall(libc::SYS_finit_module, file.as_raw_fd(), params.as_ptr(), 0);
@@ -46,7 +46,7 @@ fn load_nvidia_modules() -> std::io::Result<()> {
         "nvidia-drm.ko",
     ];
 
-    for module in nvidia_modules.iter() {
+    for module in nvidia_modules {
         load_module(module)?;
     }
 
@@ -81,11 +81,13 @@ pub fn load_modules() -> std::io::Result<()> {
         (false, "9p.ko"),
     ];
 
-    for (check, module) in modules.iter() {
-        if *check {
-            let path = format!("/{}", module);
-            println!("Checking if kernel module '{}' exists", path);
-            if Path::new(&path).exists() {
+    let root =  Path::new("/");
+
+    for (check, module) in modules {
+        if check {
+            let path = root.join(module);
+            println!("Checking if kernel module '{}' exists", path.display());
+            if path.exists() {
                 load_module(module)?;
             }
         } else {

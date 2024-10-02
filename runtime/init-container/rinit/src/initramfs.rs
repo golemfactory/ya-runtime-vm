@@ -154,7 +154,7 @@ pub fn copy_initramfs() -> Result<(), nix::Error> {
 
     nix::mount::mount(Some(""), "/newroot", Some("tmpfs"), MsFlags::empty(), NONE)?;
 
-    let root = CString::new("/").unwrap();
+    let root = c"/";
     let root_fd = unsafe {
         open(
             root.as_ptr(),
