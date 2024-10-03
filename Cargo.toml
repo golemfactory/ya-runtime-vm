@@ -1,5 +1,5 @@
 [workspace]
-members = ["runtime", "runtime/init-container/rinit"]
+members = ["runtime", "rinit"]
 resolver = "2"
 
 [workspace.dependencies]
