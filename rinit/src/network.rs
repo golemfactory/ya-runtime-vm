@@ -6,9 +6,7 @@ use std::{
     sync::atomic::Ordering,
 };
 
-use libc::{
-    c_char, c_int, ifreq, in_addr, snprintf, sockaddr_in, strncpy, AF_INET, IFF_LOOPBACK, IFF_UP,
-};
+use libc::{c_char, c_int, ifreq, snprintf, sockaddr_in, strncpy, AF_INET, IFF_LOOPBACK, IFF_UP};
 use nix::sys::socket::{socket, AddressFamily, SockFlag, SockType};
 
 use crate::{

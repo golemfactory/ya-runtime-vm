@@ -235,7 +235,7 @@ fn handle_message() -> std::io::Result<()> {
         }
         MessageType::RunProcess => {
             println!("   Run process message");
-            handle_run_process(msg_header.msg_id);
+            handle_run_process(msg_header.msg_id)?;
         }
         MessageType::KillProcess => {
             println!("   Kill process message");

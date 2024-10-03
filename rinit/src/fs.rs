@@ -5,14 +5,14 @@ use std::{
 
 use nix::{
     errno::Errno,
-    mount::{self, mount, MsFlags},
+    mount::{mount, MsFlags},
     sys::stat::{Mode, SFlag},
 };
 
 use crate::{storage::Storage, DEFAULT_DIR_PERMS, IRWXU_PERMS, NEW_ROOT, NONE, SYSROOT};
 
 pub fn write_sys(path: &str, value: usize) {
-    std::fs::write(path, format!("{}", value));
+    let _ = std::fs::write(path, format!("{}", value));
 }
 
 pub fn mount_core_filesystems() -> std::io::Result<()> {
@@ -97,7 +97,7 @@ pub fn do_mkfs(dev_path: &str) -> std::io::Result<()> {
 pub fn mount_volume(tag: String, path: String) -> std::io::Result<()> {
     let path = Path::new(&path[1..]);
     let sysroot_path = Path::new(SYSROOT);
-    let final_path = sysroot_path.join(path.clone());
+    let final_path = sysroot_path.join(path);
     println!(
         "mount_volume: Mounting volume '{}' to '{}' ('{}')",
         tag,

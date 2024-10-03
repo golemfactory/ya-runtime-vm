@@ -123,3 +123,15 @@ impl EpollFdType {
         }
     }
 }
+
+impl From<EpollFdType> for u64 {
+    fn from(value: EpollFdType) -> Self {
+        match value {
+            EpollFdType::Cmds => 1,
+            EpollFdType::Sig => 2,
+            EpollFdType::Out => 3,
+            EpollFdType::In => 4,
+            EpollFdType::Invalid => 0,
+        }
+    }
+}

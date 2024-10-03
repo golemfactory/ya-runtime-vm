@@ -1,4 +1,4 @@
-use std::{ffi::CString, fs::File, os::fd::AsRawFd, path::Path};
+use std::{fs::File, os::fd::AsRawFd, path::Path};
 
 use crate::check_bool;
 
@@ -81,7 +81,7 @@ pub fn load_modules() -> std::io::Result<()> {
         (false, "9p.ko"),
     ];
 
-    let root =  Path::new("/");
+    let root = Path::new("/");
 
     for (check, module) in modules {
         if check {

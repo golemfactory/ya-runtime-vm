@@ -3,12 +3,10 @@ use std::sync::atomic::AtomicU32;
 use std::{env, os::unix::fs::PermissionsExt, path::Path};
 
 use libc::{mode_t, prctl, PR_SET_DUMPABLE};
-use nix::mount::{mount, MsFlags};
 use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags};
 use nix::sys::signal::{self, sigprocmask, SigSet};
 use nix::sys::signalfd::SfdFlags;
 use nix::sys::signalfd::SignalFd;
-use nix::unistd::{chdir, chroot};
 
 use fs::{
     chroot_to_new_root, create_directories, create_dirs, mount_core_filesystems, mount_overlay,
@@ -176,10 +174,12 @@ fn setup_sandbox() -> std::io::Result<()> {
 }
 
 fn main() {
-    match try_main() {
-        Ok(_) => (),
-        Err(e) => {
-            die!(e);
+    smol::block_on(async {
+        match try_main() {
+            Ok(_) => (),
+            Err(e) => {
+                die!(e);
+            }
         }
-    }
+    });
 }
