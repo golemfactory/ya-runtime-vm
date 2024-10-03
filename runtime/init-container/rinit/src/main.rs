@@ -57,10 +57,12 @@ static mut SIG_FD: Option<SignalFd> = None;
 static mut CMDS_FD: Option<File> = None;
 // static mut CMDS_FD: Option<i32> = None;
 
-fn main() {
+fn try_main() -> std::io::Result<()> {
     unsafe {
         let result = prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
-        check_bool!(result == 0 || result == 1);
+        if result != 0 || result != -1 {
+            return Err(std::io::Error::last_os_error());
+        }
     }
 
     println!("Program args count: {}, args:", env::args().len());
@@ -73,55 +75,27 @@ fn main() {
         println!("  {} = {}", env, val);
     }
 
-    let result = copy_initramfs();
-    check_result!(result);
+    copy_initramfs()?;
+    chroot_to_new_root()?;
+    create_directories()?;
+    mount_core_filesystems()?;
+    load_modules()?;
 
-    let result = chroot_to_new_root();
-    check_result!(result);
+    let storage = scan_storage()?;
 
-    let result = create_directories();
-    check_result!(result);
-
-    let result = mount_core_filesystems();
-    check_result!(result);
-
-    let result = load_modules();
-    check_result!(result);
-
-    let storage = scan_storage();
-    check_result!(storage);
-
-    let storage = storage.unwrap();
-
-    let result = mount_overlay(&storage);
-    check_result!(result);
-
-    let result = mount_sysroot();
-    check_result!(result);
+    mount_overlay(&storage)?;
+    mount_sysroot()?;
 
     // TODO(aljen): Handle 'sandbox' environment variable
     // TODO(aljen): Handle 'nvidia_loaded'
 
-    let result = setup_sandbox();
-    check_result!(result);
-
-    let result = setup_network();
-    check_result!(result);
-
-    let result = setup_agent_directories();
-    check_result!(result);
-
-    let result = block_signals();
-    check_result!(result);
-
-    let result = setup_sigfd();
-    check_result!(result);
-
-    let result = main_loop();
-    check_result!(result);
-
-    let result = stop_network();
-    check_result!(result);
+    setup_sandbox()?;
+    setup_network()?;
+    setup_agent_directories()?;
+    block_signals()?;
+    setup_sigfd()?;
+    main_loop()?;
+    stop_network()?;
 
     die!("Finished");
 }
@@ -199,4 +173,13 @@ fn setup_agent_directories() -> std::io::Result<()> {
 
 fn setup_sandbox() -> std::io::Result<()> {
     Ok(())
+}
+
+fn main() {
+    match try_main() {
+        Ok(_) => (),
+        Err(e) => {
+            die!(e);
+        }
+    }
 }

@@ -194,7 +194,13 @@ fn net_if_addr(name: &str, ip: &str, mask: &str) -> nix::Result<c_int> {
     }
 
     // Apply the address
-    let result = unsafe { libc::ioctl(fd.as_raw_fd(), libc::SIOCSIFADDR as i32, &mut ifr) };
+    let result = unsafe {
+        libc::ioctl(
+            fd.as_raw_fd(),
+            libc::SIOCSIFADDR.try_into().unwrap(),
+            &mut ifr,
+        )
+    };
     if result < 0 {
         println!("Failed to set address for interface '{}'", name);
         return Err(nix::Error::last());

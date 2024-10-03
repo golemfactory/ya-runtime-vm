@@ -101,9 +101,9 @@ fn child_wrapper(parent_pipe: (i32, i32), args: NewProcessArgs) -> std::io::Resu
             unsafe { libc::abort() };
         }
 
-        // if low_fd > 3 && unsafe { libc::syscall(SYS_close_range, 3, low_fd - 1, 0) } < 0 {
-        //     unsafe { libc::abort() };
-        // }
+        if low_fd > 3 && unsafe { libc::syscall(SYS_close_range, 3, low_fd - 1, 0) } < 0 {
+            unsafe { libc::_exit(Errno::last_raw()) };
+        }
 
         // TODO(aljen): Handle SYS_close_range
 

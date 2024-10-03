@@ -199,21 +199,16 @@ fn handle_quit(message_id: u64) {
     die!("Exit");
 }
 
-fn handle_sigchld() {
+fn handle_sigchld() -> std::io::Result<()> {
     let mut buf = [0u8; 128];
 
     let sig_fd = unsafe { SIG_FD.as_ref().expect("SIG_FD should be initialized") };
 
-    let result = nix::unistd::read(sig_fd.as_raw_fd(), &mut buf);
-
-    match result {
-        Ok(read) => println!("handle_sigchld: Read {} bytes", read),
-        Err(e) => {
-            die!(e);
-        }
-    }
+    nix::unistd::read(sig_fd.as_raw_fd(), &mut buf)?;
 
     // TODO(aljen): Handle SIGCHLD
+
+    Ok(())
 }
 
 fn handle_message() -> std::io::Result<()> {
@@ -279,67 +274,58 @@ fn handle_message() -> std::io::Result<()> {
 pub fn handle_messages(epoll: &Epoll) -> std::io::Result<()> {
     let mut events = [EpollEvent::empty()];
 
-    let result = epoll.wait(&mut events, EpollTimeout::NONE)?;
+    epoll.wait(&mut events, EpollTimeout::NONE)?;
 
-    match result {
-        n if n < 0 => {
-            return Err(std::io::Error::last_os_error());
+    println!("Event: {:?}", events[0]);
+    let event = &events[0];
+
+    let epoll_fd = EpollFdType::from_u64(event.data());
+
+    if event.events() == EpollFlags::EPOLLERR && epoll_fd == EpollFdType::Out {
+        return Err(std::io::Error::new(std::io::ErrorKind::Other, "EPOLLERR"));
+    }
+
+    match epoll_fd {
+        EpollFdType::Cmds => {
+            if event.events() & EpollFlags::EPOLLIN == EpollFlags::EPOLLIN {
+                println!("Command event");
+                handle_message()?;
+                // let mut buf = [0u8; 8];
+                // g_cmds_fd.read_exact(&mut buf)?;
+
+                // let cmd = u64::from_ne_bytes(buf);
+
+                // println!("Command: {}", cmd);
+
+                // if cmd == 0 {
+                //     break;
+                // }
+            }
         }
-        0 => {
-            println!("Timeout");
-            return Err(std::io::Error::last_os_error());
+        EpollFdType::Sig => {
+            if event.events() & EpollFlags::EPOLLIN == EpollFlags::EPOLLIN {
+                println!("Signal event");
+                handle_sigchld()?;
+                // let mut buf = [0u8; 8];
+                // SIG_FD.as_ref().unwrap().read_exact(&mut buf)?;
+
+                // let siginfo = signal::siginfo_t::from_ne_bytes(buf);
+
+                // println!("Signal: {}", siginfo.ssi_signo);
+            }
+        }
+        EpollFdType::Out => {
+            die!("Out not implemented");
+        }
+        EpollFdType::In => {
+            if event.events() & EpollFlags::EPOLLIN == EpollFlags::EPOLLIN {
+                println!("In event [EPOLLIN]");
+            } else if event.events() & EpollFlags::EPOLLHUP == EpollFlags::EPOLLHUP {
+                println!("In event [EPOLLHUP]");
+            }
         }
         _ => {
-            println!("Event: {:?}", events[0]);
-            let event = &events[0];
-            if event.events() == EpollFlags::EPOLLERR && event.data() == EpollFdType::Out.into() {
-                println!("Invalid event");
-                die!("Invalid event");
-            }
-
-            match event.data() {
-                x if x == EpollFdType::Cmds.into() => {
-                    if event.events() & EpollFlags::EPOLLIN == EpollFlags::EPOLLIN {
-                        println!("Command event");
-                        handle_message();
-                        // let mut buf = [0u8; 8];
-                        // g_cmds_fd.read_exact(&mut buf)?;
-
-                        // let cmd = u64::from_ne_bytes(buf);
-
-                        // println!("Command: {}", cmd);
-
-                        // if cmd == 0 {
-                        //     break;
-                        // }
-                    }
-                }
-                x if x == EpollFdType::Sig.into() => {
-                    if event.events() & EpollFlags::EPOLLIN == EpollFlags::EPOLLIN {
-                        println!("Signal event");
-                        handle_sigchld();
-                        // let mut buf = [0u8; 8];
-                        // SIG_FD.as_ref().unwrap().read_exact(&mut buf)?;
-
-                        // let siginfo = signal::siginfo_t::from_ne_bytes(buf);
-
-                        // println!("Signal: {}", siginfo.ssi_signo);
-                    }
-                }
-                x if x == EpollFdType::Out.into() => {
-                    die!("Out not implemented");
-                }
-                x if x == EpollFdType::In.into() => {
-                    if event.events() & EpollFlags::EPOLLIN == EpollFlags::EPOLLIN {
-                        println!("In event [EPOLLIN]");
-                    } else if event.events() & EpollFlags::EPOLLHUP == EpollFlags::EPOLLHUP {
-                        println!("In event [EPOLLHUP]");
-                    }
-                }
-                _ => {
-                    die!("Unknown event");
-                }
-            }
+            die!("Unknown event");
         }
     }
 

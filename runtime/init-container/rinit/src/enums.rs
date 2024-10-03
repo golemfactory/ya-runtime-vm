@@ -1,4 +1,6 @@
+#[derive(PartialEq, Eq)]
 pub enum EpollFdType {
+    Invalid = -1,
     Cmds,
     Sig,
     Out,
@@ -110,13 +112,14 @@ impl RedirectFdType {
     }
 }
 
-impl From<EpollFdType> for u64 {
-    fn from(fd_type: EpollFdType) -> Self {
-        match fd_type {
-            EpollFdType::Cmds => 1,
-            EpollFdType::Sig => 2,
-            EpollFdType::Out => 3,
-            EpollFdType::In => 4,
+impl EpollFdType {
+    pub fn from_u64(value: u64) -> Self {
+        match value {
+            1 => Self::Cmds,
+            2 => Self::Sig,
+            3 => Self::Out,
+            4 => Self::In,
+            _ => Self::Invalid,
         }
     }
 }
