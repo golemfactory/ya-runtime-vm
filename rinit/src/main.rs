@@ -87,7 +87,7 @@ fn try_main() -> std::io::Result<()> {
     // TODO(aljen): Handle 'sandbox' environment variable
     // TODO(aljen): Handle 'nvidia_loaded'
 
-    setup_sandbox()?;
+    setup_sandbox();
     setup_network()?;
     setup_agent_directories()?;
     block_signals()?;
@@ -169,8 +169,12 @@ fn setup_agent_directories() -> std::io::Result<()> {
     Ok(())
 }
 
-fn setup_sandbox() -> std::io::Result<()> {
-    Ok(())
+fn setup_sandbox() {
+    #[link(name = "seccomp")]
+    extern "C" {
+        fn setup_sandbox();
+    }
+    unsafe { setup_sandbox() }
 }
 
 fn main() {

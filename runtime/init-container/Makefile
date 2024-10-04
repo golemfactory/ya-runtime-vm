@@ -62,6 +62,10 @@ $(SRC_DIR)/network.o: $(SRC_DIR)/network.c
 
 $(SRC_DIR)/seccomp.o: $(CURDIR)/$(LIBSECCOMP_SUBMODULE)/include/seccomp.h
 
+../../rinit/extern-libs/libseccomp.a: $(CURDIR)/$(LIBSECCOMP_SUBMODULE)/src/.libs/libseccomp.a $(SRC_DIR)/seccomp.o
+	cp -f $(CURDIR)/$(LIBSECCOMP_SUBMODULE)/src/.libs/libseccomp.a $@
+	$(AR) $(ARFLAGS) $@ $(SRC_DIR)/seccomp.o
+
 %.o: %.c
 	$(QUIET_CC)$(CC) $(CFLAGS) -o $@ -c $<
 
@@ -71,7 +75,7 @@ init: $(UNPACKED_HEADERS) $(OBJECTS) $(OBJECTS_EXT) $(CURDIR)/$(LIBSECCOMP_SUBMO
 	@# default musl libs on some distros have debug symbols, lets strip them (and everything else)
 	strip $@
 
-rinit: $(UNPACKED_HEADERS)
+rinit: $(UNPACKED_HEADERS) ../../rinit/extern-libs/libseccomp.a
 	@echo init
 	cargo build --color always --target=x86_64-unknown-linux-musl --manifest-path ../../rinit/Cargo.toml -p rinit --release --bin rinit
 	cp ../../target/x86_64-unknown-linux-musl/release/rinit init

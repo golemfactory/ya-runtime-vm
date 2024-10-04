@@ -66,6 +66,14 @@ pub fn spawn_new_process(args: NewProcessArgs) -> std::io::Result<u64> {
     Ok(proc_id)
 }
 
+fn sandbox_apply() {
+    #[link(name = "seccomp")]
+    extern "C" {
+        fn sandbox_apply();
+    }
+    unsafe { sandbox_apply() }
+}
+
 fn child_wrapper(parent_pipe: (i32, i32), args: NewProcessArgs) -> std::io::Result<()> {
     if unsafe { libc::close(parent_pipe.0) } < 0 {
         unsafe { libc::_exit(Errno::last_raw()) };
@@ -129,6 +137,10 @@ fn child_wrapper(parent_pipe: (i32, i32), args: NewProcessArgs) -> std::io::Resu
     // TODO(aljen): Handle gid/uid
 
     // TODO(aljen): Handle sandbox/caps
+    if GLOBAL_PIDFD.load(std::sync::atomic::Ordering::SeqCst) != -1 {
+        sandbox_apply();
+        // ...
+    }
 
     // TODO(aljen): Handle execve
 

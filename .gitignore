@@ -1,4 +1,5 @@
 /target
+/rinit/extern-libs
 *.swp
 *.o
 *.d
