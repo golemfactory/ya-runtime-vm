@@ -56,12 +56,12 @@ assets = [
     ],
 
     [
-        "init-container/initramfs.cpio.gz",
+        "../rinit/initramfs.cpio.gz",
         "usr/lib/yagna/plugins/ya-runtime-vm/runtime/",
         "644",
     ],
     [
-        "init-container/vmlinuz-virt",
+        "../rinit/vmlinuz-virt",
         "usr/lib/yagna/plugins/ya-runtime-vm/runtime/",
         "644",
     ],

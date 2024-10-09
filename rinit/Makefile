@@ -1,18 +1,21 @@
+SHELL := /bin/bash
 CC := musl-gcc
 CXX := /bin/false
-LIBSECCOMP_SUBMODULE ?= libseccomp
 NEW_ROOT := newroot
+MKFS_NAME := mkfs.ext2
+
+BUSYBOX := extern-libs/busybox
+LIBSECCOMP_SUBMODULE ?= extern-libs/libseccomp
+UNPACKED_KERNEL := extern-libs/unpacked_kernel
+UNPACKED_HEADERS := extern-libs/unpacked_headers
+SRC_DIR ?= extern-libs/src
+
 # -MMD to create dependency files (*.d) on first compilation
-CFLAGS := -MMD -std=c11 -O2 -Wall -Wextra -Werror -fPIE -pie -Iinclude/ -Wmaybe-uninitialized -Iunpacked_headers/usr/include -I$(CURDIR)/$(LIBSECCOMP_SUBMODULE)/include '-DNEW_ROOT="$(NEW_ROOT)"'
+CFLAGS := -MMD -std=c11 -O2 -Wall -Wextra -Werror -Wmaybe-uninitialized -fPIE -pie \
+          -I$(UNPACKED_HEADERS)/usr/include -I$(LIBSECCOMP_SUBMODULE)/include '-DNEW_ROOT="$(NEW_ROOT)"'
 
 ifneq ($(DEBUG), "")
 CFLAGS += -DNDEBUG
-endif
-
-ifneq ($(findstring $(MAKEFLAGS),s),s)
-ifndef V
-	QUIET_CC = @echo '    '   CC $@;
-endif
 endif
 
 KERNEL_VER ?= 5.10.29-0-virt
@@ -21,19 +24,6 @@ KERNEL_SHA256 ?= f3f7ca3421c5232e260b2a8a741bbf72c21881006afcf790aa3bc938e226271
 
 HEADERS_URL ?= https://ya-runtime.s3-eu-west-1.amazonaws.com/vm/kernel/linux-headers-5.7.8-r0.apk
 HEADERS_SHA256 ?= 0b0f0c30be30ff367f5d1eaee227e919efc4b7f442bc03b3190c6e0d1a165362
-
-BUSYBOX := busybox
-MKFS_NAME := mkfs.ext2
-
-UNPACKED_KERNEL := unpacked_kernel
-UNPACKED_HEADERS := unpacked_headers
-LIBURING_SUBMODULE ?= liburing
-SRC_DIR ?= src
-TEST_DIR ?= tests
-
-OBJECTS = $(addprefix $(SRC_DIR)/,init.o communication.o process_bookkeeping.o cyclic_buffer.o seccomp.o)
-OBJECTS_EXT = $(addprefix $(SRC_DIR)/,network.o)
-OBJECTS_EXT = $(addprefix $(SRC_DIR)/,network.o)
 
 # Add headers to object dependencies for conditional recompilation on header change
 SOURCES = $(wildcard $(SRC_DIR)/*.c)
@@ -48,37 +38,27 @@ DEPS = $(SOURCES:%.c=%.d)
 # - create a build directory for initramfs
 # - copy required kernel modules from the extracted kernel package to initramfs build directory
 # - bundle initramfs.cpio.gz
-# - build liburing
 # - compile init (https://en.wikipedia.org/wiki/Init) from sources
 
 .DEFAULT_GOAL = all
-.PHONY: all
+.PHONY: all clean distclean
+
 all: vmlinuz-virt initramfs.cpio.gz
 
-$(SRC_DIR)/network.o: $(SRC_DIR)/network.c
-	$(QUIET_CC)$(CC) $(CFLAGS) \
-	    -I"$(CURDIR)/$(UNPACKED_HEADERS)/usr/include" \
-	    -o $@ -c $<
+clean:
+	$(RM) init $(SRC_DIR)/*.o $(SRC_DIR)/*.d *.o extern-libs/libseccomp.a
+	$(RM) vmlinuz-virt initramfs.cpio.gz
+	$(MAKE) -s -C $(LIBSECCOMP_SUBMODULE) clean
 
-$(SRC_DIR)/seccomp.o: $(CURDIR)/$(LIBSECCOMP_SUBMODULE)/include/seccomp.h
+distclean: clean
+	$(RM) -rf $(UNPACKED_KERNEL) $(UNPACKED_HEADERS)
+	git submodule foreach git reset --hard
 
-../../rinit/extern-libs/libseccomp.a: $(CURDIR)/$(LIBSECCOMP_SUBMODULE)/src/.libs/libseccomp.a $(SRC_DIR)/seccomp.o
-	cp -f $(CURDIR)/$(LIBSECCOMP_SUBMODULE)/src/.libs/libseccomp.a $@
-	$(AR) $(ARFLAGS) $@ $(SRC_DIR)/seccomp.o
 
-%.o: %.c
-	$(QUIET_CC)$(CC) $(CFLAGS) -o $@ -c $<
-
-init: $(UNPACKED_HEADERS) $(OBJECTS) $(OBJECTS_EXT) $(CURDIR)/$(LIBSECCOMP_SUBMODULE)/src/.libs/libseccomp.a
-	@echo cinit
-	$(QUIET_CC)$(CC) $(CFLAGS) -static -o $@ $(wordlist 2, $(words $^), $^)
-	@# default musl libs on some distros have debug symbols, lets strip them (and everything else)
-	strip $@
-
-rinit: $(UNPACKED_HEADERS) ../../rinit/extern-libs/libseccomp.a
+init: extern-libs/libseccomp.a
 	@echo init
-	cargo build --color always --target=x86_64-unknown-linux-musl --manifest-path ../../rinit/Cargo.toml -p rinit --release --bin rinit
-	cp ../../target/x86_64-unknown-linux-musl/release/rinit init
+	cargo build --color always --target=x86_64-unknown-linux-musl -p rinit --release --bin rinit
+	cp ../target/x86_64-unknown-linux-musl/release/rinit $@
 	@# default musl libs on some distros have debug symbols, lets strip them (and everything else)
 	strip $@
 
@@ -98,30 +78,10 @@ $(UNPACKED_KERNEL):
 	tar --warning=no-unknown-keyword -C $(UNPACKED_KERNEL) -vxzf kernel >/dev/null
 	$(RM) kernel
 
-uring: $(UNPACKED_HEADERS)
-	(cd $(LIBURING_SUBMODULE) && CC=$(CC) CXX=$(CXX) ./configure > /dev/null)
-	$(MAKE) -e CC=$(CC) -e CFLAGS=-I"$(CURDIR)/$(UNPACKED_HEADERS)/usr/include" -C "$(LIBURING_SUBMODULE)/src" all
-
-mkfs:
-	cd $(BUSYBOX); \
-	docker build -t busybox .; \
-	docker create --name busybox-tmp busybox; \
-	docker cp busybox-tmp:/busybox/busybox_MKFS_EXT2 $(MKFS_NAME); \
-	docker rm -f busybox-tmp
-
-SHELL := /bin/bash
-$(CURDIR)/$(LIBSECCOMP_SUBMODULE)/src/.libs/libseccomp.a $(CURDIR)/$(LIBSECCOMP_SUBMODULE)/include/seccomp.h: $(UNPACKED_HEADERS) $(LIBSECCOMP_SUBMODULE)
-	set -euo pipefail; \
-	cd $(LIBSECCOMP_SUBMODULE); \
-	export CC=$(CC) CXX=$(CXX) CFLAGS=-I"$$PWD/../$(UNPACKED_HEADERS)/usr/include";\
-	./autogen.sh; \
-	./configure --disable-python;\
-	$(MAKE) all
-
 vmlinuz-virt: $(UNPACKED_KERNEL)
 	cp $(UNPACKED_KERNEL)/boot/vmlinuz-virt .
 
-initramfs.cpio.gz: init mkfs $(UNPACKED_KERNEL)
+initramfs.cpio.gz: init $(UNPACKED_KERNEL)
 	$(RM) -rf initramfs
 	echo "Building initramfs.cpio.gz"
 	mkdir initramfs
@@ -152,27 +112,19 @@ initramfs.cpio.gz: init mkfs $(UNPACKED_KERNEL)
 	set -euo pipefail; cd initramfs && find . | cpio --quiet -o -H newc -R 0:0 | gzip -9 > ../$@
 	$(RM) -rf initramfs
 
-TESTS_NAMES := cyclic_buffer
-TESTS := $(addprefix $(TEST_DIR)/,$(TESTS_NAMES))
+$(LIBSECCOMP_SUBMODULE)/src/.libs/libseccomp.a $(LIBSECCOMP_SUBMODULE)/include/seccomp.h: $(UNPACKED_HEADERS)
+	set -euo pipefail; \
+	cd $(LIBSECCOMP_SUBMODULE); \
+	export CC=$(CC) CXX=$(CXX) CFLAGS=-I"$$PWD/../../$(UNPACKED_HEADERS)/usr/include";\
+	./autogen.sh; \
+	./configure --disable-python;\
+	$(MAKE) all
 
-$(TESTS): %: %.o $(addprefix $(SRC_DIR)/,cyclic_buffer.o)
-	$(CC) $(CFLAGS) -static -o $@ $^
+$(SRC_DIR)/seccomp.o: $(LIBSECCOMP_SUBMODULE)/include/seccomp.h
 
-.PHONY: test
-test: $(TESTS)
-	for t in $(TESTS) ; do \
-		$$t ; \
-	done
+extern-libs/libseccomp.a: $(LIBSECCOMP_SUBMODULE)/src/.libs/libseccomp.a $(SRC_DIR)/seccomp.o
+	cp -f $(LIBSECCOMP_SUBMODULE)/src/.libs/libseccomp.a $@
+	$(AR) $(ARFLAGS) $@ $(SRC_DIR)/seccomp.o
 
-.PHONY: clean
-clean:
-	$(RM) init $(SRC_DIR)/*.o $(SRC_DIR)/*.d $(TEST_DIR)/*.o *.o $(TESTS)
-	$(RM) vmlinuz-virt initramfs.cpio.gz
-	$(MAKE) -s -C $(LIBURING_SUBMODULE) clean
-	$(MAKE) -s -C $(LIBSECCOMP_SUBMODULE) clean
-
-.PHONY: distclean
-distclean:
-	$(RM) -rf $(UNPACKED_KERNEL) $(UNPACKED_HEADERS)
-	$(MAKE) -s -C $(LIBURING_SUBMODULE) clean
-	git submodule foreach git reset --hard
+%.o: %.c
+	$(CC) $(CFLAGS) -o $@ -c $<
