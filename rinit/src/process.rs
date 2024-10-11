@@ -1,12 +1,32 @@
-use std::sync::atomic::{AtomicI32, AtomicU64};
+use std::{
+    os::unix::fs::PermissionsExt,
+    path::Path,
+    sync::{
+        atomic::{AtomicI32, AtomicU64},
+        Arc,
+    },
+};
 
+use async_process::Child;
+use async_process::Command;
 use libc::SYS_close_range;
 use nix::{
     errno::Errno,
+    fcntl::OFlag,
     sys::signal::{self, sigprocmask, SigSet},
+    unistd::{pipe2, Gid, Pid, Uid},
+};
+use smol::lock::Mutex;
+
+use crate::{
+    enums::RedirectFdDesc,
+    fs::create_dirs,
+    pre_exec::{PreExec, PreExecOptions},
+    utils::FdPipe,
+    DEFAULT_DIR_PERMS, OUTPUT_PATH_PREFIX, SYSROOT,
 };
 
-static PROC_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+static PROC_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 static GLOBAL_PIDFD: AtomicI32 = AtomicI32::new(-1);
 static GLOBAL_USERNS_FD: AtomicI32 = AtomicI32::new(-1);
 static GLOBAL_MOUNTNS_FD: AtomicI32 = AtomicI32::new(-1);
@@ -16,38 +36,129 @@ pub struct NewProcessArgs {
     pub bin: String,
     pub args: Vec<String>,
     pub envp: Vec<String>,
-    pub uid: u32,
-    pub gid: u32,
+    pub uid: Option<Uid>,
+    pub gid: Option<Gid>,
     pub cwd: String,
     pub is_entrypoint: bool,
+}
+
+#[derive(Debug)]
+pub struct ProcessDesc {
+    pub child: Child,
+    pub id: u64,
+    pub pid: Pid,
+    pub is_alive: bool,
+    pub redirs: [RedirectFdDesc; 3],
+}
+
+#[derive(Debug)]
+pub struct ExitReason {
+    pub status: u8,
+    pub reason_type: u8,
 }
 
 fn get_next_proc_id() -> u64 {
     PROC_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
 }
 
-pub fn spawn_new_process(args: NewProcessArgs) -> std::io::Result<u64> {
+fn create_process_fds_dir(id: u64) -> std::io::Result<()> {
+    let sysroot = Path::new(SYSROOT);
+    let dir = sysroot.join(&OUTPUT_PATH_PREFIX[1..]);
+    let dir = dir.join(id.to_string());
+    println!("Creating process '{}' fds directory: '{:?}'", id, dir);
+
+    create_dirs(dir, std::fs::Permissions::from_mode(DEFAULT_DIR_PERMS))?;
+
+    Ok(())
+}
+
+pub async fn spawn_new_process(
+    args: NewProcessArgs,
+    fd_desc: [RedirectFdDesc; 3],
+    processes: Arc<Mutex<Vec<ProcessDesc>>>,
+) -> std::io::Result<u64> {
     // TODO(aljen): Handle g_entrypoint_desc/handle_sigchld
 
+    log::info!("Spawning new process: {:?}, fd_desc: {:?}", args, fd_desc);
+
     let proc_id = get_next_proc_id();
+    create_process_fds_dir(proc_id)?;
+
+    let mut redirs = [
+        RedirectFdDesc::Invalid,
+        RedirectFdDesc::Invalid,
+        RedirectFdDesc::Invalid,
+    ];
+
+    for fd in 0..3 {
+        match &fd_desc[fd] {
+            RedirectFdDesc::Invalid => redirs[fd] = RedirectFdDesc::Invalid,
+            RedirectFdDesc::File(_path) => {
+                todo!();
+            }
+            RedirectFdDesc::PipeBlocking(pipe) => {
+                let cyclic_buffer = pipe.cyclic_buffer.clone();
+                let status_pipe = pipe2(OFlag::O_CLOEXEC)?;
+                redirs[fd] = RedirectFdDesc::PipeBlocking(FdPipe {
+                    cyclic_buffer,
+                    fds: [Some(status_pipe.0), Some(status_pipe.1)],
+                });
+                println!("Redirecting fd {} to blocking pipe: {:?}", fd, redirs[fd]);
+            }
+            RedirectFdDesc::PipeCyclic(pipe) => {
+                let cyclic_buffer = pipe.cyclic_buffer.clone();
+                let status_pipe = pipe2(OFlag::O_CLOEXEC)?;
+                redirs[fd] = RedirectFdDesc::PipeBlocking(FdPipe {
+                    cyclic_buffer,
+                    fds: [Some(status_pipe.0), Some(status_pipe.1)],
+                });
+                println!("Redirecting fd {} to cyclic pipe: {:?}", fd, redirs[fd]);
+            }
+        }
+    }
+
+    let status_pipe = pipe2(OFlag::O_CLOEXEC | OFlag::O_DIRECT)?;
+
+    println!("Status pipe: {:?}", status_pipe);
+
+    let envp = args
+        .envp
+        .iter()
+        .map(|s| {
+            let (key, value) = s.split_once('=').unwrap();
+            (key.to_string(), value.to_string())
+        })
+        .collect::<Vec<(String, String)>>();
+
+    let child = Command::new(&args.bin)
+        .args(&args.args[1..])
+        .envs(envp)
+        .with_pre_exec(
+            PreExecOptions::new()
+                .chroot()
+                .chdir(args.cwd)
+                .with_uid(args.uid)
+                .with_gid(args.gid),
+        )
+        .spawn()?;
+
+    let child_id = child.id() as i32;
+
+    log::info!("Spawned new process: {:?}", child);
+
+    processes.lock().await.push(ProcessDesc {
+        child,
+        id: proc_id,
+        pid: Pid::from_raw(child_id),
+        is_alive: true,
+        redirs,
+    });
 
     // TODO(aljen): Handle process fds dir
 
     // TODO(aljen): Handle pipe2
 
     // TODO(aljen): Handle fd redirs
-
-    let pid = unsafe { libc::fork() };
-
-    if pid < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-
-    let pipe_status = (-1, -1);
-
-    if pid == 0 {
-        child_wrapper(pipe_status, args)?;
-    }
 
     // TODO(aljen): Handle close status_pipe[1]
 

@@ -1,10 +1,9 @@
 use std::{
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
 use nix::{
-    errno::Errno,
     mount::{mount, MsFlags},
     sys::stat::{Mode, SFlag},
 };
@@ -87,22 +86,24 @@ pub fn create_directories() -> std::io::Result<()> {
 }
 
 pub fn do_mkfs(dev_path: &str) -> std::io::Result<()> {
-    std::process::Command::new("/mkfs.ext2")
+    let status = std::process::Command::new("/mkfs.ext2")
         .arg(dev_path)
-        .spawn()?;
+        .status()?;
+
+    log::info!("  mkfs.ext2 status: {:?}", status);
 
     Ok(())
 }
 
 pub fn mount_volume(tag: String, path: String) -> std::io::Result<()> {
-    let path = Path::new(&path[1..]);
+    let stripped_path = Path::new(&path[1..]);
     let sysroot_path = Path::new(SYSROOT);
-    let final_path = sysroot_path.join(path);
-    println!(
+    let final_path = sysroot_path.join(stripped_path);
+    log::trace!(
         "mount_volume: Mounting volume '{}' to '{}' ('{}')",
         tag,
         final_path.display(),
-        path.display(),
+        path,
     );
 
     create_dirs(
@@ -110,7 +111,15 @@ pub fn mount_volume(tag: String, path: String) -> std::io::Result<()> {
         std::fs::Permissions::from_mode(DEFAULT_DIR_PERMS),
     )?;
 
-    println!("  Mounting volume: '{}' errno: {:?}", tag, Errno::last());
+    log::info!(
+        "Mounting '{}' to '{}' fstype: '{}' data: '{:?}' flags: '{:?}'",
+        tag,
+        final_path.display(),
+        "9p",
+        "trans=virtio,version=9p2000.L,msize=104857600",
+        MsFlags::empty(),
+    );
+
     mount(
         Some(tag.as_str()),
         final_path.as_path(),
@@ -119,16 +128,16 @@ pub fn mount_volume(tag: String, path: String) -> std::io::Result<()> {
         Some("trans=virtio,version=9p2000.L,msize=104857600"),
     )?;
 
-    println!("  Volume mounted successfully, errno: {:?}", Errno::last());
-
     Ok(())
 }
 
 pub fn mount_overlay(storage: &[Storage]) -> std::io::Result<()> {
     if let Some(s) = storage.iter().find(|s| s.path == "/") {
-        println!(
+        log::info!(
             "Mounting tmpfs to /mnt/overlay fstype: '{}' flags: '{:?}' data: {:?}",
-            s.fs_type, s.flags, s.data
+            s.fs_type,
+            s.flags,
+            s.data
         );
 
         mount(
@@ -138,11 +147,6 @@ pub fn mount_overlay(storage: &[Storage]) -> std::io::Result<()> {
             s.flags,
             s.data.as_deref(),
         )?;
-        // } else {
-        //     return Err(Error::new(
-        //         ErrorKind::NotFound,
-        //         "Failed to find root storage volume for /mnt/overlay",
-        //     ));
     }
 
     for s in storage.iter() {
@@ -150,9 +154,13 @@ pub fn mount_overlay(storage: &[Storage]) -> std::io::Result<()> {
             continue;
         }
 
-        println!(
-            "Mounting rootfs {} to {} fstype: '{}' flags: {:?} data: {:?}",
-            s.dev, s.path, s.fs_type, s.flags, s.data
+        log::info!(
+            "Mounting rootfs '{}' to '{}' fstype: '{}' flags: '{:?}' data: '{:?}'",
+            s.dev,
+            s.path,
+            s.fs_type,
+            s.flags,
+            s.data
         );
 
         create_dirs(s.path.clone(), std::fs::Permissions::from_mode(IRWXU_PERMS))?;
@@ -182,10 +190,10 @@ pub fn mount_overlay(storage: &[Storage]) -> std::io::Result<()> {
         rootfs_layers
     );
 
-    println!(
-        "Mounting overlay to /mnt/newroot fstype: 'overlay' flags: '{:?}' data: {:?}",
+    log::info!(
+        "Mounting overlay to '/mnt/newroot' data: '{:?}' fstype: 'overlay' flags: '{:?}'",
+        overlay_data,
         MsFlags::MS_NODEV,
-        overlay_data
     );
 
     mount(
@@ -195,6 +203,39 @@ pub fn mount_overlay(storage: &[Storage]) -> std::io::Result<()> {
         MsFlags::MS_NODEV,
         Some(overlay_data.as_str()),
     )?;
+
+    let upper_stat = std::fs::metadata("/mnt/overlay/upper")?;
+
+    for s in storage {
+        if s.path.starts_with("/mnt/image-") || s.path == "/" {
+            continue;
+        }
+
+        let storage_path = Path::new(SYSROOT).join(&s.path[1..]);
+        create_dirs(
+            storage_path.clone(),
+            std::fs::Permissions::from_mode(upper_stat.mode()),
+        )?;
+
+        log::info!(
+            "Mounting '{}' to '{}' fstype: '{}' data: '{:?}' flags: '{:?}'",
+            s.dev,
+            storage_path.display(),
+            s.fs_type,
+            s.data,
+            s.flags,
+        );
+
+        create_dirs(s.path.clone(), std::fs::Permissions::from_mode(IRWXU_PERMS))?;
+
+        mount(
+            Some(s.dev.as_str()),
+            s.path.as_str(),
+            Some(s.fs_type.as_str()),
+            s.flags,
+            s.data.as_deref(),
+        )?;
+    }
 
     Ok(())
 }
@@ -238,6 +279,9 @@ pub fn mount_sysroot() -> std::io::Result<()> {
         MsFlags::MS_NOSUID,
         Some("mode=0755,size=2M"),
     )?;
+
+    let a = sysroot.join("dev/fd");
+    println!("DEV/FD: {:?}", a.display());
 
     nix::unistd::symlinkat("/proc/self/fd", None, sysroot.join("dev/fd").as_path())?;
 

@@ -1,8 +1,10 @@
-use std::{io, os::fd::AsRawFd};
+use std::io::{Read, Write};
 
-use nix::errno::Errno;
+use prost::Message;
+use rinit_protos::rinit::api;
+use smol::Async;
 
-use crate::{die, enums::Response, CMDS_FD};
+use crate::{die, enums::Response, process::ExitReason, utils::FdWrapper};
 
 #[derive(Debug)]
 pub struct MessageHeader {
@@ -26,14 +28,38 @@ impl MessageHeader {
     }
 }
 
-pub fn read_n(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
+pub async fn async_read_n(
+    async_fd: &mut Async<FdWrapper>,
+    buf: &mut [u8],
+) -> std::io::Result<usize> {
     let mut total = 0;
 
     while total < buf.len() {
-        let result = nix::unistd::read(fd, &mut buf[total..])?;
-        // let result = fd.read(&mut buf[total..])?;
+        let n = unsafe {
+            async_fd.read_with_mut(|fd| {
+                let mut inner_buf = &mut buf[total..];
+                fd.read(&mut inner_buf)
+            })
+        }
+        .await?;
+        if n == 0 {
+            log::info!("Waiting for host connection...");
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            continue;
+        }
+        total += n;
+    }
+
+    Ok(total)
+}
+
+pub async fn async_write_n(async_fd: &mut Async<FdWrapper>, buf: &[u8]) -> std::io::Result<usize> {
+    let mut total = 0;
+
+    while total < buf.len() {
+        let result = unsafe { async_fd.write_with_mut(|fd| fd.write(&buf[total..])) }.await?;
         if result == 0 {
-            println!("Waiting for host connection...");
+            log::info!("Waiting for host connection...");
             std::thread::sleep(std::time::Duration::from_millis(1000));
             continue;
         }
@@ -44,18 +70,55 @@ pub fn read_n(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
     Ok(total)
 }
 
-pub fn recv_bytes(fd: i32) -> io::Result<Vec<u8>> {
-    let size = recv_u64(fd)?;
+pub async fn async_write_u8(async_fd: &mut Async<FdWrapper>, value: u8) -> std::io::Result<usize> {
+    let buf = [value];
+    async_write_n(async_fd, &buf).await
+}
+
+pub async fn async_write_u32(
+    async_fd: &mut Async<FdWrapper>,
+    value: u32,
+) -> std::io::Result<usize> {
+    let buf = value.to_ne_bytes();
+    async_write_n(async_fd, &buf).await
+}
+
+pub async fn async_write_u64(
+    async_fd: &mut Async<FdWrapper>,
+    value: u64,
+) -> std::io::Result<usize> {
+    let buf = value.to_ne_bytes();
+    async_write_n(async_fd, &buf).await
+}
+
+pub async fn async_recv_bytes(async_fd: &mut Async<FdWrapper>) -> std::io::Result<Vec<u8>> {
+    let size = async_recv_u64(async_fd).await?;
 
     let mut buf = vec![0u8; size as usize];
-    read_n(fd, &mut buf)?;
+    async_read_n(async_fd, &mut buf[0..size as usize]).await?;
 
     Ok(buf)
 }
 
-pub fn recv_u8(fd: i32) -> io::Result<u8> {
+pub async fn async_recv_strings_array(
+    async_fd: &mut Async<FdWrapper>,
+) -> std::io::Result<Vec<String>> {
+    let size = async_recv_u64(async_fd).await?;
+
+    let mut strings = Vec::with_capacity(size as usize);
+
+    for _ in 0..size {
+        let string = async_recv_bytes(async_fd).await?;
+        let string = String::from_utf8(string).expect("Failed to convert bytes to string");
+        strings.push(string);
+    }
+
+    Ok(strings)
+}
+
+pub async fn async_recv_u8(async_fd: &mut Async<FdWrapper>) -> std::io::Result<u8> {
     let mut buf = [0u8; 1];
-    let result = read_n(fd, &mut buf)?;
+    let result = async_read_n(async_fd, &mut buf).await?;
 
     if result < 1 {
         die!("Failed to read u8");
@@ -64,9 +127,9 @@ pub fn recv_u8(fd: i32) -> io::Result<u8> {
     Ok(buf[0])
 }
 
-pub fn recv_u32(fd: i32) -> io::Result<u32> {
+pub async fn async_recv_u32(async_fd: &mut Async<FdWrapper>) -> std::io::Result<u32> {
     let mut buf = [0u8; 4];
-    let result = read_n(fd, &mut buf)?;
+    let result = async_read_n(async_fd, &mut buf).await?;
 
     if result < 4 {
         die!("Failed to read u32");
@@ -75,98 +138,103 @@ pub fn recv_u32(fd: i32) -> io::Result<u32> {
     Ok(u32::from_ne_bytes(buf))
 }
 
-pub fn recv_strings_array(fd: i32) -> io::Result<Vec<String>> {
-    let size = recv_u64(fd)?;
-
-    let mut strings = Vec::with_capacity(size as usize);
-
-    for _ in 0..size {
-        let string = recv_bytes(fd)?;
-        let string = String::from_utf8(string).expect("Failed to convert bytes to string");
-        strings.push(string);
-    }
-
-    Ok(strings)
-}
-
-pub fn recv_u64(fd: i32) -> io::Result<u64> {
+pub async fn async_recv_u64(async_fd: &mut Async<FdWrapper>) -> std::io::Result<u64> {
     let mut buf = [0u8; 8];
-    let result = read_n(fd, &mut buf)?;
+    let result = async_read_n(async_fd, &mut buf).await?;
 
     if result < 8 {
         die!("Failed to read u64");
     }
 
-    Ok(u64::from_ne_bytes(buf))
+    Ok(u64::from_be_bytes(buf))
 }
 
-pub fn write_fd(fd: i32, buf: &[u8]) -> usize {
-    let res = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len() as libc::size_t) };
-
-    res as usize
-}
-
-pub fn write_n(fd: i32, buf: &[u8]) -> io::Result<usize> {
-    let mut total = 0;
-
-    while total < buf.len() {
-        let result = write_fd(fd, &buf[total..]);
-        if result == 0 {
-            println!("Waiting for host connection...");
-            std::thread::sleep(std::time::Duration::from_millis(1000));
-            continue;
-        }
-
-        total += result;
-    }
-
-    Ok(total)
-}
-
-pub fn send_i32(fd: i32, value: i32) {
+pub async fn async_send_i32(async_fd: &mut Async<FdWrapper>, value: i32) -> std::io::Result<usize> {
     let buf = value.to_ne_bytes();
-    let _result = write_fd(fd, &buf);
+    let result = async_write_n(async_fd, &buf).await?;
+
+    Ok(result)
 }
 
-pub fn send_u64(fd: i32, value: u64) {
+pub async fn async_send_u64(async_fd: &mut Async<FdWrapper>, value: u64) -> std::io::Result<usize> {
     let buf = value.to_ne_bytes();
-    let _result = write_fd(fd, &buf);
+    let result = async_write_n(async_fd, &buf).await?;
+
+    Ok(result)
 }
 
-fn send_response_header(message_id: u64, msg_type: Response) {
+async fn send_response_header(
+    async_fd: &mut Async<FdWrapper>,
+    message_id: u64,
+    msg_type: Response,
+) -> std::io::Result<()> {
     let header = MessageHeader {
         msg_id: message_id,
         msg_type: msg_type as u8,
     };
 
-    let cmds_fd = unsafe { CMDS_FD.as_ref().expect("CMDS_FD should be initialized") };
-
-    println!(
+    log::trace!(
         " Sending response header: {:?} ({:?})",
         header,
         header.to_ne_bytes(),
     );
 
-    let result = write_n(cmds_fd.as_raw_fd(), &header.to_ne_bytes());
-    println!("result: {:?} errno: {:?}", result, Errno::last());
+    async_write_n(async_fd, &header.to_ne_bytes()).await?;
+
+    Ok(())
 }
 
-pub fn send_response_u64(message_id: u64, value: u64) {
-    send_response_header(message_id, Response::Ok);
+pub async fn send_response_u64(
+    async_fd: &mut Async<FdWrapper>,
+    message_id: u64,
+    value: u64,
+) -> std::io::Result<()> {
+    send_response_header(async_fd, message_id, Response::OkU64).await?;
 
-    let cmds_fd = unsafe { CMDS_FD.as_ref().expect("CMDS_FD should be initialized") };
+    async_send_u64(async_fd, value).await?;
 
-    send_u64(cmds_fd.as_raw_fd(), value);
+    Ok(())
 }
 
-pub fn send_response_ok(message_id: u64) {
-    send_response_header(message_id, Response::Ok);
+pub async fn async_send_response_ok(
+    async_fd: &mut Async<FdWrapper>,
+    message_id: u64,
+) -> std::io::Result<()> {
+    send_response_header(async_fd, message_id, Response::Ok).await
 }
 
-pub fn send_response_error(msg_id: u64, err_type: i32) {
-    send_response_header(msg_id, Response::Error);
+pub async fn send_response_error(
+    async_fd: &mut Async<FdWrapper>,
+    msg_id: u64,
+    err_type: i32,
+) -> std::io::Result<()> {
+    send_response_header(async_fd, msg_id, Response::Error).await?;
 
-    let cmds_fd = unsafe { CMDS_FD.as_ref().expect("CMDS_FD should be initialized") };
+    async_send_i32(async_fd, err_type).await?;
 
-    send_i32(cmds_fd.as_raw_fd(), err_type);
+    Ok(())
+}
+
+pub async fn send_process_died(
+    async_fd: &mut Async<FdWrapper>,
+    proc_id: u64,
+    exit_reason: ExitReason,
+) -> std::io::Result<()> {
+    send_response_header(async_fd, 0, Response::NotifyProcessDied).await?;
+    async_write_u64(async_fd, proc_id).await?;
+    async_write_u8(async_fd, exit_reason.status).await?;
+    async_write_u8(async_fd, exit_reason.reason_type).await?;
+
+    Ok(())
+}
+
+pub async fn read_request(async_fd: &mut Async<FdWrapper>) -> std::io::Result<api::Request> {
+    let size = async_recv_u64(async_fd).await? as usize;
+
+    let mut buf = vec![0; size as usize];
+    async_read_n(async_fd, &mut buf).await?;
+
+    let request = api::Request::decode(buf.as_slice())?;
+
+    Ok(request)
 }

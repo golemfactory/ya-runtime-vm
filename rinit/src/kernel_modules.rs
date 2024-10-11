@@ -4,7 +4,7 @@ use crate::check_bool;
 
 fn load_module(module: &str) -> std::io::Result<()> {
     let path = format!("/{}", module);
-    println!("Loading kernel module '{}'", path);
+    log::info!("Loading kernel module '{}'", path);
 
     let path = Path::new(&path);
     check_bool!(path.exists());
@@ -86,7 +86,7 @@ pub fn load_modules() -> std::io::Result<()> {
     for (check, module) in modules {
         if check {
             let path = root.join(module);
-            println!("Checking if kernel module '{}' exists", path.display());
+            log::info!("Checking if kernel module '{}' exists", path.display());
             if path.exists() {
                 load_module(module)?;
             }

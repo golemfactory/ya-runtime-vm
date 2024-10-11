@@ -13,7 +13,6 @@ use nix::{
 
 use crate::{check_bool, NEW_ROOT, NONE};
 
-
 fn copy_recursive_impl(src: &Path, dst: &Path, dst_orig: &Path) -> Result<()> {
     create_dir_all(dst)?;
     for entry in read_dir(src)? {
@@ -53,7 +52,11 @@ pub fn copy_initramfs() -> Result<()> {
     let root = Path::new("/");
     let new_root = &root.join(NEW_ROOT);
 
-    println!("Copying initramfs from '{}' to '{}'", root.display(), new_root.display());
+    println!(
+        "Copying initramfs from '{}' to '{}'",
+        root.display(),
+        new_root.display()
+    );
     check_bool!(root.exists());
     check_bool!(new_root.exists());
     mount(NONE, new_root, Some("tmpfs"), MsFlags::empty(), NONE)?;

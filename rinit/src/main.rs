@@ -1,22 +1,27 @@
+use std::env;
 use std::fs::File;
-use std::sync::atomic::AtomicU32;
-use std::{env, os::unix::fs::PermissionsExt, path::Path};
+use std::os::{fd::AsRawFd, unix::fs::PermissionsExt};
+use std::path::Path;
+use std::sync::{atomic::AtomicU32, Arc};
 
+use async_io::Async;
+use futures::{future::FutureExt, pin_mut, select};
 use libc::{mode_t, prctl, PR_SET_DUMPABLE};
-use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags};
+use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::sys::signal::{self, sigprocmask, SigSet};
-use nix::sys::signalfd::SfdFlags;
-use nix::sys::signalfd::SignalFd;
+use nix::sys::signalfd::{SfdFlags, SignalFd};
 
 use fs::{
     chroot_to_new_root, create_directories, create_dirs, mount_core_filesystems, mount_overlay,
     mount_sysroot,
 };
-use handlers::handle_messages;
+use handlers::{handle_message, handle_sigchld};
 use initramfs::copy_initramfs;
 use kernel_modules::load_modules;
 use network::{setup_network, stop_network};
+use smol::lock::Mutex;
 use storage::scan_storage;
+use utils::FdWrapper;
 
 mod enums;
 mod fs;
@@ -25,11 +30,10 @@ mod initramfs;
 mod io;
 mod kernel_modules;
 mod network;
+mod pre_exec;
 mod process;
 mod storage;
 mod utils;
-
-use crate::enums::EpollFdType;
 
 const DEV_VPN: &str = "eth0";
 const DEV_INET: &str = "eth1";
@@ -51,26 +55,23 @@ const MTU_VPN: usize = 1220;
 const MTU_INET: usize = 65521;
 
 static ALIAS_COUNTER: AtomicU32 = AtomicU32::new(0);
-static mut SIG_FD: Option<SignalFd> = None;
-static mut CMDS_FD: Option<File> = None;
-// static mut CMDS_FD: Option<i32> = None;
 
-fn try_main() -> std::io::Result<()> {
+async fn try_main() -> std::io::Result<()> {
     unsafe {
         let result = prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
-        if result != 0 || result != -1 {
+        if !(result == 0 || result == -1) {
             return Err(std::io::Error::last_os_error());
         }
     }
 
-    println!("Program args count: {}, args:", env::args().len());
+    log::info!("Program args count: {}, args:", env::args().len());
     for arg in env::args() {
-        println!("  {}", arg);
+        log::info!("  {}", arg);
     }
 
-    println!("Environment vars:");
+    log::info!("Environment vars:");
     for (env, val) in env::vars() {
-        println!("  {} = {}", env, val);
+        log::info!("  {} = {}", env, val);
     }
 
     copy_initramfs()?;
@@ -91,49 +92,62 @@ fn try_main() -> std::io::Result<()> {
     setup_network()?;
     setup_agent_directories()?;
     block_signals()?;
-    setup_sigfd()?;
-    main_loop()?;
+    // setup_sigfd()?;
+    main_loop().await?;
     stop_network()?;
 
     die!("Finished");
 }
 
-fn main_loop() -> std::io::Result<()> {
-    let epoll = Epoll::new(EpollCreateFlags::EPOLL_CLOEXEC)?;
+fn set_nonblocking(fd: std::os::fd::RawFd) -> std::io::Result<()> {
+    let flags = OFlag::from_bits_truncate(fcntl(fd, FcntlArg::F_GETFL)?);
+    let new_flags = flags | OFlag::O_NONBLOCK;
+    fcntl(fd, FcntlArg::F_SETFL(new_flags))?;
+    Ok(())
+}
 
-    unsafe {
-        CMDS_FD = Some(
-            File::options()
-                .read(true)
-                .write(true)
-                .append(true)
-                .open(VPORT_CMD)?,
-        );
-        // let cmds_fd = nix::fcntl::open(
-        //     VPORT_CMD,
-        //     nix::fcntl::OFlag::O_RDWR | nix::fcntl::OFlag::O_CLOEXEC,
-        //     nix::sys::stat::Mode::empty(),
-        // )?;
-        // CMDS_FD = Some(cmds_fd);
+async fn main_loop() -> std::io::Result<()> {
+    let cmds_fd = File::options().read(true).append(true).open(VPORT_CMD)?;
 
-        epoll.add(
-            CMDS_FD.as_ref().unwrap(),
-            // cmds_fd,
-            EpollEvent::new(EpollFlags::EPOLLIN, EpollFdType::Cmds.into()),
-        )?;
+    let sig_fd = setup_sigfd()?;
 
-        epoll.add(
-            SIG_FD.as_ref().unwrap(),
-            EpollEvent::new(EpollFlags::EPOLLIN, EpollFdType::Sig.into()),
-        )?;
-    }
+    set_nonblocking(cmds_fd.as_raw_fd())?;
+    set_nonblocking(sig_fd.as_raw_fd())?;
+
+    let async_cmds_fd = Arc::new(Mutex::new(Async::new(FdWrapper {
+        fd: cmds_fd.as_raw_fd(),
+    })?));
+    let async_sig_fd = Arc::new(Mutex::new(Async::new(FdWrapper {
+        fd: sig_fd.as_raw_fd(),
+    })?));
+
+    let processes = Arc::new(Mutex::new(Vec::new()));
 
     loop {
-        match handle_messages(&epoll) {
-            Ok(_) => (),
-            Err(e) => {
-                println!("Error: {:?}", e);
-                break;
+        let cmd_future = async {
+            let cmd_fd = async_cmds_fd.lock().await;
+            cmd_fd.readable().await
+        }
+        .fuse();
+
+        let sig_future = async {
+            let sig_fd = async_sig_fd.lock().await;
+            sig_fd.readable().await
+        }
+        .fuse();
+
+        pin_mut!(cmd_future, sig_future);
+
+        select! {
+            _ = cmd_future => {
+                if let Err(e) = handle_message(async_cmds_fd.clone(), processes.clone()).await {
+                    log::error!("Error handling command message: {}", e);
+                }
+            }
+            _ = sig_future => {
+                if let Err(e) = handle_sigchld(async_sig_fd.clone(), processes.clone()).await {
+                    log::error!("Error handling command message: {}", e);
+                }
             }
         }
     }
@@ -141,15 +155,13 @@ fn main_loop() -> std::io::Result<()> {
     Ok(())
 }
 
-fn setup_sigfd() -> std::io::Result<()> {
+fn setup_sigfd() -> std::io::Result<SignalFd> {
     let mut set = SigSet::empty();
     set.add(signal::SIGCHLD);
 
-    unsafe {
-        SIG_FD = Some(SignalFd::with_flags(&set, SfdFlags::SFD_CLOEXEC)?);
-    }
+    let sig_fd = SignalFd::with_flags(&set, SfdFlags::SFD_CLOEXEC)?;
 
-    Ok(())
+    Ok(sig_fd)
 }
 
 fn block_signals() -> std::io::Result<()> {
@@ -162,7 +174,9 @@ fn block_signals() -> std::io::Result<()> {
 }
 
 fn setup_agent_directories() -> std::io::Result<()> {
-    let dir = Path::new(OUTPUT_PATH_PREFIX);
+    let sysroot = Path::new(SYSROOT);
+    let dir = sysroot.join(&OUTPUT_PATH_PREFIX[1..]);
+    println!("Creating agent directory: {:?}", dir);
 
     create_dirs(dir, std::fs::Permissions::from_mode(DEFAULT_DIR_PERMS))?;
 
@@ -178,8 +192,16 @@ fn setup_sandbox() {
 }
 
 fn main() {
+    stderrlog::new()
+        .module(module_path!())
+        .verbosity(log::Level::Trace)
+        .timestamp(stderrlog::Timestamp::Off)
+        .show_level(false)
+        .init()
+        .unwrap();
+
     smol::block_on(async {
-        match try_main() {
+        match try_main().await {
             Ok(_) => (),
             Err(e) => {
                 die!(e);

@@ -1,10 +1,20 @@
-#[derive(PartialEq, Eq)]
-pub enum EpollFdType {
+use crate::utils::FdPipe;
+
+#[derive(Default, Debug, PartialEq, Eq)]
+pub enum RedirectFdType {
+    #[default]
     Invalid = -1,
-    Cmds,
-    Sig,
-    Out,
-    In,
+    File = 0,
+    PipeBlocking,
+    PipeCyclic,
+}
+
+#[derive(Debug)]
+pub enum RedirectFdDesc {
+    Invalid,
+    File(String),
+    PipeBlocking(FdPipe),
+    PipeCyclic(FdPipe),
 }
 
 pub enum MessageRunProcessType {
@@ -37,15 +47,6 @@ pub enum MessageUploadFileType {
 }
 
 #[derive(Default, Debug)]
-pub enum RedirectFdType {
-    #[default]
-    Invalid = -1,
-    File = 0,
-    PipeBlocking,
-    PipeCyclic,
-}
-
-#[derive(Default, Debug)]
 pub enum MessageType {
     #[default]
     None = 0,
@@ -63,7 +64,11 @@ pub enum MessageType {
 
 pub enum Response {
     Ok = 0,
+    OkU64 = 1,
+    OkBytes = 2,
     Error = 3,
+    NotifyOutputAvailable = 4,
+    NotifyProcessDied = 5,
 }
 
 impl MessageType {
@@ -108,30 +113,6 @@ impl RedirectFdType {
             1 => Self::PipeBlocking,
             2 => Self::PipeCyclic,
             _ => Self::Invalid,
-        }
-    }
-}
-
-impl EpollFdType {
-    pub fn from_u64(value: u64) -> Self {
-        match value {
-            1 => Self::Cmds,
-            2 => Self::Sig,
-            3 => Self::Out,
-            4 => Self::In,
-            _ => Self::Invalid,
-        }
-    }
-}
-
-impl From<EpollFdType> for u64 {
-    fn from(value: EpollFdType) -> Self {
-        match value {
-            EpollFdType::Cmds => 1,
-            EpollFdType::Sig => 2,
-            EpollFdType::Out => 3,
-            EpollFdType::In => 4,
-            EpollFdType::Invalid => 0,
         }
     }
 }

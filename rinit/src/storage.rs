@@ -31,12 +31,10 @@ pub fn scan_storage() -> std::io::Result<Vec<Storage>> {
             continue;
         }
 
-        // println!("Found virtio-blk: '{}'", path.display());
-
         let serial_path = path.join("serial");
 
         if !serial_path.exists() {
-            println!("Path '{}' does not exist", serial_path.display());
+            log::error!("Path '{}' does not exist", serial_path.display());
             continue;
         }
 
@@ -48,15 +46,17 @@ pub fn scan_storage() -> std::io::Result<Vec<Storage>> {
             let rootfs_layer = if let Some((_, layer)) = serial.split_once("rootfs-") {
                 layer.parse::<u32>().unwrap()
             } else {
-                println!("Failed to parse rootfs layer from '{}'", serial);
+                log::error!("Failed to parse rootfs layer from '{}'", serial);
                 continue;
             };
 
             let rootfs_path = format!("/mnt/image-{}", rootfs_layer);
 
-            println!(
+            log::info!(
                 "Storage volume {} [{}] to be mounted at {} with data=''.",
-                serial, dev_path, rootfs_path
+                serial,
+                dev_path,
+                rootfs_path
             );
 
             storage.push(Storage {
@@ -71,7 +71,7 @@ pub fn scan_storage() -> std::io::Result<Vec<Storage>> {
         }
 
         if !serial.starts_with("vol-") {
-            println!(
+            log::info!(
                 "Unknown virtio-blk: '{}', with serial '{}'",
                 path.display(),
                 serial
@@ -79,7 +79,7 @@ pub fn scan_storage() -> std::io::Result<Vec<Storage>> {
             continue;
         }
 
-        println!(
+        log::info!(
             "Found virtio-blk: '{}', with serial '{}', format as ext2",
             path.display(),
             serial
@@ -104,9 +104,12 @@ pub fn scan_storage() -> std::io::Result<Vec<Storage>> {
         })?;
         let data = format!("errors={}", errors);
 
-        println!(
+        log::info!(
             "Storage volume {} [{}] to be mounted at {} with data='{}'.",
-            serial, dev_path, mount_point, data
+            serial,
+            dev_path,
+            mount_point,
+            data
         );
 
         storage.push(Storage {
@@ -141,9 +144,11 @@ pub fn scan_storage() -> std::io::Result<Vec<Storage>> {
 
         let volume_size = value.parse::<u64>().unwrap();
 
-        println!(
+        log::info!(
             "Found tmpfs volume '{}': '{}', size: {}",
-            volume_id, mount_point, volume_size
+            volume_id,
+            mount_point,
+            volume_size
         );
 
         let data = format!("mode=0700,size={}", volume_size);
@@ -157,11 +162,15 @@ pub fn scan_storage() -> std::io::Result<Vec<Storage>> {
         });
     }
 
-    println!("Found storage:");
+    log::info!("Found storage:");
     for s in storage.iter() {
-        println!(
-            " path = '{}' @ '{}' fstype = '{}' data = {:?} flags = {:?}",
-            s.path, s.dev, s.fs_type, s.data, s.flags
+        log::info!(
+            " path = '{:8}' @ '{}' fstype = '{}' data = {:?} flags = {:?}",
+            s.dev,
+            s.path,
+            s.fs_type,
+            s.data,
+            s.flags
         );
     }
 

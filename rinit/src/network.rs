@@ -78,7 +78,7 @@ pub fn set_network_ns(entries: &[&str]) -> std::io::Result<()> {
 fn net_create_lo(name: &str) -> nix::Result<c_int> {
     // Open a socket with None as the protocol to match the expected Option<SockProtocol> type
 
-    println!("Creating loopback interface '{}'", name);
+    log::info!("Creating loopback interface '{}'", name);
 
     let fd = socket(
         AddressFamily::Inet,
@@ -145,6 +145,13 @@ unsafe fn net_if_alias(ifr: &mut ifreq, name: &str) -> nix::Result<c_int> {
 
 // Function to configure the network interface address and netmask
 fn net_if_addr(name: &str, ip: &str, mask: &str) -> nix::Result<c_int> {
+    log::info!(
+        "Setting address {} and netmask {} for interface {}",
+        ip,
+        mask,
+        name,
+    );
+
     // Open a socket
     let fd = socket(
         AddressFamily::Inet,
@@ -200,7 +207,7 @@ fn net_if_addr(name: &str, ip: &str, mask: &str) -> nix::Result<c_int> {
         )
     };
     if result < 0 {
-        println!("Failed to set address for interface '{}'", name);
+        log::error!("Failed to set address for interface '{}'", name);
         return Err(nix::Error::last());
     }
 
@@ -218,7 +225,7 @@ fn net_if_addr(name: &str, ip: &str, mask: &str) -> nix::Result<c_int> {
             &mut ifr,
         ) < 0
     } {
-        println!("Failed to set netmask for interface '{}'", name);
+        log::error!("Failed to set netmask for interface '{}'", name);
         return Err(nix::Error::last());
     }
 
@@ -235,6 +242,8 @@ fn net_if_addr(name: &str, ip: &str, mask: &str) -> nix::Result<c_int> {
     if result < 0 {
         return Err(nix::Error::last());
     }
+
+    log::info!("Interface '{}' configured successfully", name);
 
     // Return the result of the final ioctl operation
     Ok(result)
@@ -266,14 +275,14 @@ pub fn setup_network() -> std::io::Result<()> {
     match result {
         Ok(_) => (),
         Err(e) => {
-            println!("Failed to set MTU for VPN interface: {:?}", e);
+            log::error!("Failed to set MTU for VPN interface: {:?}", e);
         }
     }
     let result = net_if_mtu(DEV_INET, MTU_INET);
     match result {
         Ok(_) => (),
         Err(e) => {
-            println!("Failed to set MTU for INET interface: {:?}", e);
+            log::error!("Failed to set MTU for INET interface: {:?}", e);
         }
     }
 
@@ -288,7 +297,7 @@ fn net_if_mtu(name: &str, mtu: usize) -> nix::Result<i32> {
         None,
     )?;
 
-    println!("Setting MTU {} for interface {}", mtu, name);
+    log::info!("Setting MTU {} for interface {}", mtu, name);
 
     let mut ifr: ifreq = unsafe { std::mem::zeroed() };
     let c_name = CString::new(name).unwrap();
