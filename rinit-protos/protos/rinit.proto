@@ -1,0 +1,128 @@
+syntax = "proto2";
+
+package rinit.api;
+
+message Error { required string message = 1; }
+
+message Env {
+  required bytes name = 1;
+  optional bytes value = 2;
+}
+
+message HostEntry {
+  required bytes ip = 1;
+  required bytes hostname = 2;
+}
+
+message Rfd {
+  required uint32 fd = 1;
+  oneof redirect {
+    bytes path = 2;
+    uint64 pipe_blocking = 3;
+    uint64 pipe_cyclic = 4;
+  };
+}
+
+message Request {
+  required uint64 request_id = 1;
+  oneof command {
+    QuitRequest quit = 2;
+    RunProcessRequest run_process = 3;
+    KillProcessRequest kill_process = 4;
+    MountVolumeRequest mount_volume = 5;
+    UploadFileRequest upload_file = 6;
+    QueryOutputRequest query_output = 7;
+    PutInputRequest put_input = 8;
+    SyncFsRequest sync_fs = 9;
+    NetCtlRequest net_ctl = 10;
+    NetHostRequest net_host = 11;
+  }
+}
+
+message Response {
+  required uint64 request_id = 1;
+  oneof command {
+    QuitResponse quit = 2;
+    RunProcessResponse run_process = 3;
+    KillProcessResponse kill_process = 4;
+    MountVolumeResponse mount_volume = 5;
+    UploadFileResponse upload_file = 6;
+    QueryOutputResponse query_output = 7;
+    PutInputResponse put_input = 8;
+    SyncFsResponse sync_fs = 9;
+    NetCtlResponse net_ctl = 10;
+    NetHostResponse net_host = 11;
+
+    Error error = 99;
+  }
+}
+
+message QuitRequest {}
+
+message RunProcessRequest {
+  required bytes program = 1;
+  repeated bytes args = 2;
+  repeated bytes env = 3;
+  optional uint32 uid = 4;
+  optional uint32 gid = 5;
+  repeated Rfd rfd = 6;
+  optional bytes work_dir = 7;
+  optional bool is_entrypoint = 8;
+}
+
+message KillProcessRequest { required uint64 pid = 1; }
+
+message MountVolumeRequest {
+  required bytes tag = 1;
+  required bytes path = 2;
+}
+
+// Not implemented yet
+message UploadFileRequest {}
+
+message QueryOutputRequest {
+  required uint64 id = 1;
+  required uint32 fd = 2;
+  required uint64 offset = 3;
+  required uint64 size = 4;
+}
+
+// Not implemented yet
+message PutInputRequest {}
+
+// Not implemented yet
+message SyncFsRequest {}
+
+message NetCtlRequest {
+  required bytes addr = 1;
+  required bytes mask = 2;
+  required bytes gateway = 3;
+  required bytes if_addr = 4;
+  required uint32 if_kind = 5;
+  required uint32 flags = 6;
+}
+
+message NetHostRequest { repeated HostEntry hosts = 1; }
+
+message QuitResponse {}
+
+message RunProcessResponse { required uint64 process_id = 1; }
+
+message KillProcessResponse {}
+
+message MountVolumeResponse {}
+
+message UploadFileResponse {}
+
+message QueryOutputResponse {
+  required bytes data = 1;
+  optional bool eof = 2;
+}
+
+message PutInputResponse {}
+
+message SyncFsResponse {}
+
+message NetCtlResponse {}
+
+message NetHostResponse {}

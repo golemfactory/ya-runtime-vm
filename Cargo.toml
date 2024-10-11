@@ -1,11 +1,12 @@
 [workspace]
-members = ["runtime", "rinit"]
+members = ["runtime", "rinit", "rinit-protos"]
 resolver = "2"
 
 [workspace.dependencies]
 ya-runtime-sdk = { git = "https://github.com/golemfactory/ya-runtime-sdk.git", rev = "0395b0c704ef644d7f0554ac41e319f03b11c068" }
 ya-runtime-api = { git = "https://github.com/golemfactory/yagna.git", rev = "2222cadeed58ecc44295092fcb0bc9ffba8a3722" }
 ya-client-model = { git = "https://github.com/golemfactory/ya-client.git", rev = "44746845a559d40faa2a81d41c6f663d38361286" }
+rinit-protos = { path = "rinit-protos" }
 anyhow = "1.0"
 async-io = "2.3.4"
 async-process = { path = "../async-process" }

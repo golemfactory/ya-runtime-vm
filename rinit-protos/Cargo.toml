@@ -1,0 +1,12 @@
+[package]
+name = "rinit-protos"
+version = "0.1.0"
+authors = ["Golem Factory <contact@golem.network>"]
+edition = "2021"
+license = "GPL-3.0"
+
+[dependencies]
+prost.workspace = true
+
+[build-dependencies]
+prost-build.workspace = true
