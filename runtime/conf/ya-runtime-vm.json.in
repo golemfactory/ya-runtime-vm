@@ -1,7 +1,7 @@
 [
   {
     "name": "vm",
-    "version": "0.5.0",
+    "version": "@VERSION@",
     "supervisor-path": "exe-unit",
     "runtime-path": "ya-runtime-vm/ya-runtime-vm",
     "description": "vm runtime",
