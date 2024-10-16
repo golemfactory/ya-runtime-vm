@@ -26,7 +26,7 @@ pub fn stop_network() -> std::io::Result<()> {
     Ok(())
 }
 
-pub fn add_network_hosts(entries: &[(&str, &str)]) -> std::io::Result<()> {
+pub fn add_network_hosts<S: AsRef<str>>(entries: &[(S, S)]) -> std::io::Result<()> {
     let mut f = BufWriter::new(
         File::options()
             .append(true)
@@ -34,7 +34,7 @@ pub fn add_network_hosts(entries: &[(&str, &str)]) -> std::io::Result<()> {
     );
 
     for entry in entries.iter() {
-        match f.write_fmt(format_args!("{}\t{}\n", entry.0, entry.1)) {
+        match f.write_fmt(format_args!("{}\t{}\n", entry.0.as_ref(), entry.1.as_ref())) {
             Ok(_) => (),
             Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
         }
@@ -144,7 +144,7 @@ unsafe fn net_if_alias(ifr: &mut ifreq, name: &str) -> nix::Result<c_int> {
 }
 
 // Function to configure the network interface address and netmask
-fn net_if_addr(name: &str, ip: &str, mask: &str) -> nix::Result<c_int> {
+pub fn net_if_addr(name: &str, ip: &str, mask: &str) -> nix::Result<c_int> {
     log::info!(
         "Setting address {} and netmask {} for interface {}",
         ip,
@@ -247,6 +247,153 @@ fn net_if_addr(name: &str, ip: &str, mask: &str) -> nix::Result<c_int> {
 
     // Return the result of the final ioctl operation
     Ok(result)
+}
+
+pub fn net_if_addr_to_hw_addr(ip: &str) -> [u8; 6] {
+    let ip = ipv4_to_u32(ip);
+
+    let mut hw_addr = [0u8; 6];
+    hw_addr[0] = 0x90;
+    hw_addr[1] = 0x13;
+    hw_addr[2] = (ip >> 24) as u8;
+    hw_addr[3] = (ip >> 16) as u8;
+    hw_addr[4] = (ip >> 8) as u8;
+    hw_addr[5] = ip as u8;
+
+    hw_addr
+}
+
+pub fn net_if_hw_addr(name: &str, mac: &[u8; 6]) -> nix::Result<c_int> {
+    log::info!(
+        "Setting hardware address {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} for interface {}",
+        mac[0],
+        mac[1],
+        mac[2],
+        mac[3],
+        mac[4],
+        mac[5],
+        name,
+    );
+
+    // Open a socket
+    let fd = socket(
+        AddressFamily::Packet,
+        SockType::Raw,
+        SockFlag::empty(),
+        None,
+    )?;
+
+    // Create an empty ifreq struct
+    let mut ifr: ifreq = unsafe { std::mem::zeroed() };
+
+    let c_name = CString::new(name).unwrap();
+
+    // Set the interface name
+    unsafe {
+        strncpy(
+            ifr.ifr_name.as_mut_ptr() as *mut c_char,
+            c_name.as_ptr(),
+            ifr.ifr_name.len() - 1,
+        )
+    };
+
+    // Set up the sockaddr_in structure for the address
+    let sa: *mut sockaddr_in = unsafe { &mut ifr.ifr_ifru.ifru_addr as *mut _ as *mut sockaddr_in };
+
+    // Set the interface address
+    unsafe {
+        (*sa).sin_family = AF_INET as u16;
+        (*sa).sin_addr.s_addr = 0;
+    }
+
+    // Set the hardware address
+
+    let hw_addr: *mut libc::sockaddr =
+        unsafe { &mut ifr.ifr_ifru.ifru_hwaddr as *mut libc::sockaddr };
+    unsafe {
+        (*hw_addr).sa_family = libc::ARPHRD_ETHER as u16;
+        for (i, byte) in mac.iter().enumerate() {
+            (*hw_addr).sa_data[i] = *byte as i8;
+        }
+    }
+
+    // Apply the hardware address
+    let result = unsafe {
+        libc::ioctl(
+            fd.as_raw_fd(),
+            libc::SIOCSIFHWADDR.try_into().unwrap(),
+            &mut ifr,
+        )
+    };
+
+    Ok(result)
+}
+
+pub fn net_route(
+    name: &str,
+    ip: Option<&str>,
+    mask: Option<&str>,
+    via: &str,
+) -> std::io::Result<c_int> {
+    // Open a socket
+    let fd = socket(
+        AddressFamily::Inet,
+        SockType::Datagram,
+        SockFlag::empty(),
+        None,
+    )?;
+
+    let mut rt: libc::rtentry = unsafe { std::mem::zeroed() };
+    rt.rt_flags = libc::RTF_UP | libc::RTF_GATEWAY;
+
+    let name_cstr = CString::new(name).unwrap();
+    rt.rt_dev = name_cstr.as_ptr() as *mut c_char;
+
+    let via_addr = via.parse::<std::net::Ipv4Addr>().unwrap();
+    let via_sockaddr = sockaddr_in {
+        sin_family: AF_INET as u16,
+        sin_port: 0,
+        sin_addr: libc::in_addr {
+            s_addr: u32::from(via_addr).to_be(),
+        },
+        sin_zero: [0; 8],
+    };
+    rt.rt_gateway = unsafe { std::mem::transmute(via_sockaddr) };
+
+    let dst_addr = if let Some(ip) = ip {
+        ip.parse::<std::net::Ipv4Addr>().unwrap()
+    } else {
+        std::net::Ipv4Addr::new(0, 0, 0, 0)
+    };
+    let dst_sockaddr = sockaddr_in {
+        sin_family: AF_INET as u16,
+        sin_port: 0,
+        sin_addr: libc::in_addr {
+            s_addr: u32::from(dst_addr).to_be(),
+        },
+        sin_zero: [0; 8],
+    };
+    rt.rt_dst = unsafe { std::mem::transmute(dst_sockaddr) };
+    rt.rt_metric = if ip.is_some() { 101 } else { 0 };
+
+    let mask_addr = if let Some(mask) = mask {
+        mask.parse::<std::net::Ipv4Addr>().unwrap()
+    } else {
+        std::net::Ipv4Addr::new(0, 0, 0, 0)
+    };
+    let mask_sockaddr = sockaddr_in {
+        sin_family: AF_INET as u16,
+        sin_port: 0,
+        sin_addr: libc::in_addr {
+            s_addr: u32::from(mask_addr).to_be(),
+        },
+        sin_zero: [0; 8],
+    };
+    rt.rt_genmask = unsafe { std::mem::transmute(mask_sockaddr) };
+
+    let ret = unsafe { libc::ioctl(fd.as_raw_fd(), libc::SIOCADDRT.try_into().unwrap(), &mut rt) };
+
+    Ok(ret)
 }
 
 pub fn setup_network() -> std::io::Result<()> {

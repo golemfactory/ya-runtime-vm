@@ -1,4 +1,6 @@
 use std::{
+    fs::File,
+    io::{BufRead, BufReader},
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
 };
@@ -343,4 +345,52 @@ pub fn mount_sysroot() -> std::io::Result<()> {
     }
 
     Ok(())
+}
+
+pub fn find_device_major(name: &str) -> std::io::Result<i32> {
+    let file = File::open("/proc/devices")?;
+    let reader = BufReader::new(file);
+
+    let mut major = -1;
+    let mut in_character_devices = false;
+
+    for line in reader.lines() {
+        let line = line?;
+        if line == "Character devices:" {
+            in_character_devices = true;
+        } else if line.is_empty() || line == "Block devices:" {
+            if in_character_devices {
+                break;
+            }
+        } else if in_character_devices {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() == 2 {
+                if let (Ok(entry_major), entry_name) = (parts[0].parse::<i32>(), parts[1]) {
+                    if entry_name == name {
+                        major = entry_major;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(major)
+}
+
+pub fn nvidia_gpu_count() -> i32 {
+    let mut counter = 0;
+
+    for i in 0..256 {
+        let path = format!("/sys/class/drm/card{}", i);
+        let path = Path::new(&path);
+
+        if !path.exists() {
+            break;
+        }
+
+        counter = i + 1;
+    }
+
+    counter
 }

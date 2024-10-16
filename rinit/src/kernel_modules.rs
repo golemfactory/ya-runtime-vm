@@ -24,7 +24,7 @@ fn load_module(module: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-fn load_nvidia_modules() -> std::io::Result<()> {
+fn load_nvidia_modules() -> std::io::Result<bool> {
     let nvidia_modules = [
         "i2c-core.ko",
         "drm_panel_orientation_quirks.ko",
@@ -50,10 +50,10 @@ fn load_nvidia_modules() -> std::io::Result<()> {
         load_module(module)?;
     }
 
-    Ok(())
+    Ok(true)
 }
 
-pub fn load_modules() -> std::io::Result<()> {
+pub fn load_modules() -> std::io::Result<bool> {
     let modules = [
         (false, "failover.ko"),
         (false, "virtio.ko"),
@@ -95,9 +95,11 @@ pub fn load_modules() -> std::io::Result<()> {
         }
     }
 
-    if Path::new("/nvidia.ko").exists() {
-        load_nvidia_modules()?;
-    }
+    let nvidia_loaded = if Path::new("/nvidia.ko").exists() {
+        load_nvidia_modules()?
+    } else {
+        false
+    };
 
-    Ok(())
+    Ok(nvidia_loaded)
 }
