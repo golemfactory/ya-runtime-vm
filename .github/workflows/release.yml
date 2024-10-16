@@ -51,20 +51,26 @@ jobs:
     steps:
       - name: Install Musl
         run: sudo apt-get install -y musl-tools musl autoconf gperf libtool automake
+      - name: Install Rust ${{ env.rust_stable }}
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ env.rust_stable }}
+          target: x86_64-unknown-linux-musl
+          override: true
       - uses: actions/checkout@v1
       - name: Make
         run: |
           musl-gcc -v
           git submodule init
           git submodule update
-          cd runtime/init-container
+          cd rinit
           make
       - uses: actions/upload-artifact@v4
         with:
           name: init-container
           path: |
-            runtime/init-container/initramfs.cpio.gz
-            runtime/init-container/vmlinuz-virt
+            rinit/initramfs.cpio.gz
+            rinit/vmlinuz-virt
 
   build:
     name: Build Release
@@ -81,10 +87,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: init-container
-          path: runtime/init-container/
+          path: rinit
       - run: |
           ls -R
-          test -f runtime/init-container/initramfs.cpio.gz
+          test -f rinit/initramfs.cpio.gz
       - name: Download self-test image
         uses: robinraju/release-downloader@v1.8
         with:
@@ -139,8 +145,8 @@ jobs:
           cp runtime/conf/ya-runtime-vm.json "$TARGET_DIR/"
           cp -r runtime/poc/runtime "$TARGET_DIR/ya-runtime-vm/"
           cp "runtime/image/self-test.gvmi" "$TARGET_DIR/ya-runtime-vm/runtime/"
-          cp "runtime/init-container/initramfs.cpio.gz" "$TARGET_DIR/ya-runtime-vm/runtime/"
-          cp "runtime/init-container/vmlinuz-virt" "$TARGET_DIR/ya-runtime-vm/runtime/"
+          cp "rinit/initramfs.cpio.gz" "$TARGET_DIR/ya-runtime-vm/runtime/"
+          cp "rinit/vmlinuz-virt" "$TARGET_DIR/ya-runtime-vm/runtime/"
           (cd releases && tar czvf "ya-runtime-vm-${OS_NAME}-${TAG_NAME}.tar.gz" "ya-runtime-vm-${OS_NAME}-${TAG_NAME}")
           echo "::set-output name=artifact::ya-runtime-vm-${OS_NAME}-${TAG_NAME}.tar.gz"
           echo "::set-output name=media::application/tar+gzip"
@@ -185,9 +191,9 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: init-container
-          path: runtime/init-container/
+          path: rinit
       - run: |
-          test -f runtime/init-container/initramfs.cpio.gz
+          test -f rinit/initramfs.cpio.gz
       - name: Download self-test image
         uses: robinraju/release-downloader@v1.8
         with:

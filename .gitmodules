@@ -4,3 +4,6 @@
 [submodule "runtime/init-container/libseccomp"]
 	path = runtime/init-container/libseccomp
 	url = https://github.com/seccomp/libseccomp.git
+[submodule "rinit/extern-libs/libseccomp"]
+	path = rinit/extern-libs/libseccomp
+	url = https://github.com/seccomp/libseccomp.git
