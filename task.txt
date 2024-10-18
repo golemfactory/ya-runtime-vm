@@ -1,0 +1,10 @@
+exeunit transfer.rs 
+exeunit state.rs -> test_package
+
+
+yarantimevm -> lib -> cli -> test_package
+
+deployment -> try from input -> tst_package = [test_package, test_package, test_package]
+w deploy -> test_package
+
+https://github.com/golemfactory/ya-runtime-vm/issues/188

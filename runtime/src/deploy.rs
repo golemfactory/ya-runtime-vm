@@ -9,6 +9,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 use tokio_byteorder::LittleEndian;
 use uuid::Uuid;
 
+// TODO(aljen): Cleanup this, copy structs
 use ya_client_model::activity::exe_script_command::VolumeMount;
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 
