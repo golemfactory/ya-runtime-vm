@@ -47,26 +47,15 @@ pub fn chroot_to_new_root() -> std::io::Result<()> {
 
 pub fn create_dirs<P: AsRef<Path>>(path: P, perms: std::fs::Permissions) -> std::io::Result<()> {
     let path = path.as_ref();
+    let mut current_path = PathBuf::new();
 
-    let mut current_path: PathBuf = Path::new("/").to_path_buf();
+    for component in path.components() {
+        current_path.push(component);
 
-    for p in path {
-        // let p = Path::new(&p);
-        let new_path = current_path.join(p);
-
-        if p == Path::new("/") {
-            continue;
+        if !current_path.exists() {
+            std::fs::create_dir(&current_path)?;
+            std::fs::set_permissions(&current_path, perms.clone())?;
         }
-
-        if new_path.exists() {
-            current_path = new_path;
-            continue;
-        }
-
-        std::fs::create_dir(new_path.clone())?;
-        std::fs::set_permissions(new_path.clone(), perms.clone())?;
-
-        current_path = new_path;
     }
 
     Ok(())
@@ -97,15 +86,12 @@ pub fn do_mkfs(dev_path: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-pub fn mount_volume(tag: String, path: String) -> std::io::Result<()> {
-    let stripped_path = Path::new(&path[1..]);
-    let sysroot_path = Path::new(SYSROOT);
-    let final_path = sysroot_path.join(stripped_path);
+pub fn mount_volume(tag: &str, path: &Path) -> std::io::Result<()> {
+    let final_path = PathBuf::from(SYSROOT).join(path.strip_prefix("/").unwrap_or(path));
     log::trace!(
-        "mount_volume: Mounting volume '{}' to '{}' ('{}')",
+        "mount_volume: Mounting volume '{}' to '{}'",
         tag,
         final_path.display(),
-        path,
     );
 
     create_dirs(
@@ -123,7 +109,7 @@ pub fn mount_volume(tag: String, path: String) -> std::io::Result<()> {
     );
 
     mount(
-        Some(tag.as_str()),
+        Some(tag),
         final_path.as_path(),
         Some("9p"),
         MsFlags::empty(),

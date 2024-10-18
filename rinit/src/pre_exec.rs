@@ -3,7 +3,7 @@ use nix::errno::Errno;
 use nix::sched::{unshare, CloneFlags};
 use nix::sys::signal::{self, sigprocmask, SigSet};
 use nix::unistd::{setresgid, setresuid, Gid, Uid};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::{fs, io};
 
 fn nix_to_io(e: nix::Error) -> io::Error {
@@ -16,7 +16,7 @@ pub struct PreExecOptions {
     chroot: bool,
     chdir: bool,
     unshare: bool,
-    cwd: String,
+    cwd: PathBuf,
     gid: Option<Gid>,
     uid: Option<Uid>,
 }
@@ -36,7 +36,7 @@ impl PreExecOptions {
         self
     }
 
-    pub fn chdir(mut self, cwd: String) -> Self {
+    pub fn chdir(mut self, cwd: PathBuf) -> Self {
         self.chdir = true;
         self.cwd = cwd;
         self
@@ -98,11 +98,7 @@ fn try_pre_exec(options: PreExecOptions) -> io::Result<()> {
     }
 
     if options.chdir {
-        if options.cwd.is_empty() {
-            nix::unistd::chdir("/")?;
-        } else {
-            nix::unistd::chdir(Path::new(&options.cwd))?;
-        }
+        nix::unistd::chdir(options.cwd.as_path())?;
     }
 
     Ok(())
@@ -112,7 +108,7 @@ pub fn pre_exec(options: PreExecOptions) -> io::Result<()> {
     match try_pre_exec(options) {
         Ok(_) => Ok(()),
         Err(e) => {
-            eprintln!("Error in pre_exec: {}", e);
+            log::error!("Error in pre_exec: {}", e);
             unsafe { libc::_exit(Errno::last_raw()) };
         }
     }

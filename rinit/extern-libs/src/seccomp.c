@@ -2,19 +2,63 @@
 #include <errno.h>
 #include <seccomp.h>
 #include <fcntl.h>
+#include <assert.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdnoreturn.h>
 #include <string.h>
+#include <linux/sched.h>
 #include <sys/mman.h>
+#include <sys/mount.h>
+#include <sys/reboot.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <inttypes.h>
 #include <time.h>
+
+#define SYSROOT "/mnt/newroot"
+
+#define NAMESPACES                             \
+    (CLONE_NEWUSER | /* new user namespace */  \
+     CLONE_NEWNS |   /* new mount namespace */ \
+     0)
+
+#define CHECK(x) ({                                                  \
+    __typeof__(x) _x = (x);                                          \
+    if (_x == -1)                                                    \
+    {                                                                \
+        fprintf(stderr, "Error at %s:%d: %m\n", __FILE__, __LINE__); \
+        die();                                                       \
+    }                                                                \
+    _x;                                                              \
+})
+
+#define CHECK_BOOL(x) ({                                             \
+    __typeof__(x) _x = (x);                                          \
+    if (!_x)                                                         \
+    {                                                                \
+        fprintf(stderr, "Error at %s:%d: %m\n", __FILE__, __LINE__); \
+        die();                                                       \
+    }                                                                \
+    _x;                                                              \
+})
+
+static noreturn void die(void)
+{
+    sync();
+
+    while (1)
+    {
+        (void)reboot(RB_POWER_OFF);
+        __asm__ volatile("hlt");
+    }
+}
 
 static const char *allow_syscalls[] = {
     "_llseek",
@@ -449,12 +493,14 @@ static const char *eperm_syscalls[] = {
     "vmsplice",
 };
 
-#define ARRAY_SIZE(x) (sizeof(x)/sizeof(x[0]))
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
 
 static void
 ya_runtime_add_syscalls(const scmp_filter_ctx ctx, const char *const *syscalls,
-                        const size_t count, const uint32_t arch, const uint32_t action) {
-    for (size_t i = 0; i < count; ++i) {
+                        const size_t count, const uint32_t arch, const uint32_t action)
+{
+    for (size_t i = 0; i < count; ++i)
+    {
         const int syscall_number = seccomp_syscall_resolve_name_rewrite(arch, syscalls[i]);
         if (syscall_number == __NR_SCMP_ERROR)
             abort();
@@ -466,7 +512,8 @@ ya_runtime_add_syscalls(const scmp_filter_ctx ctx, const char *const *syscalls,
 
 static scmp_filter_ctx ctx;
 
-void setup_sandbox(void) {
+void setup_sandbox(void)
+{
     uint32_t const arch = seccomp_arch_native();
     ctx = seccomp_init(SCMP_ACT_ERRNO(ENOSYS));
 
@@ -476,22 +523,24 @@ void setup_sandbox(void) {
     ya_runtime_add_syscalls(ctx, allow_syscalls, ARRAY_SIZE(allow_syscalls), arch, SCMP_ACT_ALLOW);
     const int status = seccomp_rule_add(ctx, SCMP_ACT_ALLOW,
                                         SCMP_SYS(personality), 1, SCMP_CMP64(0, SCMP_CMP_EQ, 0, 0));
-    if (status != 0) {
+    if (status != 0)
+    {
         abort();
     }
 
-    switch (arch) {
-        case SCMP_ARCH_ARM:
-        case SCMP_ARCH_AARCH64:
-            ya_runtime_add_syscalls(ctx, arm_syscalls, ARRAY_SIZE(arm_syscalls),
-                                    arch, SCMP_ACT_ALLOW);
-            break;
-        case SCMP_ARCH_X86:
-        case SCMP_ARCH_X86_64:
-            ya_runtime_add_syscalls(ctx, x86_syscalls, ARRAY_SIZE(x86_syscalls),
-                                    arch, SCMP_ACT_ALLOW);
-        default:
-            break;
+    switch (arch)
+    {
+    case SCMP_ARCH_ARM:
+    case SCMP_ARCH_AARCH64:
+        ya_runtime_add_syscalls(ctx, arm_syscalls, ARRAY_SIZE(arm_syscalls),
+                                arch, SCMP_ACT_ALLOW);
+        break;
+    case SCMP_ARCH_X86:
+    case SCMP_ARCH_X86_64:
+        ya_runtime_add_syscalls(ctx, x86_syscalls, ARRAY_SIZE(x86_syscalls),
+                                arch, SCMP_ACT_ALLOW);
+    default:
+        break;
     }
 
     ya_runtime_add_syscalls(ctx, eperm_syscalls, ARRAY_SIZE(eperm_syscalls), arch, SCMP_ACT_ERRNO(EPERM));
@@ -502,7 +551,109 @@ void setup_sandbox(void) {
         abort();
 }
 
-void sandbox_apply(void) {
+void sandbox_apply(void)
+{
     if (seccomp_load(ctx))
         abort();
+}
+
+void get_namespace_fd(int global_pidfd, int *global_zombie_pid, int *global_userns_fd, int *global_mountns_fd)
+{
+    int tmp_fd = CHECK(open("/user_namespace", O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC | O_EXCL | O_NOCTTY, 0600));
+    CHECK(close(tmp_fd));
+    tmp_fd = CHECK(open("/mount_namespace", O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC | O_EXCL | O_NOCTTY, 0600));
+    CHECK(close(tmp_fd));
+    char buf[sizeof "/proc//uid_map" + 10];
+    struct clone_args args = {
+        .flags = CLONE_CLEAR_SIGHAND |
+                 CLONE_PIDFD | /* alloc a PID FD */
+                 NAMESPACES,
+        .pidfd = (uint64_t)&global_pidfd,
+        .child_tid = 0,
+        .parent_tid = 0,
+        .exit_signal = (uint64_t)SIGCHLD,
+        .stack = 0,
+        .stack_size = 0,
+        .tls = 0,
+        .set_tid = 0,
+        .set_tid_size = 0,
+        .cgroup = 0,
+    };
+    sigset_t set;
+    CHECK(sigemptyset(&set));
+    int fds[2], status = 0;
+    CHECK_BOOL(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds) == 0);
+    errno = 0;
+    *global_zombie_pid = syscall(SYS_clone3, &args, sizeof args);
+    CHECK_BOOL(*global_zombie_pid >= 0);
+    if (*global_zombie_pid == 0)
+    {
+        if (close(fds[0]))
+            abort();
+        if (mount(SYSROOT, SYSROOT, NULL, MS_BIND | MS_REC, NULL))
+        {
+            status = errno;
+            goto bad;
+        }
+        if (mount(NULL, SYSROOT, NULL, MS_SLAVE | MS_REC, NULL))
+        {
+            status = errno;
+            goto bad;
+        }
+        if (chdir(SYSROOT))
+            abort();
+        if (syscall(SYS_pivot_root, ".", "."))
+        {
+            status = errno;
+            goto bad;
+        }
+        if (umount2(".", MNT_DETACH))
+        {
+            status = errno;
+            goto bad;
+        }
+        if (chdir("/"))
+        {
+            status = errno;
+        }
+    bad:
+        if (write(fds[1], &status, sizeof status) != sizeof status || shutdown(fds[1], SHUT_WR) != 0)
+            _exit(1);
+        (void)read(fds[1], &status, 1);
+        _exit(0);
+    }
+    CHECK(global_pidfd);
+    /* parent */
+    CHECK_BOOL(close(fds[1]) == 0);
+    CHECK_BOOL(read(fds[0], &status, sizeof status) == sizeof status);
+    errno = status;
+    CHECK_BOOL(status == 0);
+    int snprintf_res = snprintf(buf, sizeof buf, "/proc/%d/uid_map", *global_zombie_pid);
+    CHECK_BOOL(snprintf_res >= (int)sizeof("/proc/1/uid_map") - 1);
+    CHECK_BOOL(snprintf_res < (int)sizeof buf);
+    for (int i = 0; i < 2; ++i)
+    {
+        const int uidmapfd = CHECK(open(buf, O_NOFOLLOW | O_CLOEXEC | O_NOCTTY | O_WRONLY));
+#define UIDMAP "0 0 4294967295"
+        CHECK_BOOL(write(uidmapfd, UIDMAP, sizeof UIDMAP - 1) == sizeof UIDMAP - 1);
+        CHECK_BOOL(close(uidmapfd) == 0);
+        buf[snprintf_res - 7] = 'g';
+    }
+    static_assert(sizeof("ns/user") <= sizeof("uid_map"), "string size oops");
+    static_assert(sizeof("ns/mnt") <= sizeof("uid_map"), "string size oops");
+    snprintf_res = snprintf(buf, sizeof buf, "/proc/%d/ns/user", *global_zombie_pid);
+    CHECK_BOOL(snprintf_res >= (int)sizeof "/proc/1/ns/user" - 1);
+    CHECK_BOOL(snprintf_res < (int)sizeof "/proc/1/ns/user" + 9);
+    CHECK(mount(buf, "/user_namespace", NULL, MS_BIND, NULL));
+    *global_userns_fd = CHECK(open("/user_namespace", O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NOCTTY));
+    snprintf_res = snprintf(buf, sizeof buf, "/proc/%d/ns/mnt", *global_zombie_pid);
+    CHECK_BOOL(snprintf_res >= (int)sizeof "/proc/1/ns/mnt" - 1);
+    CHECK_BOOL(snprintf_res < (int)sizeof "/proc/1/ns/mnt" + 9);
+    CHECK(mount(buf, "/mount_namespace", NULL, MS_BIND, NULL));
+    *global_mountns_fd = CHECK(open("/mount_namespace", O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NOCTTY));
+    CHECK(write(fds[0], "", 1));
+    int v;
+    CHECK_BOOL(waitpid(*global_zombie_pid, &v, 0) == *global_zombie_pid);
+    CHECK_BOOL(WIFEXITED(v));
+    CHECK_BOOL(WEXITSTATUS(v) == 0);
 }

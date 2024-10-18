@@ -1,6 +1,7 @@
 use std::{
+    borrow::Cow,
     os::unix::fs::PermissionsExt,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicI32, AtomicU64},
         Arc,
@@ -32,13 +33,13 @@ static GLOBAL_USERNS_FD: AtomicI32 = AtomicI32::new(-1);
 static GLOBAL_MOUNTNS_FD: AtomicI32 = AtomicI32::new(-1);
 
 #[derive(Debug, Default)]
-pub struct NewProcessArgs {
-    pub bin: String,
-    pub args: Vec<String>,
-    pub envp: Vec<String>,
+pub struct NewProcessArgs<'a> {
+    pub bin: Cow<'a, str>,
+    pub args: Vec<Cow<'a, str>>,
+    pub envp: Vec<(Cow<'a, str>, Cow<'a, str>)>,
     pub uid: Option<Uid>,
     pub gid: Option<Gid>,
-    pub cwd: String,
+    pub cwd: PathBuf,
     pub is_entrypoint: bool,
 }
 
@@ -72,8 +73,42 @@ fn create_process_fds_dir(id: u64) -> std::io::Result<()> {
     Ok(())
 }
 
-pub async fn spawn_new_process(
-    args: NewProcessArgs,
+fn prepare_redirects(fd_desc: &[RedirectFdDesc; 3]) -> std::io::Result<[RedirectFdDesc; 3]> {
+    fd_desc
+        .iter()
+        .map(|desc| match desc {
+            RedirectFdDesc::Invalid => Ok(RedirectFdDesc::Invalid),
+            RedirectFdDesc::File(_) => todo!(),
+            RedirectFdDesc::PipeBlocking(pipe) | RedirectFdDesc::PipeCyclic(pipe) => {
+                let cyclic_buffer = pipe.cyclic_buffer.clone();
+                let status_pipe = pipe2(OFlag::O_CLOEXEC)?;
+                Ok(RedirectFdDesc::PipeBlocking(FdPipe {
+                    cyclic_buffer,
+                    fds: [Some(status_pipe.0), Some(status_pipe.1)],
+                }))
+            }
+        })
+        .collect::<Result<Vec<_>, std::io::Error>>()?
+        .try_into()
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Invalid redirect count"))
+}
+
+fn spawn_child(args: &NewProcessArgs, redirs: &[RedirectFdDesc; 3]) -> std::io::Result<Child> {
+    Command::new(args.bin.as_ref())
+        .args(args.args[1..].iter().map(AsRef::as_ref))
+        .envs(args.envp.iter().map(|(k, v)| (k.as_ref(), v.as_ref())))
+        .with_pre_exec(
+            PreExecOptions::new()
+                .chroot()
+                .chdir(args.cwd.clone())
+                .with_uid(args.uid)
+                .with_gid(args.gid),
+        )
+        .spawn()
+}
+
+pub async fn spawn_new_process<'a>(
+    args: NewProcessArgs<'a>,
     fd_desc: [RedirectFdDesc; 3],
     processes: Arc<Mutex<Vec<ProcessDesc>>>,
 ) -> std::io::Result<u64> {
@@ -84,63 +119,13 @@ pub async fn spawn_new_process(
     let proc_id = get_next_proc_id();
     create_process_fds_dir(proc_id)?;
 
-    let mut redirs = [
-        RedirectFdDesc::Invalid,
-        RedirectFdDesc::Invalid,
-        RedirectFdDesc::Invalid,
-    ];
+    let redirs = prepare_redirects(&fd_desc)?;
 
-    for fd in 0..3 {
-        match &fd_desc[fd] {
-            RedirectFdDesc::Invalid => redirs[fd] = RedirectFdDesc::Invalid,
-            RedirectFdDesc::File(_path) => {
-                todo!();
-            }
-            RedirectFdDesc::PipeBlocking(pipe) => {
-                let cyclic_buffer = pipe.cyclic_buffer.clone();
-                let status_pipe = pipe2(OFlag::O_CLOEXEC)?;
-                redirs[fd] = RedirectFdDesc::PipeBlocking(FdPipe {
-                    cyclic_buffer,
-                    fds: [Some(status_pipe.0), Some(status_pipe.1)],
-                });
-                println!("Redirecting fd {} to blocking pipe: {:?}", fd, redirs[fd]);
-            }
-            RedirectFdDesc::PipeCyclic(pipe) => {
-                let cyclic_buffer = pipe.cyclic_buffer.clone();
-                let status_pipe = pipe2(OFlag::O_CLOEXEC)?;
-                redirs[fd] = RedirectFdDesc::PipeBlocking(FdPipe {
-                    cyclic_buffer,
-                    fds: [Some(status_pipe.0), Some(status_pipe.1)],
-                });
-                println!("Redirecting fd {} to cyclic pipe: {:?}", fd, redirs[fd]);
-            }
-        }
-    }
+    let child = spawn_child(&args, &redirs)?;
 
     let status_pipe = pipe2(OFlag::O_CLOEXEC | OFlag::O_DIRECT)?;
 
     println!("Status pipe: {:?}", status_pipe);
-
-    let envp = args
-        .envp
-        .iter()
-        .map(|s| {
-            let (key, value) = s.split_once('=').unwrap();
-            (key.to_string(), value.to_string())
-        })
-        .collect::<Vec<(String, String)>>();
-
-    let child = Command::new(&args.bin)
-        .args(&args.args[1..])
-        .envs(envp)
-        .with_pre_exec(
-            PreExecOptions::new()
-                .chroot()
-                .chdir(args.cwd)
-                .with_uid(args.uid)
-                .with_gid(args.gid),
-        )
-        .spawn()?;
 
     let child_id = child.id() as i32;
 
@@ -241,9 +226,9 @@ fn child_wrapper(parent_pipe: (i32, i32), args: NewProcessArgs) -> std::io::Resu
         // TODO(aljen): Handle chdir
     }
 
-    if !args.cwd.is_empty() {
-        // TODO(aljen): Handle chdir
-    }
+    // if !args.cwd.is_empty() {
+    // TODO(aljen): Handle chdir
+    // }
 
     // TODO(aljen): Handle gid/uid
 

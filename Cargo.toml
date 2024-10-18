@@ -9,7 +9,7 @@ ya-client-model = { git = "https://github.com/golemfactory/ya-client.git", rev =
 rinit-protos = { path = "rinit-protos" }
 anyhow = "1.0"
 async-io = "2.3.4"
-async-process = { path = "../async-process" }
+async-process = { git = "https://github.com/golemfactory/smol-async-process.git", branch = "feat/forward-pre-exec" }
 bollard-stubs = "1.41.0"
 crc = "1.8.1"
 futures = "0.3.31"

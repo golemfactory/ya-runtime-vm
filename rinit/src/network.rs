@@ -2,6 +2,7 @@ use std::{
     ffi::CString,
     fs::File,
     io::{BufWriter, Write},
+    net::Ipv4Addr,
     os::fd::AsRawFd,
     sync::atomic::Ordering,
 };
@@ -15,11 +16,7 @@ use crate::{
 };
 
 fn ipv4_to_u32(ip: &str) -> u32 {
-    let octets: Vec<u8> = ip.split('.').map(|octet| octet.parse().unwrap()).collect();
-    (octets[0] as u32) << 24
-        | (octets[1] as u32) << 16
-        | (octets[2] as u32) << 8
-        | (octets[3] as u32)
+    ip.parse::<Ipv4Addr>().unwrap().into()
 }
 
 pub fn stop_network() -> std::io::Result<()> {
@@ -163,15 +160,16 @@ pub fn net_if_addr(name: &str, ip: &str, mask: &str) -> nix::Result<c_int> {
     // Create an empty ifreq struct
     let mut ifr: ifreq = unsafe { std::mem::zeroed() };
 
-    let c_name = CString::new(name).unwrap();
+    let c_name = CString::new(name).map_err(|_| nix::errno::Errno::EINVAL)?;
 
     // Set the interface name
     unsafe {
-        strncpy(
-            ifr.ifr_name.as_mut_ptr() as *mut c_char,
+        std::ptr::copy_nonoverlapping(
             c_name.as_ptr(),
-            ifr.ifr_name.len() - 1,
-        )
+            ifr.ifr_name.as_mut_ptr(),
+            c_name.to_bytes().len().min(ifr.ifr_name.len() - 1),
+        );
+        *ifr.ifr_name.as_mut_ptr().add(ifr.ifr_name.len() - 1) = 0;
     };
 
     // Retrieve the current address of the interface

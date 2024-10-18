@@ -1,5 +1,11 @@
-use std::sync::Arc;
+use std::{
+    borrow::Cow,
+    path::{Path, PathBuf},
+    str::FromStr,
+    sync::Arc,
+};
 
+use futures::TryFutureExt;
 use libc::{CLD_DUMPED, CLD_EXITED, CLD_KILLED};
 use nix::{
     sys::wait::{waitpid, WaitPidFlag},
@@ -17,7 +23,7 @@ use crate::{
     network::{add_network_hosts, net_if_addr, net_if_addr_to_hw_addr, net_if_hw_addr, net_route},
     process::{spawn_new_process, ExitReason, NewProcessArgs, ProcessDesc},
     utils::{CyclicBuffer, FdPipe, FdWrapper},
-    DEV_INET, DEV_VPN,
+    RequestError, DEV_INET, DEV_VPN,
 };
 
 async fn handle_run_process(
@@ -32,23 +38,42 @@ async fn handle_run_process(
         RedirectFdDesc::Invalid,
     ];
 
-    new_process_args.bin = String::from_utf8(request.program.clone())
-        .expect("Failed to convert binary name to string");
+    new_process_args.bin = Cow::Owned(
+        String::from_utf8(request.program.clone())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+    );
 
     new_process_args.args = request
         .args
         .iter()
-        .map(|arg| String::from_utf8(arg.clone()).unwrap())
-        .collect();
+        .map(|arg| {
+            String::from_utf8(arg.clone())
+                .map(Cow::Owned)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     new_process_args.envp = request
         .env
         .iter()
-        .map(|env| String::from_utf8(env.clone()).unwrap())
-        .collect();
+        .map(|env| {
+            String::from_utf8(env.clone())
+                .map(|s| {
+                    let (key, value) = s.split_once('=').ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "Invalid environment variable format",
+                        )
+                    })?;
+                    Ok((Cow::Owned(key.to_string()), Cow::Owned(value.to_string())))
+                })
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+                .and_then(|r| r)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
-    new_process_args.uid = Some(Uid::from_raw(request.uid()));
-    new_process_args.gid = Some(Gid::from_raw(request.gid()));
+    new_process_args.uid = request.uid.map(Uid::from_raw);
+    new_process_args.gid = request.gid.map(Gid::from_raw);
 
     for rfd in &request.rfd {
         let fd = rfd.fd;
@@ -82,10 +107,20 @@ async fn handle_run_process(
         fd_desc[fd as usize] = redir_desc;
     }
 
-    if let Some(work_dir) = &request.work_dir {
-        new_process_args.cwd =
-            String::from_utf8(work_dir.clone()).expect("Failed to convert cwd to string");
-    }
+    new_process_args.cwd = request
+        .work_dir
+        .as_ref()
+        .map(|wd| {
+            String::from_utf8(wd.clone())
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+                .and_then(|s| {
+                    PathBuf::from_str(&s).map_err(|e| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+                    })
+                })
+        })
+        .transpose()?
+        .unwrap_or_else(|| PathBuf::from("/"));
 
     if let Some(is_entrypoint) = request.is_entrypoint {
         new_process_args.is_entrypoint = is_entrypoint;
@@ -98,7 +133,7 @@ async fn handle_run_process(
         new_process_args.gid,
         new_process_args.args,
         new_process_args.envp,
-        new_process_args.cwd,
+        new_process_args.cwd.display(),
         new_process_args.is_entrypoint,
     );
 
@@ -192,7 +227,7 @@ async fn handle_mount(
         ));
     }
 
-    mount_volume(tag, path)?;
+    mount_volume(&tag, Path::new(&path))?;
 
     Ok(Some(api::response::Command::MountVolume(
         api::MountVolumeResponse {},
@@ -361,8 +396,7 @@ fn encode_status(status: i32, reason_type: i32) -> ExitReason {
 pub async fn handle_sigchld(
     async_sig_fd: Arc<Mutex<Async<FdWrapper>>>,
     processes: Arc<Mutex<Vec<ProcessDesc>>>,
-    request_id: &mut u64,
-) -> std::io::Result<Option<api::response::Command>> {
+) -> Result<(Option<api::response::Command>, u64), RequestError> {
     let mut siginfo: libc::siginfo_t = unsafe { std::mem::zeroed() };
     let mut buf = [0u8; std::mem::size_of::<libc::siginfo_t>()];
 
@@ -371,10 +405,10 @@ pub async fn handle_sigchld(
     log::info!("locking async_sig_fd");
     let mut async_sig_fd = async_sig_fd.lock().await;
 
-    *request_id = 0;
-
     log::info!("Reading from async_sig_fd");
-    let size = async_read_n(&mut async_sig_fd, &mut buf).await?;
+    let size = async_read_n(&mut async_sig_fd, &mut buf)
+        .map_err(|e| RequestError::new(0, e))
+        .await?;
 
     if size != std::mem::size_of::<libc::siginfo_t>() {
         log::error!(
@@ -382,7 +416,7 @@ pub async fn handle_sigchld(
             std::mem::size_of::<libc::siginfo_t>(),
             size
         );
-        return Err(std::io::ErrorKind::InvalidData.into());
+        return Err(RequestError::new(0, std::io::ErrorKind::InvalidData.into()));
     }
 
     unsafe {
@@ -391,13 +425,13 @@ pub async fn handle_sigchld(
 
     if siginfo.si_signo != libc::SIGCHLD {
         log::error!("Expected SIGCHLD, but got {}", siginfo.si_signo);
-        return Err(std::io::ErrorKind::InvalidData.into());
+        return Err(RequestError::new(0, std::io::ErrorKind::InvalidData.into()));
     }
 
     let child_pid = siginfo._pad[0];
     if child_pid == -1 {
         log::error!("Zombie process with PID -1");
-        return Ok(None);
+        return Ok((None, 0));
     }
 
     let child_pid = Pid::from_raw(child_pid);
@@ -407,10 +441,11 @@ pub async fn handle_sigchld(
         && siginfo.si_code != libc::CLD_DUMPED
     {
         log::error!("Child did not exit normally: {}", siginfo.si_code);
-        return Ok(None);
+        return Ok((None, 0));
     }
 
-    let wait_status = waitpid(child_pid, Some(WaitPidFlag::WNOHANG))?;
+    let wait_status = waitpid(child_pid, Some(WaitPidFlag::WNOHANG))
+        .map_err(|e| RequestError::new(0, e.into()))?;
     let pid = wait_status.pid();
 
     if let Some(pid) = pid {
@@ -418,7 +453,7 @@ pub async fn handle_sigchld(
 
         if pid != child_pid {
             log::error!("Expected PID {}, but got {}", child_pid, pid);
-            return Ok(None);
+            return Ok((None, 0));
         }
     }
 
@@ -454,26 +489,30 @@ pub async fn handle_sigchld(
         reason_type: exit_reason.reason_type as u32,
     });
 
-    Ok(Some(response))
+    Ok((Some(response), 0))
 }
 
 pub async fn handle_message(
     async_cmds_fd: Arc<Mutex<Async<FdWrapper>>>,
     processes: Arc<Mutex<Vec<ProcessDesc>>>,
-    request_id: &mut u64,
-) -> std::io::Result<Option<api::response::Command>> {
+) -> Result<(Option<api::response::Command>, u64), RequestError> {
     let mut async_fd = async_cmds_fd.lock().await;
 
-    let size = async_recv_u64(&mut async_fd).await? as usize;
+    let size = async_recv_u64(&mut async_fd)
+        .map_err(|e| RequestError::new(0, e))
+        .await? as usize;
     let mut buf = vec![0u8; size];
 
-    async_read_n(&mut async_fd, &mut buf).await?;
+    async_read_n(&mut async_fd, &mut buf)
+        .map_err(|e| RequestError::new(0, e))
+        .await?;
 
-    let request = api::Request::decode(buf.as_slice())?;
+    let request =
+        api::Request::decode(buf.as_slice()).map_err(|e| RequestError::new(0, e.into()))?;
 
-    *request_id = request.request_id;
+    let request_id = request.request_id;
 
-    match request.command {
+    let response = match request.command {
         Some(api::request::Command::Quit(quit)) => {
             log::trace!("   Quit message");
             handle_quit(&quit).await
@@ -526,5 +565,9 @@ pub async fn handle_message(
         _ => {
             die!("   Unknown message type");
         }
-    }
+    };
+
+    response
+        .map_err(|e| RequestError::new(request_id, e))
+        .map(|cmd| (cmd, request_id))
 }

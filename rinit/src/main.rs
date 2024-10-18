@@ -6,12 +6,13 @@ use std::sync::{atomic::AtomicU32, Arc};
 
 use async_io::Async;
 use futures::{future::FutureExt, pin_mut, select};
-use io::{async_read_n, async_recv_u64, async_write_n, async_write_u64};
+use io::{async_write_n, async_write_u64};
 use libc::{mode_t, prctl, PR_SET_DUMPABLE};
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::sys::signal::{self, sigprocmask, SigSet};
 use nix::sys::signalfd::{SfdFlags, SignalFd};
 use nix::sys::stat::{mknod, Mode, SFlag};
+use process::ProcessDesc;
 use prost::Message;
 use rinit_protos::rinit::api;
 
@@ -57,6 +58,34 @@ const MTU_VPN: usize = 1220;
 const MTU_INET: usize = 65521;
 
 static ALIAS_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+#[derive(Debug)]
+pub struct RequestError {
+    request_id: u64,
+    error: std::io::Error,
+}
+
+impl RequestError {
+    pub fn new(request_id: u64, error: std::io::Error) -> Self {
+        Self { request_id, error }
+    }
+
+    pub fn request_id(&self) -> u64 {
+        self.request_id
+    }
+}
+
+impl std::fmt::Display for RequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Request {} failed: {}", self.request_id, self.error)
+    }
+}
+
+impl std::error::Error for RequestError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
 
 async fn try_main() -> std::io::Result<()> {
     unsafe {
@@ -109,22 +138,7 @@ async fn try_main() -> std::io::Result<()> {
         get_namespace_fd();
     }
 
-    main_loop().await?;
-    stop_network()?;
-
-    die!("Finished");
-}
-
-fn set_nonblocking(fd: std::os::fd::RawFd) -> std::io::Result<()> {
-    let flags = OFlag::from_bits_truncate(fcntl(fd, FcntlArg::F_GETFL)?);
-    let new_flags = flags | OFlag::O_NONBLOCK;
-    fcntl(fd, FcntlArg::F_SETFL(new_flags))?;
-    Ok(())
-}
-
-async fn main_loop() -> std::io::Result<()> {
     let cmds_fd = File::options().read(true).append(true).open(VPORT_CMD)?;
-
     let sig_fd = setup_sigfd()?;
 
     set_nonblocking(cmds_fd.as_raw_fd())?;
@@ -139,87 +153,102 @@ async fn main_loop() -> std::io::Result<()> {
 
     let processes = Arc::new(Mutex::new(Vec::new()));
 
+    main_loop(async_cmds_fd, async_sig_fd, processes).await?;
+    stop_network()?;
+
+    die!("Finished");
+}
+
+fn set_nonblocking(fd: std::os::fd::RawFd) -> std::io::Result<()> {
+    let flags = OFlag::from_bits_truncate(fcntl(fd, FcntlArg::F_GETFL)?);
+    let new_flags = flags | OFlag::O_NONBLOCK;
+    fcntl(fd, FcntlArg::F_SETFL(new_flags))?;
+    Ok(())
+}
+async fn read_request(
+    async_cmds_fd: Arc<Mutex<Async<FdWrapper>>>,
+    async_sig_fd: Arc<Mutex<Async<FdWrapper>>>,
+    processes: Arc<Mutex<Vec<ProcessDesc>>>,
+) -> Result<(Option<api::response::Command>, u64), RequestError> {
+    let cmd_future = async {
+        let cmd_fd = async_cmds_fd.lock().await;
+        cmd_fd.readable().await
+    }
+    .fuse();
+    let sig_future = async {
+        let sig_fd = async_sig_fd.lock().await;
+        sig_fd.readable().await
+    }
+    .fuse();
+
+    pin_mut!(cmd_future, sig_future);
+
+    select! {
+        _ = cmd_future => {
+            handle_message(async_cmds_fd.clone(), processes.clone()).await
+        }
+        _ = sig_future => {
+            handle_sigchld(async_sig_fd.clone(), processes.clone()).await
+        }
+    }
+}
+
+async fn send_response(
+    async_cmds_fd: Arc<Mutex<Async<FdWrapper>>>,
+    request_id: u64,
+    result: Result<api::response::Command, api::response::Command>,
+) -> std::io::Result<()> {
+    let response = api::Response {
+        request_id,
+        command: Some(match result {
+            Ok(command) => command,
+            Err(error) => error,
+        }),
+    };
+
+    let mut buf = Vec::new();
+    response.encode(&mut buf)?;
+
+    let mut async_fd = async_cmds_fd.lock().await;
+
+    async_write_u64(&mut async_fd, buf.len() as u64).await?;
+    async_write_n(&mut async_fd, &buf).await?;
+
+    Ok(())
+}
+
+async fn main_loop(
+    async_cmds_fd: Arc<Mutex<Async<FdWrapper>>>,
+    async_sig_fd: Arc<Mutex<Async<FdWrapper>>>,
+    processes: Arc<Mutex<Vec<ProcessDesc>>>,
+) -> std::io::Result<()> {
     loop {
-        let (response, request_id) = {
-            let cmd_future = async {
-                let cmd_fd = async_cmds_fd.lock().await;
-                cmd_fd.readable().await
-            }
-            .fuse();
+        let result = read_request(
+            async_cmds_fd.clone(),
+            async_sig_fd.clone(),
+            processes.clone(),
+        )
+        .await;
 
-            let sig_future = async {
-                let sig_fd = async_sig_fd.lock().await;
-                sig_fd.readable().await
-            }
-            .fuse();
+        match result {
+            Ok((response, request_id)) => {
+                if let Some(command) = response {
+                    let quit = matches!(command, api::response::Command::Quit(_));
+                    send_response(async_cmds_fd.clone(), request_id, Ok(command)).await?;
 
-            pin_mut!(cmd_future, sig_future);
-
-            let mut request_id = 0;
-
-            let result = select! {
-                _ = cmd_future => {
-                    handle_message(async_cmds_fd.clone(), processes.clone(), &mut request_id).await
+                    if quit {
+                        break;
+                    }
                 }
-                _ = sig_future => {
-                    handle_sigchld(async_sig_fd.clone(), processes.clone(), &mut request_id).await
-                }
-            };
-
-            (result, request_id)
-        };
-
-        let quit = match response {
-            Ok(Some(command)) => {
-                println!("Handling response command: {:?}", command);
-
-                let quit = matches!(command, api::response::Command::Quit(_));
-
-                let response = api::Response {
-                    request_id,
-                    command: Some(command),
-                };
-
-                let mut buf = Vec::new();
-                response.encode(&mut buf)?;
-
-                log::info!("locking async_fd");
-                let mut async_fd = async_cmds_fd.lock().await;
-
-                log::info!("sending response message");
-                async_write_u64(&mut async_fd, buf.len() as u64).await?;
-                async_write_n(&mut async_fd, &buf).await?;
-
-                quit
             }
             Err(e) => {
-                log::error!("Error handling command message: {}", e);
-
-                let response = api::Response {
-                    request_id,
-                    command: Some(api::response::Command::Error(api::Error {
-                        code: e.raw_os_error().unwrap_or(libc::EIO) as u32,
-                        message: e.to_string(),
-                    })),
-                };
-
-                let mut buf = Vec::new();
-                response.encode(&mut buf)?;
-
-                log::info!("locking async_fd");
-                let mut async_fd = async_cmds_fd.lock().await;
-
-                log::info!("sending error response message");
-                async_write_u64(&mut async_fd, buf.len() as u64).await?;
-                async_write_n(&mut async_fd, &buf).await?;
-
-                false
+                let request_id = e.request_id();
+                let error_response = api::response::Command::Error(api::Error {
+                    code: e.error.raw_os_error().unwrap_or(libc::EIO) as u32,
+                    message: e.error.to_string(),
+                });
+                send_response(async_cmds_fd.clone(), request_id, Err(error_response)).await?;
             }
-            _ => false,
-        };
-
-        if quit {
-            break;
         }
     }
 
