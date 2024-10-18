@@ -165,7 +165,7 @@ fn set_nonblocking(fd: std::os::fd::RawFd) -> std::io::Result<()> {
     fcntl(fd, FcntlArg::F_SETFL(new_flags))?;
     Ok(())
 }
-async fn read_request(
+async fn read_and_handle_request(
     async_cmds_fd: Arc<Mutex<Async<FdWrapper>>>,
     async_sig_fd: Arc<Mutex<Async<FdWrapper>>>,
     processes: Arc<Mutex<Vec<ProcessDesc>>>,
@@ -223,7 +223,7 @@ async fn main_loop(
     processes: Arc<Mutex<Vec<ProcessDesc>>>,
 ) -> std::io::Result<()> {
     loop {
-        let result = read_request(
+        let result = read_and_handle_request(
             async_cmds_fd.clone(),
             async_sig_fd.clone(),
             processes.clone(),
