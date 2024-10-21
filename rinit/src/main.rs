@@ -1,4 +1,5 @@
 use std::env;
+use std::ffi::c_int;
 use std::fs::File;
 use std::os::{fd::AsRawFd, unix::fs::PermissionsExt};
 use std::path::Path;
@@ -7,7 +8,7 @@ use std::sync::{atomic::AtomicU32, Arc};
 use async_io::Async;
 use futures::{future::FutureExt, pin_mut, select};
 use io::{async_write_n, async_write_u64};
-use libc::{mode_t, prctl, PR_SET_DUMPABLE};
+use libc::{mode_t, pid_t, prctl, PR_SET_DUMPABLE};
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::sys::signal::{self, sigprocmask, SigSet};
 use nix::sys::signalfd::{SfdFlags, SignalFd};
@@ -58,6 +59,25 @@ const MTU_VPN: usize = 1220;
 const MTU_INET: usize = 65521;
 
 static ALIAS_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+#[derive(Copy, Clone)]
+pub struct SecurityContext {
+    pub global_pidfd: pid_t,
+    pub global_zombie_pid: pid_t,
+    pub global_userns_fd: i32,
+    pub global_mountns_fd: i32,
+}
+
+impl Default for SecurityContext {
+    fn default() -> Self {
+        Self {
+            global_pidfd: -1,
+            global_zombie_pid: -1,
+            global_userns_fd: -1,
+            global_mountns_fd: -1,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct RequestError {
@@ -132,11 +152,13 @@ async fn try_main() -> std::io::Result<()> {
     setup_agent_directories()?;
     block_signals()?;
 
-    if do_sandbox {
+    let security_context = if do_sandbox {
         write_sys("/proc/sys/net/ipv4/ip_unprivileged_port_start", 0);
         write_sys("/proc/sys/user/max_user_namespaces", 1);
-        get_namespace_fd();
-    }
+        get_namespace_fd()
+    } else {
+        SecurityContext::default()
+    };
 
     let cmds_fd = File::options().read(true).append(true).open(VPORT_CMD)?;
     let sig_fd = setup_sigfd()?;
@@ -153,7 +175,7 @@ async fn try_main() -> std::io::Result<()> {
 
     let processes = Arc::new(Mutex::new(Vec::new()));
 
-    main_loop(async_cmds_fd, async_sig_fd, processes).await?;
+    main_loop(async_cmds_fd, async_sig_fd, processes, security_context).await?;
     stop_network()?;
 
     die!("Finished");
@@ -169,6 +191,7 @@ async fn read_and_handle_request(
     async_cmds_fd: Arc<Mutex<Async<FdWrapper>>>,
     async_sig_fd: Arc<Mutex<Async<FdWrapper>>>,
     processes: Arc<Mutex<Vec<ProcessDesc>>>,
+    security_context: SecurityContext,
 ) -> Result<(Option<api::response::Command>, u64), RequestError> {
     let cmd_future = async {
         let cmd_fd = async_cmds_fd.lock().await;
@@ -185,7 +208,7 @@ async fn read_and_handle_request(
 
     select! {
         _ = cmd_future => {
-            handle_message(async_cmds_fd.clone(), processes.clone()).await
+            handle_message(async_cmds_fd.clone(), processes.clone(), security_context).await
         }
         _ = sig_future => {
             handle_sigchld(async_sig_fd.clone(), processes.clone()).await
@@ -221,12 +244,14 @@ async fn main_loop(
     async_cmds_fd: Arc<Mutex<Async<FdWrapper>>>,
     async_sig_fd: Arc<Mutex<Async<FdWrapper>>>,
     processes: Arc<Mutex<Vec<ProcessDesc>>>,
+    security_context: SecurityContext,
 ) -> std::io::Result<()> {
     loop {
         let result = read_and_handle_request(
             async_cmds_fd.clone(),
             async_sig_fd.clone(),
             processes.clone(),
+            security_context,
         )
         .await;
 
@@ -275,8 +300,29 @@ fn block_signals() -> std::io::Result<()> {
     Ok(())
 }
 
-fn get_namespace_fd() {
-    // TODO(aljen): Use C version of this function
+fn get_namespace_fd() -> SecurityContext {
+    #[link(name = "seccomp")]
+    extern "C" {
+        fn get_namespace_fd(
+            global_pidfd: *mut pid_t,
+            global_zombie_pid: *mut pid_t,
+            global_userns_fd: *mut c_int,
+            global_mountns_fd: *mut c_int,
+        );
+    }
+
+    let mut security_context = SecurityContext::default();
+
+    unsafe {
+        get_namespace_fd(
+            &mut security_context.global_pidfd as *mut pid_t,
+            &mut security_context.global_zombie_pid as *mut pid_t,
+            &mut security_context.global_userns_fd as *mut i32 as *mut c_int,
+            &mut security_context.global_mountns_fd as *mut i32 as *mut c_int,
+        );
+    }
+
+    security_context
 }
 
 fn setup_agent_directories() -> std::io::Result<()> {

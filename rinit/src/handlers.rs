@@ -23,12 +23,13 @@ use crate::{
     network::{add_network_hosts, net_if_addr, net_if_addr_to_hw_addr, net_if_hw_addr, net_route},
     process::{spawn_new_process, ExitReason, NewProcessArgs, ProcessDesc},
     utils::{CyclicBuffer, FdPipe, FdWrapper},
-    RequestError, DEV_INET, DEV_VPN,
+    RequestError, SecurityContext, DEV_INET, DEV_VPN,
 };
 
 async fn handle_run_process(
     request: &api::RunProcessRequest,
     processes: Arc<Mutex<Vec<ProcessDesc>>>,
+    security_context: SecurityContext,
 ) -> std::io::Result<Option<api::response::Command>> {
     let mut new_process_args = NewProcessArgs::default();
 
@@ -144,7 +145,7 @@ async fn handle_run_process(
         ));
     }
 
-    match spawn_new_process(new_process_args, fd_desc, processes).await {
+    match spawn_new_process(new_process_args, fd_desc, processes, security_context).await {
         Ok(process_id) => Ok(Some(api::response::Command::RunProcess(
             api::RunProcessResponse { process_id },
         ))),
@@ -495,6 +496,7 @@ pub async fn handle_sigchld(
 pub async fn handle_message(
     async_cmds_fd: Arc<Mutex<Async<FdWrapper>>>,
     processes: Arc<Mutex<Vec<ProcessDesc>>>,
+    security_context: SecurityContext,
 ) -> Result<(Option<api::response::Command>, u64), RequestError> {
     let mut async_fd = async_cmds_fd.lock().await;
 
@@ -519,7 +521,7 @@ pub async fn handle_message(
         }
         Some(api::request::Command::RunProcess(run_process)) => {
             log::trace!("   Run process message");
-            handle_run_process(&run_process, processes).await
+            handle_run_process(&run_process, processes, security_context).await
         }
         Some(api::request::Command::KillProcess(kill_process)) => {
             log::trace!("   Kill process message");

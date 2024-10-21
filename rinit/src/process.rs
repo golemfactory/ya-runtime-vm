@@ -1,6 +1,9 @@
 use std::{
     borrow::Cow,
-    os::unix::fs::PermissionsExt,
+    os::{
+        fd::{AsRawFd, RawFd},
+        unix::fs::PermissionsExt,
+    },
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicI32, AtomicU64},
@@ -10,7 +13,7 @@ use std::{
 
 use async_process::Child;
 use async_process::Command;
-use libc::SYS_close_range;
+use libc::{c_int, SYS_close_range};
 use nix::{
     errno::Errno,
     fcntl::OFlag,
@@ -24,13 +27,10 @@ use crate::{
     fs::create_dirs,
     pre_exec::{PreExec, PreExecOptions},
     utils::FdPipe,
-    DEFAULT_DIR_PERMS, OUTPUT_PATH_PREFIX, SYSROOT,
+    SecurityContext, DEFAULT_DIR_PERMS, OUTPUT_PATH_PREFIX, SYSROOT,
 };
 
 static PROC_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
-static GLOBAL_PIDFD: AtomicI32 = AtomicI32::new(-1);
-static GLOBAL_USERNS_FD: AtomicI32 = AtomicI32::new(-1);
-static GLOBAL_MOUNTNS_FD: AtomicI32 = AtomicI32::new(-1);
 
 #[derive(Debug, Default)]
 pub struct NewProcessArgs<'a> {
@@ -93,7 +93,12 @@ fn prepare_redirects(fd_desc: &[RedirectFdDesc; 3]) -> std::io::Result<[Redirect
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Invalid redirect count"))
 }
 
-fn spawn_child(args: &NewProcessArgs, redirs: &[RedirectFdDesc; 3]) -> std::io::Result<Child> {
+fn spawn_child(
+    args: &NewProcessArgs,
+    status_pipe: (RawFd, RawFd),
+    redirs: &[RedirectFdDesc; 3],
+    security_context: SecurityContext,
+) -> std::io::Result<Child> {
     Command::new(args.bin.as_ref())
         .args(args.args[1..].iter().map(AsRef::as_ref))
         .envs(args.envp.iter().map(|(k, v)| (k.as_ref(), v.as_ref())))
@@ -102,7 +107,9 @@ fn spawn_child(args: &NewProcessArgs, redirs: &[RedirectFdDesc; 3]) -> std::io::
                 .chroot()
                 .chdir(args.cwd.clone())
                 .with_uid(args.uid)
-                .with_gid(args.gid),
+                .with_gid(args.gid)
+                .with_status_pipe(status_pipe)
+                .with_security_context(security_context),
         )
         .spawn()
 }
@@ -111,6 +118,7 @@ pub async fn spawn_new_process<'a>(
     args: NewProcessArgs<'a>,
     fd_desc: [RedirectFdDesc; 3],
     processes: Arc<Mutex<Vec<ProcessDesc>>>,
+    security_context: SecurityContext,
 ) -> std::io::Result<u64> {
     // TODO(aljen): Handle g_entrypoint_desc/handle_sigchld
 
@@ -121,9 +129,14 @@ pub async fn spawn_new_process<'a>(
 
     let redirs = prepare_redirects(&fd_desc)?;
 
-    let child = spawn_child(&args, &redirs)?;
-
     let status_pipe = pipe2(OFlag::O_CLOEXEC | OFlag::O_DIRECT)?;
+
+    let child = spawn_child(
+        &args,
+        (status_pipe.0.as_raw_fd(), status_pipe.1.as_raw_fd()),
+        &redirs,
+        security_context,
+    )?;
 
     println!("Status pipe: {:?}", status_pipe);
 
@@ -162,83 +175,13 @@ pub async fn spawn_new_process<'a>(
     Ok(proc_id)
 }
 
-fn sandbox_apply() {
+pub fn sandbox_apply(child_pipe: i32) {
     #[link(name = "seccomp")]
     extern "C" {
-        fn sandbox_apply();
-    }
-    unsafe { sandbox_apply() }
-}
-
-fn child_wrapper(parent_pipe: (i32, i32), args: NewProcessArgs) -> std::io::Result<()> {
-    if unsafe { libc::close(parent_pipe.0) } < 0 {
-        unsafe { libc::_exit(Errno::last_raw()) };
+        fn sandbox_apply(child_pipe: c_int);
     }
 
-    let set = SigSet::empty();
-    match sigprocmask(signal::SigmaskHow::SIG_SETMASK, Some(&set), None) {
-        Ok(_) => (),
-        Err(_) => {
-            unsafe { libc::_exit(Errno::last_raw()) };
-        }
+    unsafe {
+        sandbox_apply(child_pipe as c_int);
     }
-
-    // TODO(aljen): Handle fd redirs
-
-    if GLOBAL_PIDFD.load(std::sync::atomic::Ordering::SeqCst) == -1 {
-        let global_userns_fd = GLOBAL_USERNS_FD.load(std::sync::atomic::Ordering::SeqCst);
-        let global_mountns_fd = GLOBAL_MOUNTNS_FD.load(std::sync::atomic::Ordering::SeqCst);
-
-        let low_fd = if global_userns_fd > global_mountns_fd {
-            global_mountns_fd
-        } else {
-            global_userns_fd
-        };
-
-        let high_fd = if global_userns_fd > global_mountns_fd {
-            global_userns_fd
-        } else {
-            global_mountns_fd
-        };
-
-        if low_fd < 3 {
-            unsafe { libc::abort() };
-        }
-
-        if low_fd > 3 && unsafe { libc::syscall(SYS_close_range, 3, low_fd - 1, 0) } < 0 {
-            unsafe { libc::_exit(Errno::last_raw()) };
-        }
-
-        // TODO(aljen): Handle SYS_close_range
-
-        // TODO(aljen): Handle setns
-
-        // TODO(aljen): Handle close global_userns_fd
-
-        // TODO(aljen): Handle chdir
-
-        // TODO(aljen): Handle chroot
-    } else {
-        // TODO(aljen): Handle SYS_close_range
-
-        // TODO(aljen): Handle chroot
-
-        // TODO(aljen): Handle chdir
-    }
-
-    // if !args.cwd.is_empty() {
-    // TODO(aljen): Handle chdir
-    // }
-
-    // TODO(aljen): Handle gid/uid
-
-    // TODO(aljen): Handle sandbox/caps
-    if GLOBAL_PIDFD.load(std::sync::atomic::Ordering::SeqCst) != -1 {
-        sandbox_apply();
-        // ...
-    }
-
-    // TODO(aljen): Handle execve
-
-    Ok(())
 }

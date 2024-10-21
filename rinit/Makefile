@@ -60,7 +60,7 @@ init: extern-libs/libseccomp.a
 	cargo build --color always --target=x86_64-unknown-linux-musl -p rinit --release --bin rinit
 	cp ../target/x86_64-unknown-linux-musl/release/rinit $@
 	@# default musl libs on some distros have debug symbols, lets strip them (and everything else)
-	strip $@
+# strip $@
 
 $(UNPACKED_HEADERS):
 	wget -q -O "headers" $(HEADERS_URL)

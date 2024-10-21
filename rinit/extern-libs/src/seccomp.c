@@ -9,9 +9,11 @@
 #include <stdlib.h>
 #include <stdnoreturn.h>
 #include <string.h>
+#include <linux/capability.h>
 #include <linux/sched.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
+#include <sys/prctl.h>
 #include <sys/reboot.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -495,6 +497,11 @@ static const char *eperm_syscalls[] = {
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
 
+static int capset(const cap_user_header_t hdrp, const cap_user_data_t datap)
+{
+    return syscall(SYS_capset, hdrp, datap);
+}
+
 static void
 ya_runtime_add_syscalls(const scmp_filter_ctx ctx, const char *const *syscalls,
                         const size_t count, const uint32_t arch, const uint32_t action)
@@ -551,13 +558,88 @@ void setup_sandbox(void)
         abort();
 }
 
-void sandbox_apply(void)
+void sandbox_apply(int child_pipe)
 {
     if (seccomp_load(ctx))
         abort();
+
+    struct __user_cap_header_struct hdr = {
+        .version = _LINUX_CAPABILITY_VERSION_3,
+    };
+    struct __user_cap_data_struct data[_LINUX_CAPABILITY_U32S_3] = {0};
+
+    for (int i = 0; i < _LINUX_CAPABILITY_U32S_3 * 32; ++i)
+    {
+        switch (i)
+        {
+        // CAP_AUDIT_CONTROL: no
+        // CAP_AUDIT_READ: no
+        // CAP_AUDIT_WRITE: no
+        case CAP_BLOCK_SUSPEND:
+        // case CAP_BPF:
+        // case CAP_CHECKPOINT_RESTORE:
+        case CAP_CHOWN:
+        case CAP_DAC_OVERRIDE:
+        case CAP_DAC_READ_SEARCH:
+        case CAP_FOWNER:
+        case CAP_FSETID:
+        case CAP_IPC_LOCK:
+        case CAP_IPC_OWNER:
+        case CAP_KILL:
+        case CAP_LEASE:
+        case CAP_LINUX_IMMUTABLE:
+        // case CAP_MKNOD:
+        // case CAP_NET_ADMIN:
+        case CAP_NET_BIND_SERVICE:
+        case CAP_NET_BROADCAST:
+        case CAP_NET_RAW:
+        // case CAP_PERFMON:
+        case CAP_SETGID:
+        case CAP_SETFCAP:
+        case CAP_SETPCAP:
+        case CAP_SETUID:
+        // case CAP_SYS_ADMIN:
+        case CAP_SYS_BOOT:
+        case CAP_SYS_CHROOT:
+        // case CAP_SYS_MODULE:
+        case CAP_SYS_NICE:
+        case CAP_SYS_PACCT:
+        case CAP_SYS_PTRACE:
+        // case CAP_SYS_RAWIO
+        case CAP_SYS_RESOURCE:
+        // case CAP_SYS_TIME:
+        // case CAP_SYS_TTY_CONFIG:
+        // case CAP_SYSLOG:
+        case CAP_WAKE_ALARM:
+        {
+            data[i / 32].permitted |= UINT32_C(1) << i % 32;
+            data[i / 32].effective |= UINT32_C(1) << i % 32;
+            break;
+        }
+        default:
+            const int res = prctl(PR_CAPBSET_DROP, i);
+            if (res != 0 && (res != -1 && errno == EINVAL))
+                goto out;
+        }
+    }
+
+    if (capset(&hdr, &*data))
+    {
+        goto out;
+    }
+
+out:
+    if (child_pipe != -1)
+    {
+        char c = '\0';
+        /* Can't do anything with errors here. */
+        (void)write(child_pipe, &c, sizeof(c));
+        close(child_pipe);
+    }
+    _exit(errno);
 }
 
-void get_namespace_fd(int global_pidfd, int *global_zombie_pid, int *global_userns_fd, int *global_mountns_fd)
+void get_namespace_fd(pid_t *global_pidfd, pid_t *global_zombie_pid, int *global_userns_fd, int *global_mountns_fd)
 {
     int tmp_fd = CHECK(open("/user_namespace", O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC | O_EXCL | O_NOCTTY, 0600));
     CHECK(close(tmp_fd));
@@ -568,7 +650,7 @@ void get_namespace_fd(int global_pidfd, int *global_zombie_pid, int *global_user
         .flags = CLONE_CLEAR_SIGHAND |
                  CLONE_PIDFD | /* alloc a PID FD */
                  NAMESPACES,
-        .pidfd = (uint64_t)&global_pidfd,
+        .pidfd = (uint64_t)global_pidfd,
         .child_tid = 0,
         .parent_tid = 0,
         .exit_signal = (uint64_t)SIGCHLD,
@@ -622,7 +704,7 @@ void get_namespace_fd(int global_pidfd, int *global_zombie_pid, int *global_user
         (void)read(fds[1], &status, 1);
         _exit(0);
     }
-    CHECK(global_pidfd);
+    CHECK(*global_pidfd);
     /* parent */
     CHECK_BOOL(close(fds[1]) == 0);
     CHECK_BOOL(read(fds[0], &status, sizeof status) == sizeof status);
