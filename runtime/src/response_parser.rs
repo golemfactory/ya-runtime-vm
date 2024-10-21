@@ -1,3 +1,5 @@
+use prost::Message;
+use rinit_protos::rinit::api;
 use std::convert::TryFrom;
 use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -85,54 +87,45 @@ async fn recv_bytes<T: AsyncRead + Unpin>(stream: &mut T) -> io::Result<Vec<u8>>
 pub async fn parse_one_response<T: AsyncRead + Unpin>(
     stream: &mut T,
 ) -> io::Result<GuestAgentMessage> {
-    let id = recv_u64(stream).await?;
+    let size = recv_u64(stream).await?;
+    println!("size: {}", size);
 
-    let typ = recv_u8(stream).await?;
-    match typ {
-        0 => Ok(GuestAgentMessage::Response(ResponseWithId {
-            id,
+    let mut buf = vec![0u8; size as usize];
+    stream.read_exact(buf.as_mut_slice()).await?;
+
+    let response = api::Response::decode(buf.as_slice())?;
+
+    println!("response: {:?}", response);
+
+    match response.command {
+        Some(api::response::Command::Quit(_)) => Ok(GuestAgentMessage::Response(ResponseWithId {
+            id: response.request_id,
             resp: Response::Ok,
         })),
-        1 => {
-            let val = recv_u64(stream).await?;
+        Some(api::response::Command::RunProcess(command)) => {
             Ok(GuestAgentMessage::Response(ResponseWithId {
-                id,
-                resp: Response::OkU64(val),
+                id: response.request_id,
+                resp: Response::OkU64(command.process_id),
             }))
         }
-        2 => {
-            let buf = recv_bytes(stream).await?;
+        Some(api::response::Command::KillProcess(_command)) => todo!(),
+        Some(api::response::Command::MountVolume(_)) => {
             Ok(GuestAgentMessage::Response(ResponseWithId {
-                id,
-                resp: Response::OkBytes(buf),
+                id: response.request_id,
+                resp: Response::Ok,
             }))
         }
-        3 => {
-            let code = recv_u32(stream).await?;
-            Ok(GuestAgentMessage::Response(ResponseWithId {
-                id,
-                resp: Response::Err(code),
-            }))
-        }
-        4 => {
-            if id == 0 {
-                let proc_id = recv_u64(stream).await?;
-                let fd = recv_u32(stream).await?;
-                Ok(GuestAgentMessage::Notification(
-                    Notification::OutputAvailable { id: proc_id, fd },
-                ))
-            } else {
-                Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Invalid response message ID",
-                ))
-            }
-        }
-        5 => {
-            if id == 0 {
-                let proc_id = recv_u64(stream).await?;
-                let status = recv_u8(stream).await?;
-                let type_ = ExitType::try_from(recv_u8(stream).await?)?;
+        Some(api::response::Command::UploadFile(_command)) => todo!(),
+        Some(api::response::Command::QueryOutput(_command)) => todo!(),
+        Some(api::response::Command::PutInput(_command)) => todo!(),
+        Some(api::response::Command::SyncFs(_command)) => todo!(),
+        Some(api::response::Command::NetCtl(_command)) => todo!(),
+        Some(api::response::Command::NetHost(_command)) => todo!(),
+        Some(api::response::Command::ProcessDied(command)) => {
+            if response.request_id == 0 {
+                let proc_id = command.pid;
+                let status = command.exit_status as u8;
+                let type_ = ExitType::try_from(command.reason_type as u8)?;
                 Ok(GuestAgentMessage::Notification(Notification::ProcessDied {
                     id: proc_id,
                     reason: ExitReason { status, type_ },
@@ -144,9 +137,84 @@ pub async fn parse_one_response<T: AsyncRead + Unpin>(
                 ))
             }
         }
-        _ => Err(io::Error::new(
+        Some(api::response::Command::Error(command)) => {
+            Ok(GuestAgentMessage::Response(ResponseWithId {
+                id: response.request_id,
+                resp: Response::Err(command.code),
+            }))
+        }
+        None => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "Invalid response type",
         )),
     }
+
+    // let typ = recv_u8(stream).await?;
+    // match typ {
+    //     // RESP_OK
+    //     0 => Ok(GuestAgentMessage::Response(ResponseWithId {
+    //         id,
+    //         resp: Response::Ok,
+    //     })),
+    //     // RESP_OK_U64
+    //     1 => {
+    //         let val = recv_u64(stream).await?;
+    //         Ok(GuestAgentMessage::Response(ResponseWithId {
+    //             id,
+    //             resp: Response::OkU64(val),
+    //         }))
+    //     }
+    //     // RESP_OK_BYTES
+    //     2 => {
+    //         let buf = recv_bytes(stream).await?;
+    //         Ok(GuestAgentMessage::Response(ResponseWithId {
+    //             id,
+    //             resp: Response::OkBytes(buf),
+    //         }))
+    //     }
+    //     // RESP_ERR
+    //     3 => {
+    //         let code = recv_u32(stream).await?;
+    //         Ok(GuestAgentMessage::Response(ResponseWithId {
+    //             id,
+    //             resp: Response::Err(code),
+    //         }))
+    //     }
+    //     // RESP_NOTIFY_OUTPUT_AVAILABLE
+    //     4 => {
+    //         if id == 0 {
+    //             let proc_id = recv_u64(stream).await?;
+    //             let fd = recv_u32(stream).await?;
+    //             Ok(GuestAgentMessage::Notification(
+    //                 Notification::OutputAvailable { id: proc_id, fd },
+    //             ))
+    //         } else {
+    //             Err(io::Error::new(
+    //                 io::ErrorKind::InvalidData,
+    //                 "Invalid response message ID",
+    //             ))
+    //         }
+    //     }
+    //     // RESP_NOTIFY_PROCESS_DIED
+    //     5 => {
+    //         if id == 0 {
+    //             let proc_id = recv_u64(stream).await?;
+    //             let status = recv_u8(stream).await?;
+    //             let type_ = ExitType::try_from(recv_u8(stream).await?)?;
+    //             Ok(GuestAgentMessage::Notification(Notification::ProcessDied {
+    //                 id: proc_id,
+    //                 reason: ExitReason { status, type_ },
+    //             }))
+    //         } else {
+    //             Err(io::Error::new(
+    //                 io::ErrorKind::InvalidData,
+    //                 "Invalid response message ID",
+    //             ))
+    //         }
+    //     }
+    //     _ => Err(io::Error::new(
+    //         io::ErrorKind::InvalidData,
+    //         "Invalid response type",
+    //     )),
+    // }
 }

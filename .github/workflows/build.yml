@@ -40,6 +40,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-registry-
 
+      - name: Install Protobuf
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
       - name: Cache cargo index
         uses: actions/cache@v1
         with:

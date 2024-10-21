@@ -2,6 +2,7 @@ use futures::channel::mpsc;
 use futures::future::{BoxFuture, FutureExt};
 use futures::lock::Mutex;
 use futures::{SinkExt, StreamExt};
+use prost::Message as ProstMessage;
 use std::path::Path;
 use std::sync::Arc;
 use std::{io, marker::PhantomData};
@@ -10,6 +11,8 @@ use tokio::{
     net::UnixStream,
     spawn, time,
 };
+
+use rinit_protos::rinit::api;
 
 pub use crate::response_parser::Notification;
 use crate::response_parser::{parse_one_response, GuestAgentMessage, Response, ResponseWithId};
@@ -548,13 +551,15 @@ impl GuestAgent {
     }
 
     pub async fn quit(&mut self) -> io::Result<RemoteCommandResult<()>> {
-        let mut msg = Message::default();
         let msg_id = self.get_new_msg_id();
 
-        msg.create_header(msg_id);
+        let request = api::Request {
+            request_id: msg_id,
+            command: Some(api::request::Command::Quit(api::QuitRequest {})),
+        };
+        let msg = request.encode_to_vec();
 
-        msg.append_submsg(&SubMsgQuitType::SubMsgEnd);
-
+        self.stream.write_u64(msg.len() as u64).await?;
         self.stream.write_all(msg.as_ref()).await?;
 
         self.get_ok_response(msg_id).await
@@ -572,44 +577,45 @@ impl GuestAgent {
         maybe_cwd: Option<&str>,
         is_entrypoint: bool,
     ) -> io::Result<RemoteCommandResult<u64>> {
-        let mut msg = Message::default();
         let msg_id = self.get_new_msg_id();
 
-        msg.create_header(msg_id);
+        let request = api::Request {
+            request_id: msg_id,
+            command: Some(api::request::Command::RunProcess(api::RunProcessRequest {
+                program: bin.as_bytes().to_vec(),
+                args: argv.iter().map(|s| s.to_string().into_bytes()).collect(),
+                env: maybe_env.map_or_else(Vec::new, |env| {
+                    env.iter().map(|s| s.to_string().into_bytes()).collect()
+                }),
+                uid: Some(uid),
+                gid: Some(gid),
+                rfd: fds
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, fdr)| fdr.as_ref().map(|fdr| (i as u32, fdr)))
+                    .map(|(i, fdr)| api::Rfd {
+                        fd: i,
+                        redirect: Some(match fdr {
+                            RedirectFdType::RedirectFdFile(path) => {
+                                api::rfd::Redirect::Path(path.to_vec())
+                            }
+                            RedirectFdType::RedirectFdPipeBlocking(size) => {
+                                api::rfd::Redirect::PipeBlocking(*size)
+                            }
+                            RedirectFdType::RedirectFdPipeCyclic(size) => {
+                                api::rfd::Redirect::PipeCyclic(*size)
+                            }
+                        }),
+                    })
+                    .collect(),
+                work_dir: maybe_cwd.map(|s| s.as_bytes().to_vec()),
+                is_entrypoint: Some(is_entrypoint),
+            })),
+        };
 
-        msg.append_submsg(&SubMsgRunProcessType::SubMsgRunProcessBin(bin.as_bytes()));
+        let msg = request.encode_to_vec();
 
-        msg.append_submsg(&SubMsgRunProcessType::SubMsgRunProcessArg(
-            &argv.iter().map(|s| s.as_bytes()).collect::<Vec<_>>(),
-        ));
-
-        if let Some(env) = maybe_env {
-            msg.append_submsg(&SubMsgRunProcessType::SubMsgRunProcessEnv(
-                &env.iter().map(|s| s.as_bytes()).collect::<Vec<_>>(),
-            ));
-        }
-
-        msg.append_submsg(&SubMsgRunProcessType::SubMsgRunProcessUid(uid));
-
-        msg.append_submsg(&SubMsgRunProcessType::SubMsgRunProcessGid(gid));
-
-        fds.iter()
-            .enumerate()
-            .filter_map(|(i, fdr)| fdr.as_ref().map(|fdr| (i, fdr)))
-            .for_each(|(i, fdr)| {
-                msg.append_submsg(&SubMsgRunProcessType::SubMsgRunProcessRfd(i as u32, fdr))
-            });
-
-        if let Some(cwd) = maybe_cwd {
-            msg.append_submsg(&SubMsgRunProcessType::SubMsgRunProcessCwd(cwd.as_bytes()));
-        }
-
-        if is_entrypoint {
-            msg.append_submsg(&SubMsgRunProcessType::SubMsgRunProcessEnt);
-        }
-
-        msg.append_submsg(&SubMsgRunProcessType::SubMsgEnd);
-
+        self.stream.write_u64(msg.len() as u64).await?;
         self.stream.write_all(msg.as_ref()).await?;
 
         self.get_u64_response(msg_id).await
@@ -665,19 +671,21 @@ impl GuestAgent {
     }
 
     pub async fn mount(&mut self, tag: &str, path: &str) -> io::Result<RemoteCommandResult<()>> {
-        let mut msg = Message::default();
         let msg_id = self.get_new_msg_id();
 
-        msg.create_header(msg_id);
+        let request = api::Request {
+            request_id: msg_id,
+            command: Some(api::request::Command::MountVolume(
+                api::MountVolumeRequest {
+                    tag: tag.as_bytes().to_vec(),
+                    path: path.as_bytes().to_vec(),
+                },
+            )),
+        };
 
-        msg.append_submsg(&SubMsgMountVolumeType::SubMsgMountVolumeTag(tag.as_bytes()));
+        let msg = request.encode_to_vec();
 
-        msg.append_submsg(&SubMsgMountVolumeType::SubMsgMountVolumePath(
-            path.as_bytes(),
-        ));
-
-        msg.append_submsg(&SubMsgMountVolumeType::SubMsgEnd);
-
+        self.stream.write_u64(msg.len() as u64).await?;
         self.stream.write_all(msg.as_ref()).await?;
 
         self.get_ok_response(msg_id).await
