@@ -135,6 +135,8 @@ initramfs.cpio.gz: init mkfs $(UNPACKED_KERNEL)
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/core/failover.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/ipv6/ipv6.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/packet/af_packet.ko initramfs
+	cp $(UNPACKED_KERNEL)/lib/modules/5.10.29-0-virt/kernel/fs/fuse/fuse.ko initramfs
+
 	cp $(BUSYBOX)/$(MKFS_NAME) initramfs
 	mkdir initramfs/$(NEW_ROOT)
 	set -euo pipefail; cd initramfs && find . | cpio --quiet -o -H newc -R 0:0 | gzip -9 > ../$@

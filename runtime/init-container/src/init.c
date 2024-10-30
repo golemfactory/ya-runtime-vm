@@ -2675,8 +2675,10 @@ int main(int argc, char **argv)
     load_module("/ext2.ko");
     load_module("/squashfs.ko");
     load_module("/overlay.ko");
-    if (access("/netfs.ko", R_OK) == 0)
+    if (access("/netfs.ko", R_OK) == 0) {
         load_module("/netfs.ko");
+    }
+        
     load_module("/fscache.ko");
     load_module("/af_packet.ko");
     load_module("/ipv6.ko");
@@ -2684,6 +2686,9 @@ int main(int argc, char **argv)
     load_module("/9pnet.ko");
     load_module("/9pnet_virtio.ko");
     load_module("/9p.ko");
+    if (access("/fuse.ko", R_OK) == 0) {
+        load_module("/fuse.ko");
+    }
 
     if (access("/nvidia.ko", R_OK) == 0)
     {
