@@ -2936,6 +2936,11 @@ int main(int argc, char **argv)
     setup_network();
     setup_agent_directories();
 
+    const char *hostname_env = environ_get("hostname");
+    if(hostname_env != NULL) {
+        sethostname(hostname_env, strlen(hostname_env));
+    }
+
     block_signals();
     if (do_sandbox)
     {

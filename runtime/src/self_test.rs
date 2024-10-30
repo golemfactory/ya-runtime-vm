@@ -196,6 +196,7 @@ async fn self_test_deployment(
                 },
             ),
         ]),
+        "golem".to_string(),
     )
     .await
     .or_err("Error reading package metadata")?;

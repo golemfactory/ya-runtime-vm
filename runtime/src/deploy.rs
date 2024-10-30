@@ -30,6 +30,7 @@ pub struct Deployment {
     pub user: (u32, u32),
     pub volumes: Vec<ContainerVolume>,
     pub mounts: Vec<DeploymentMount>,
+    pub hostname: String,
     pub config: ContainerConfig,
 }
 
@@ -40,6 +41,7 @@ impl Deployment {
         mem_mib: usize,
         task_packages: &[PathBuf],
         volume_override: HashMap<String, VolumeMount>,
+        hostname: String,
     ) -> Result<Self, anyhow::Error>
     where
         Input: AsyncRead + AsyncSeek + Unpin,
@@ -69,6 +71,18 @@ impl Deployment {
         let config: ContainerConfig = serde_json::from_str(&json)?;
 
         let mut volumes = parse_volumes(config.volumes.as_ref());
+
+        // Host mount type is not permitted for rootfs
+        for (path, mount) in &volume_override {
+            if let VolumeMount::Host {} = mount {
+                // catches `/` as well as `` and `///`  etc.
+                if path.bytes().all(|b| b == b'/') {
+                    return Err(anyhow::anyhow!(
+                        r#"Volume of type `host` specified for path="/""#
+                    ));
+                }
+            }
+        }
 
         let mounts = volume_override
             .into_iter()
@@ -112,6 +126,7 @@ impl Deployment {
             user: parse_user(config.user.as_ref()).unwrap_or((0, 0)),
             volumes,
             mounts,
+            hostname,
             config,
         })
     }
