@@ -79,6 +79,8 @@ pub struct Cli {
     pci_device: Option<Vec<String>>,
     #[structopt(long, env = "YA_RUNTIME_VOLUME_OVERRIDE")]
     volume_override: Option<String>,
+    #[structopt(long, env = "YA_RUNTIME_HOSTNAME", default_value = "golem")]
+    hostname: String,
     #[structopt(flatten)]
     test_config: TestConfig,
 }
@@ -276,6 +278,7 @@ async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<Option<serialize::
         (cli.mem_gib * 1024.) as usize,
         &package_paths,
         volume_override,
+        cli.hostname,
     )
     .await
     .or_err("Error reading package metadata")?;
@@ -394,6 +397,11 @@ pub(crate) async fn stop(
         let mut ga = mutex.lock().await;
         convert_result(ga.quit().await, "Sending quit")?;
     }
+
+    runtime
+        .kill()
+        .await
+        .expect("Sending kill to runtime failed");
 
     runtime
         .wait()
