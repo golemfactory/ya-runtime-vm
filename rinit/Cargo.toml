@@ -1,0 +1,18 @@
+[package]
+name = "rinit"
+version = "0.1.0"
+authors = ["Golem Factory <contact@golem.network>"]
+edition = "2021"
+license = "GPL-3.0"
+
+[dependencies]
+async-io.workspace = true
+async-process.workspace = true
+futures.workspace = true
+libc.workspace = true
+log.workspace = true
+nix.workspace = true
+prost.workspace = true
+rinit-protos.workspace = true
+smol.workspace = true
+stderrlog.workspace = true

@@ -5,3 +5,11 @@
 /.idea/
 /.vscode/
 logs/
+
+# rinit build files
+/rinit/extern-libs/libseccomp.a
+/rinit/extern-libs/unpacked_headers
+/rinit/extern-libs/unpacked_kernel
+/rinit/init
+/rinit/initramfs.cpio.gz
+/rinit/vmlinuz-virt
