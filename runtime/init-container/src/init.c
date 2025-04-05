@@ -2093,6 +2093,7 @@ static int find_device_major(const char *name) {
             break;
         }
     }
+    fclose(f);
     free(line);
     return major;
 }
