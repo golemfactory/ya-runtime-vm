@@ -2263,7 +2263,7 @@ int main(int argc, char **argv) {
             errno = 0;
             CHECK_BOOL(0);
         }
-        int nvidia_major = CHECK(find_device_major("nvidia-frontend"));
+        int nvidia_major = CHECK(find_device_major("nvidia"));
         int nvidia_count = nvidia_gpu_count();
         for (int i = 0; i < nvidia_count; i++) {
             res = snprintf(buf, sizeof buf, "dev/nvidia%d", i);
