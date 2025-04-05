@@ -838,7 +838,7 @@ static noreturn void child_wrapper(int parent_pipe[2],
                 case CAP_LEASE:
                 case CAP_LINUX_IMMUTABLE:
                 // case CAP_MKNOD:
-                // cas CAP_NET_ADMIN:
+                // case CAP_NET_ADMIN:
                 case CAP_NET_BIND_SERVICE:
                 case CAP_NET_BROADCAST:
                 case CAP_NET_RAW:
@@ -2241,7 +2241,7 @@ int main(int argc, char **argv) {
                 MS_NODEV | MS_NOSUID | MS_NOEXEC,
                 NULL));
 
-    bool do_sandbox = true;
+    bool do_sandbox = nvidia_loaded;
     for (int i = 1; i < argc; ++i) {
         fprintf(stderr, "Command line argument: %s\n", argv[i]);
         if (strcmp(argv[i], "sandbox=yes") == 0) {

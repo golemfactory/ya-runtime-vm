@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "runtime",
-    "gvmkit",
 ]
 resolver = "2"
 
