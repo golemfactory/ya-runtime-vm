@@ -5,6 +5,9 @@ NEW_ROOT := newroot
 # -MMD to create dependency files (*.d) on first compilation
 CFLAGS := -MMD -std=c11 -O2 -Wall -Wextra -Werror -fPIE -pie -Iinclude/ -Wmaybe-uninitialized -Iunpacked_headers/usr/include -I$(CURDIR)/$(LIBSECCOMP_SUBMODULE)/include '-DNEW_ROOT="$(NEW_ROOT)"'
 
+VIRTIOFS ?= false
+CFLAGS += '-DVIRTIOFS=$(VIRTIOFS)'
+
 ifneq ($(DEBUG), "")
 CFLAGS += -DNDEBUG
 endif
@@ -135,7 +138,10 @@ initramfs.cpio.gz: init mkfs $(UNPACKED_KERNEL)
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/core/failover.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/ipv6/ipv6.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/packet/af_packet.ko initramfs
-	cp $(UNPACKED_KERNEL)/lib/modules/5.10.29-0-virt/kernel/fs/fuse/fuse.ko initramfs
+	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/fuse/fuse.ko initramfs
+ifdef VIRTIOFS
+	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/fuse/virtiofs.ko initramfs
+endif
 
 	cp $(BUSYBOX)/$(MKFS_NAME) initramfs
 	mkdir initramfs/$(NEW_ROOT)

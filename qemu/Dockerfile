@@ -1,5 +1,8 @@
 FROM ubuntu:22.04
 
+ARG NUMA=false
+ARG VIRTIOFS=false
+
 RUN apt update \
     && \
     \
@@ -44,14 +47,15 @@ RUN echo CONFIG_EDID=y >> /qemu/configs/devices/i386-softmmu/default.mak
 RUN echo CONFIG_VGA=y >> /qemu/configs/devices/i386-softmmu/default.mak
 RUN echo CONFIG_VGA_PCI=y >> /qemu/configs/devices/i386-softmmu/default.mak
 RUN echo CONFIG_PCIE_PORT=y >> /qemu/configs/devices/i386-softmmu/default.mak
+RUN if [ "$VIRTIOFS" = "true" ]; then \
+    echo CONFIG_VHOST_USER_FS=y >> /qemu/configs/devices/i386-softmmu/default.mak; \
+fi
 
-# --without-default-devices
-RUN mkdir build && \
-  cd build && \
-  /qemu/configure \
+RUN mkdir build && cd build && \
+    CONFIGURE_OPTS=" \
     --target-list=x86_64-softmmu \
     --static \
-    --audio-drv-list="" \
+    --audio-drv-list='' \
     --disable-slirp \
     --disable-tcg-interpreter \
     --disable-containers \
@@ -70,14 +74,18 @@ RUN mkdir build && \
     --disable-bochs \
     --disable-bzip2 \
     --disable-guest-agent \
-    --disable-numa \
-    --disable-tcg \
     --disable-vnc \
     --disable-live-block-migration \
     --disable-gio \
     --enable-vhost-kernel \
     --enable-virtfs \
-    --without-default-devices
+    --without-default-devices" && \
+    if [ "$NUMA" = "true" ]; then \
+        CONFIGURE_OPTS="$CONFIGURE_OPTS --enable-memfd --enable-mem-backend"; \
+    else \
+        CONFIGURE_OPTS="$CONFIGURE_OPTS --disable-numa --disable-tcg"; \
+    fi && \
+    /qemu/configure $CONFIGURE_OPTS
 
 RUN cd build && make V=1 CFLAGS+="-Os -flto" -j4
 

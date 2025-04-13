@@ -39,6 +39,10 @@
 #include "proto.h"
 #include "init-seccomp.h"
 
+#ifndef VIRTIOFS
+#define VIRTIOFS false
+#endif
+
 #define SYSROOT "/mnt/newroot"
 
 #define CONTAINER_OF(ptr, type, member) (type *)((char *)(ptr) - offsetof(type, member))
@@ -2604,6 +2608,12 @@ static void scan_storage(struct storage_node_t **list)
         free(data);
     }
 
+#ifdef VIRTIOFS
+    // This assumes that a virtiofs user drive with the tag "rootfs-0" is attached to QEMU (vmrt).
+    // A more robust and extensible approach could be to look up the list of tags in /sys/class/virtio-ports/
+    storage_append(list, "/mnt/image-0", "rootfs-0", "virtiofs", "", MS_RDONLY | MS_NODEV);
+#endif
+
     fflush(stderr);
 
     for (char **p = environ; *p; ++p)
@@ -2678,7 +2688,7 @@ int main(int argc, char **argv)
     if (access("/netfs.ko", R_OK) == 0) {
         load_module("/netfs.ko");
     }
-        
+
     load_module("/fscache.ko");
     load_module("/af_packet.ko");
     load_module("/ipv6.ko");
