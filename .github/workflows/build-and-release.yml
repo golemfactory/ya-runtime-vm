@@ -1,0 +1,175 @@
+name: Build and Release
+
+on: push
+
+jobs:
+  build-ya-runtime-vm:
+    name: Build ya-runtime-vm
+    env:
+      RUSTFLAGS: "-D warnings -C opt-level=z -C debuginfo=1"
+      rust_stable: 1.80.0
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [macos-13, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v1
+        with:
+          lfs: true
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ env.rust_stable }}
+      - uses: actions/cache@v1
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+      - uses: actions/cache@v1
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-index-
+      - uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --all -- --check
+      - uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: --all-targets --all-features -- -D warnings
+      - uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --release --target x86_64-unknown-linux-musl
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ya-runtime-vm
+          path: |
+            target/x86_64-unknown-linux-musl/release/ya-runtime-vm
+
+  build-init-container:
+    name: Build init-container
+    runs-on: ubuntu-latest
+    steps:
+      - run: sudo apt-get install -y musl-tools musl autoconf gperf libtool automake
+      - uses: actions/checkout@v1
+        with:
+          lfs: true
+      - run: |
+          musl-gcc -v
+          git submodule init
+          git submodule update
+          cd runtime/init-container
+          make
+      - uses: actions/upload-artifact@v4
+        with:
+          name: init-container
+          path: |
+            runtime/init-container/initramfs.cpio.gz
+            runtime/init-container/vmlinuz-virt
+
+  build-vmrt:
+    name: Build vmrt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v1
+        with:
+          lfs: true
+      - run: |
+          cd qemu
+          make
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qemu-vmrt
+          path: |
+            qemu/vmrt
+            qemu/vgabios-stdvga.bin
+
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    needs: [build-ya-runtime-vm, build-init-container, build-vmrt]
+    steps:
+      - uses: actions/checkout@v1
+        with:
+          lfs: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: ya-runtime-vm
+          path: target/x86_64-unknown-linux-musl/release/
+      - uses: actions/download-artifact@v4
+        with:
+          name: init-container
+          path: runtime/init-container/
+      - uses: actions/download-artifact@v4
+        with:
+          name: qemu-vmrt
+          path: qemu/
+      - run: |
+          TARGET_DIR=releases/ya-runtime-vm-trunk
+          mkdir -p "$TARGET_DIR/ya-runtime-vm/runtime"
+          chmod +x target/x86_64-unknown-linux-musl/release/ya-runtime-vm qemu/vmrt
+          cp target/x86_64-unknown-linux-musl/release/ya-runtime-vm "$TARGET_DIR/ya-runtime-vm/ya-runtime-vm"
+          cp runtime/conf/ya-runtime-vm.json "$TARGET_DIR/"
+          cp -r runtime/poc/runtime "$TARGET_DIR/ya-runtime-vm/"
+          cp "runtime/init-container/initramfs.cpio.gz" "$TARGET_DIR/ya-runtime-vm/runtime/"
+          cp "runtime/init-container/vmlinuz-virt" "$TARGET_DIR/ya-runtime-vm/runtime/"
+          cp "qemu/vmrt" "$TARGET_DIR/ya-runtime-vm/runtime/"
+          cp "qemu/vgabios-stdvga.bin" "$TARGET_DIR/ya-runtime-vm/runtime/"
+          cd releases
+          tar czvf ya-runtime-vm-trunk.tar.gz ya-runtime-vm-trunk
+          echo "artifact=ya-runtime-vm-trunk.tar.gz" >> $GITHUB_ENV
+      - uses: softprops/action-gh-release@v1
+        with:
+          files: ./releases/${{ env.artifact }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-deb:
+    name: Build .deb package
+    needs: [build-ya-runtime-vm, build-init-container, build-vmrt]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          lfs: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: init-container
+          path: runtime/init-container/
+      - run: |
+          test -f runtime/init-container/initramfs.cpio.gz
+      - uses: robinraju/release-downloader@v1.8
+        with:
+          repository: ${{ env.self-test-img_repository }}
+          tag: ${{ env.self-test-img_tag }}
+          fileName: self-test.gvmi
+          out-file-path: runtime/image/
+          tarBall: false
+          zipBall: false
+      - id: version
+        shell: bash
+        env:
+          GITHUB_REF: ${{ github.ref }}
+        run: |
+          TAG_NAME="${GITHUB_REF##*/}"
+          TAGV_NAME="${TAG_NAME#pre-rel-}"
+          VERSION=${TAGV_NAME#v}
+          echo "::set-output name=tagv::${TAG_NAME}"
+          echo "::set-output name=version::${VERSION}"
+      - uses: golemfactory/build-deb-action@v0.6
+        id: deb
+        with:
+          debVersion: ${{ steps.version.outputs.version }}
+          pkgName: ya-runtime-vm
+          subdir: runtime
+      - uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ steps.deb.outputs.deb }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

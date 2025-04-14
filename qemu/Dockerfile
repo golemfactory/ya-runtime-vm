@@ -1,4 +1,4 @@
-FROM ubuntu:22.04
+FROM ubuntu:25.04
 
 RUN apt update \
     && \
@@ -25,7 +25,7 @@ RUN apt update \
     \
     rm -rf /var/lib/apt/lists/*
 
-RUN git clone https://github.com/qemu/qemu.git -b v8.1.1 --recurse-submodules
+RUN git clone https://github.com/qemu/qemu.git -b v9.2.3 --recurse-submodules
 
 RUN echo CONFIG_VIRTIO=y >> /qemu/configs/devices/i386-softmmu/default.mak
 RUN echo CONFIG_VIRTIO_SERIAL=y >> /qemu/configs/devices/i386-softmmu/default.mak
@@ -81,4 +81,4 @@ RUN mkdir build && \
 
 RUN cd build && make V=1 CFLAGS+="-Os -flto" -j4
 
-RUN cp /build/x86_64-softmmu/qemu-system-x86_64 vmrt 
+RUN cp /build/x86_64-softmmu/qemu-system-x86_64 vmrt

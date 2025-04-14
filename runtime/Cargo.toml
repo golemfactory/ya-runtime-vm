@@ -118,3 +118,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "ya-runtime-vm"
 path = "src/main.rs"
+
+[features]
+default = []
+snix-castore = []
