@@ -8,7 +8,10 @@ use std::sync::Arc;
 use futures::lock::Mutex;
 use futures::FutureExt;
 use tokio::io::AsyncBufReadExt;
-use tokio::{io, process, spawn};
+use tokio::{
+    io, process, spawn,
+    time::{sleep, Duration},
+};
 
 use ya_client_model::activity::exe_script_command::VolumeMount;
 use ya_runtime_sdk::runtime_api::server;
@@ -105,27 +108,43 @@ pub async fn start_vmrt(
         "virtserialport,chardev=manager_cdev,name=manager_port",
     ];
 
-    let rootfs_devices: Vec<(String, String)> = deployment
-        .task_packages
-        .iter()
-        .enumerate()
-        .map(|(i, path)| {
-            let drive = format!(
-                "file={},cache=unsafe,readonly=on,format=raw,id=rootfs-{},if=none",
-                path.display(),
-                i
-            );
-            let device = format!("virtio-blk-pci,drive=rootfs-{},serial=rootfs-{}", i, i);
-            (drive, device)
-        })
-        .collect();
-
-    for (drive, device) in rootfs_devices.iter() {
-        args.push("-drive");
-        args.push(drive);
-        args.push("-device");
-        args.push(device);
+    let mut additional_args = Vec::new();
+    if cfg!(feature = "virtiofs") {
+        // Reading the VIRTIOFS_SOCK_PATH environment variable isn't a robust or extensible solution.
+        // A better approach would be to update the deployment logic to retrieve this information
+        // from the image parameters. This would allow the image creator to specify whether a host
+        // user virtiofs drive should be used, and if so, ensure the drive is set up and mounted
+        // on the host before attaching it to the guest VM.
+        let socket_path = std::env::var("VIRTIOFS_SOCK_PATH")
+            .expect("Environment variable VIRTIOFS_SOCK_PATH is not set");
+        additional_args.extend([
+            "-chardev".to_string(),
+            format!("socket,id=char-0,path={socket_path}"),
+            "-device".to_string(),
+            format!("vhost-user-fs-pci,queue-size=1024,chardev=char-0,tag=rootfs-0"),
+        ]);
+    } else {
+        for (i, path) in deployment.task_packages.iter().enumerate() {
+            additional_args.extend([
+                "-drive".to_string(),
+                format!(
+                    "file={},cache=unsafe,readonly=on,format=raw,id=rootfs-{i},if=none",
+                    path.display()
+                ),
+                "-device".to_string(),
+                format!("virtio-blk-pci,drive=rootfs-{i},serial=rootfs-{i}"),
+            ]);
+        }
     }
+    if cfg!(feature = "numa") {
+        additional_args.extend([
+            "-object".to_string(),
+            format!("memory-backend-file,id=mem,size={memory_size},mem-path=/dev/shm,share=on"),
+            "-numa".to_string(),
+            "node,memdev=mem".to_string(),
+        ]);
+    }
+    args.extend(additional_args.iter().map(String::as_str));
 
     cmd.args(args);
 
