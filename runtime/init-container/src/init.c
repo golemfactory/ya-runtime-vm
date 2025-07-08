@@ -986,7 +986,7 @@ static noreturn void child_wrapper(int parent_pipe[2],
     /* If execve returns we know an error happened. */
     (void)execve(new_proc_args->bin,
                  new_proc_args->argv,
-                 new_proc_args->envp ? NULL : environ);
+                 new_proc_args->envp ? new_proc_args->envp : environ);
 
 out:
     if (child_pipe != -1)
