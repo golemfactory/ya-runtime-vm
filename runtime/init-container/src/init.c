@@ -2545,6 +2545,7 @@ static void scan_storage(struct storage_node_t **list)
         if (serial_fd == -1)
         {
             CHECK_BOOL(errno == ENOENT);
+            CHECK(close(vdx_fd));
 
             fprintf(stderr, "virtio-blk %s/%s/serial doesn't exist, skip\n", block_dir, curr->d_name);
             continue;
@@ -2553,6 +2554,8 @@ static void scan_storage(struct storage_node_t **list)
         char serial[128];
         int bytes_read = read(serial_fd, serial, 127);
         CHECK_BOOL(bytes_read != -1);
+        CHECK(close(serial_fd));
+        CHECK(close(vdx_fd));
         serial[bytes_read] = '\0';
 
         char dev_path[16];
@@ -2561,12 +2564,12 @@ static void scan_storage(struct storage_node_t **list)
         // rootfs layers does not require formatting
         if (strncmp(serial, "rootfs-", 7) == 0)
         {
-            char *temp = NULL;
             size_t rootfs_layer = 0;
-            sscanf(serial, "%64[^-]-%ld", temp, &rootfs_layer);
+            CHECK_BOOL(sscanf(serial, "rootfs-%zu", &rootfs_layer) == 1);
 
             char rootfs_mount[sizeof "/mnt/image-000"];
-            snprintf(rootfs_mount, sizeof rootfs_mount, "/mnt/image-%ld", rootfs_layer);
+            int path_len = snprintf(rootfs_mount, sizeof rootfs_mount, "/mnt/image-%zu", rootfs_layer);
+            CHECK_BOOL(path_len > 0 && (size_t)path_len < sizeof rootfs_mount);
 
             storage_append(list, rootfs_mount, dev_path, "squashfs", "", MS_RDONLY | MS_NODEV);
             fprintf(stderr, "Storage volume %s [%s] to be mounted at %s with data=''.\n", serial, dev_path, rootfs_mount);
@@ -2733,8 +2736,6 @@ int main(int argc, char **argv)
 
     storage = g_storage;
 
-    char *overlay_data = "mode=0700,size=128M";
-
     while (storage != NULL)
     {
         if (strcmp(storage->path, "/") != 0)
@@ -2748,7 +2749,13 @@ int main(int argc, char **argv)
 
 
     // 'workdir' and 'upperdir' have to be on the same filesystem
-    fprintf(stderr, "Mounting tmpfs to /mnt/overlay data: '%s'\n", overlay_data);
+    if (storage == NULL)
+    {
+        const char *overlay_data = "mode=0700,size=128M";
+        fprintf(stderr, "Mounting tmpfs to /mnt/overlay data: '%s'\n", overlay_data);
+        CHECK(mount("tmpfs", "/mnt/overlay", "tmpfs",
+                    MS_NOSUID | MS_NODEV, overlay_data));
+    }
 
 
     storage = g_storage;
