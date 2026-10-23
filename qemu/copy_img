@@ -1,6 +1,7 @@
 #! /bin/bash
 
-V=$(docker create $1) || exit 1
-docker cp "$V:$2" "$3"
-docker rm $V
+set -euo pipefail
 
+container_id=$(docker create "$1")
+trap 'docker rm "$container_id" >/dev/null' EXIT
+docker cp "$container_id:$2" "$3"
