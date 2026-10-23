@@ -9,6 +9,9 @@ versioned postcard protocol with CRC32C and bounded, length-prefixed frames over
 virtio-vsock. OpenVMM provides the userspace vsock backend inside the runtime;
 no separate host vsock driver or service is needed. UART carries boot logs.
 Host directories use virtio-fs; temporary storage uses sparse raw disk images.
+The agent handles vsock, stdout/stderr and child exits in one epoll loop.
+Nonblocking pipes apply backpressure independently; SIGCHLD arrives through
+signalfd, followed by a nonblocking wait for all children, including orphans.
 
 ## Build
 
@@ -40,9 +43,10 @@ mise run fetch-self-test
 mise run package
 ```
 
-The guest task builds a static musl Rust agent and downloads a checksum-pinned
-Alpine kernel. Docker builds the small BusyBox `mkfs.ext2` formatter used for
-empty storage disks. Alternatively, set `YA_VM_MKFS` to an existing static Linux
+The guest task builds a static musl Rust agent using the `guest` profile
+(`lto = "fat"`, `strip = "symbols"`) and downloads a checksum-pinned Alpine
+kernel. Docker builds the small BusyBox `mkfs.ext2` formatter used for empty
+storage disks. Alternatively, set `YA_VM_MKFS` to an existing static Linux
 `mkfs.ext2` binary. The guest agent itself has no C sources or C submodules.
 Windows packages consume the same kernel and initramfs built on Linux.
 

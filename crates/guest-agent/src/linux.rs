@@ -1,6 +1,8 @@
 mod boot;
 mod network;
 mod service;
+mod signals;
+mod transport;
 
 use anyhow::Context;
 use rustix::net::{AddressFamily, SocketAddrAny, SocketFlags, SocketType};
@@ -60,6 +62,6 @@ pub fn shutdown() -> ! {
     rustix::fs::sync();
     let _ = rustix::system::reboot(rustix::system::RebootCommand::PowerOff);
     loop {
-        std::thread::park();
+        rustix::event::pause();
     }
 }

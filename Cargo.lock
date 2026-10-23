@@ -7915,6 +7915,7 @@ name = "ya-vm-guest-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "linux-raw-sys 0.12.1",
  "netlink-packet-core",
  "netlink-packet-route",
  "netlink-sys",

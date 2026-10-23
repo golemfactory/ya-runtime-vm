@@ -60,7 +60,7 @@ def main():
     if hashlib.sha256(apk.read_bytes()).hexdigest() != KERNEL_SHA256:
         apk.unlink()
         raise SystemExit("Kernel APK checksum verification failed")
-    entries = [("init", (TARGET / "x86_64-unknown-linux-musl/release/ya-vm-guest-agent").read_bytes(), stat.S_IFREG | 0o755),
+    entries = [("init", (TARGET / "x86_64-unknown-linux-musl/guest/ya-vm-guest-agent").read_bytes(), stat.S_IFREG | 0o755),
                ("mkfs.ext2", formatter(cache), stat.S_IFREG | 0o755)]
     with tarfile.open(apk, "r:gz") as package:
         members = {member.name.removeprefix("./"): member for member in package.getmembers()}

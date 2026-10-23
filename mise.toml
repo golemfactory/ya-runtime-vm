@@ -31,7 +31,7 @@ run = "cargo build --locked --release -p ya-runtime-vm"
 
 [tasks.guest-build]
 description = "Build the static Linux guest agent"
-run = "cargo build --locked --release -p ya-vm-guest-agent --target x86_64-unknown-linux-musl"
+run = "cargo build --locked --profile guest -p ya-vm-guest-agent --target x86_64-unknown-linux-musl"
 run_windows = "python -c \"raise SystemExit('Build the Linux guest on a Linux host')\""
 
 [tasks.guest-image]
