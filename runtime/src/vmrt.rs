@@ -1,32 +1,31 @@
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::io;
 use std::path::PathBuf;
-use std::process::Stdio;
-use std::sync::atomic::AtomicU32;
-use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 
+use anyhow::Context;
 use futures::lock::Mutex;
 use futures::FutureExt;
-use tokio::io::AsyncBufReadExt;
-use tokio::{io, process, spawn};
+use mesh::rpc::RpcSend;
+use mesh_worker::{launch_local_worker, WorkerHandle};
+use openvmm_core::VmWorker;
+use openvmm_defs::rpc::VmRpc;
+use openvmm_defs::worker::VmWorkerParameters;
+use tokio::spawn;
+use vm_resource::IntoResource;
 
-use ya_client_model::activity::exe_script_command::VolumeMount;
 use ya_runtime_sdk::runtime_api::server;
 use ya_runtime_sdk::server::ContainerEndpoint;
 use ya_runtime_sdk::{serialize, ErrorExt, EventEmitter};
 
-use crate::deploy::{Deployment, DeploymentMount};
+use crate::deploy::Deployment;
 use crate::guest_agent_comm::{GuestAgent, Notification};
 
 const DIR_RUNTIME: &str = "runtime";
-const FILE_RUNTIME: &str = "vmrt";
-const FILE_VMLINUZ: &str = "vmlinuz-virt";
-const FILE_INITRAMFS: &str = "initramfs.cpio.gz";
-const FILE_NVIDIA_FILES: &str = "nvidia-files.squashfs";
 
 #[derive(Default)]
 pub struct RuntimeData {
-    pub runtime: Option<process::Child>,
+    pub runtime: Option<WorkerHandle>,
+    pub vm_rpc: Option<mesh::Sender<VmRpc>>,
     pub vpn: Option<ContainerEndpoint>,
     pub inet: Option<ContainerEndpoint>,
     pub deployment: Option<Deployment>,
@@ -35,10 +34,10 @@ pub struct RuntimeData {
 }
 
 impl RuntimeData {
-    pub fn runtime(&mut self) -> anyhow::Result<process::Child> {
+    pub fn runtime(&mut self) -> anyhow::Result<WorkerHandle> {
         self.runtime
             .take()
-            .ok_or_else(|| anyhow::anyhow!("Runtime process not available"))
+            .ok_or_else(|| anyhow::anyhow!("OpenVMM worker not available"))
     }
 
     pub fn deployment(&self) -> anyhow::Result<&Deployment> {
@@ -65,303 +64,129 @@ pub async fn start_vmrt(
 
     let mut data = runtime_data.lock().await;
     let deployment = data.deployment.clone().or_err("Missing deployment data")?;
-    let volumes = deployment.volumes.clone();
 
     let manager_sock = temp_dir.join(format!("{}.sock", uid));
-    let vpn_remote = data.vpn.clone();
-    let inet_remote = data.inet.clone();
+    let listener = unix_socket::UnixListener::bind(&manager_sock)
+        .with_context(|| format!("binding guest agent socket {}", manager_sock.display()))?;
+    let _manager_sock_cleanup = SocketPathCleanup(manager_sock.clone());
+    let (cfg, vpn_endpoint, inet_endpoint, _socket_registrations) =
+        crate::openvmm_adapter::build_config(
+            &runtime_dir,
+            &work_dir,
+            &deployment,
+            listener,
+            data.vpn.as_ref(),
+            data.inet.as_ref(),
+            data.pci_device_id.as_deref().unwrap_or_default(),
+        )?;
+    let kvm = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/kvm")
+        .context("opening /dev/kvm for OpenVMM")?;
+    let (vm_rpc, rpc_recv) = mesh::channel();
+    let (notify_send, mut notify_recv) = mesh::channel();
+    let params = VmWorkerParameters {
+        hypervisor: hypervisor_resources::KvmHandle { kvm }.into_resource(),
+        cfg,
+        saved_state: None,
+        shared_memory: None,
+        rpc: rpc_recv,
+        notify: notify_send,
+    };
+    let mut runtime = launch_local_worker::<VmWorker>(params)
+        .await
+        .context("launching embedded OpenVMM worker")?;
+    if let Err(error) = vm_rpc.call(VmRpc::Resume, ()).await {
+        runtime.stop();
+        if let Err(stop_error) = runtime.join().await {
+            log::error!("OpenVMM worker also failed while handling resume failure: {stop_error:#}");
+        }
+        return Err(error).context("resuming OpenVMM guest");
+    }
 
-    let mut kernel_cmdline = "console=ttyS0 panic=1".to_string();
-
-    let mut cmd = process::Command::new(runtime_dir.join(FILE_RUNTIME));
-    cmd.current_dir(&runtime_dir);
-    let memory_size = format!("{}M", deployment.mem_mib);
-    let cpu_cores = deployment.cpu_cores.to_string();
-    let manager_sock_path = format!(
-        "socket,path={},server=on,wait=off,id=manager_cdev",
-        manager_sock.display()
-    );
-    let mut args = vec![
-        "-nographic",
-        "-no-reboot",
-        "-m",
-        memory_size.as_str(),
-        "-kernel",
-        FILE_VMLINUZ,
-        "-initrd",
-        FILE_INITRAMFS,
-        "-enable-kvm",
-        "-cpu",
-        "host,-sgx",
-        "-smp",
-        cpu_cores.as_str(),
-        "-device",
-        "virtio-serial",
-        "-device",
-        "virtio-rng-pci",
-        "-chardev",
-        manager_sock_path.as_str(),
-        "-device",
-        "virtserialport,chardev=manager_cdev,name=manager_port",
-    ];
-
-    let rootfs_devices: Vec<(String, String)> = deployment
-        .task_packages
-        .iter()
-        .enumerate()
-        .map(|(i, path)| {
-            let drive = format!(
-                "file={},cache=unsafe,readonly=on,format=raw,id=rootfs-{},if=none",
-                path.display(),
-                i
-            );
-            let device = format!("virtio-blk-pci,drive=rootfs-{},serial=rootfs-{}", i, i);
-            (drive, device)
+    let ga_result = async {
+        log::info!("Waiting for guest agent connection");
+        let ga = GuestAgent::connected(manager_sock, 10, move |notification, ga| {
+            let mut emitter = emitter.clone();
+            async move {
+                if let Some(status) = notification_into_status(notification, ga).await {
+                    emitter.emit(status).await;
+                }
+            }
+            .boxed()
         })
-        .collect();
+        .await?;
+        log::info!("Guest agent connected");
 
-    for (drive, device) in rootfs_devices.iter() {
-        args.push("-drive");
-        args.push(drive);
-        args.push("-device");
-        args.push(device);
-    }
-
-    cmd.args(args);
-
-    for (
-        vol_idx,
-        DeploymentMount {
-            name,
-            guest_path,
-            mount,
-        },
-    ) in deployment.mounts.iter().enumerate()
-    {
-        match mount {
-            VolumeMount::Host {} => {
-                log::warn!("DeploymentMount::mount should never be VolumeMount::Host");
-            }
-            VolumeMount::Storage { errors, .. } => {
-                let errors = errors.as_deref().unwrap_or("continue");
-
-                let img_path = work_dir.join(name);
-                cmd.args([
-                    "-drive",
-                    format!(
-                        "file={},format=qcow2,media=disk,id=vol-{vol_idx},if=none",
-                        img_path.display()
-                    )
-                    .as_str(),
-                    "-device",
-                    format!("virtio-blk-pci,drive=vol-{vol_idx},serial=vol-{vol_idx}").as_ref(),
-                ]);
-                kernel_cmdline.push_str(&format!(" vol-{vol_idx}-path={guest_path}"));
-                kernel_cmdline.push_str(&format!(" vol-{vol_idx}-errors={errors}"));
-            }
-            VolumeMount::Ram { size } => {
-                let size = size.as_u64();
-                kernel_cmdline.push_str(&format!(" vol-{vol_idx}-path={guest_path}"));
-                kernel_cmdline.push_str(&format!(" vol-{vol_idx}-size={size}"));
+        {
+            let mut ga = ga.lock().await;
+            for (idx, volume) in deployment.volumes.iter().enumerate() {
+                log::info!("Mounting guest volume {} at {}", idx, volume.path);
+                ga.mount(format!("mnt{}", idx).as_str(), volume.path.as_str())
+                    .await?
+                    .map_err(|error| {
+                        anyhow::anyhow!("Guest failed to mount volume {}: {error:?}", volume.path)
+                    })?;
+                log::info!("Guest volume {} mounted", idx);
             }
         }
+        anyhow::Ok(ga)
     }
-
-    if let Some(pci_device_id) = &data.pci_device_id {
-        for device_id in pci_device_id.iter() {
-            cmd.arg("-device");
-            cmd.arg(format!("vfio-pci,host={}", device_id).as_str());
+    .await;
+    let ga = match ga_result {
+        Ok(ga) => ga,
+        Err(error) => {
+            runtime.stop();
+            if let Err(stop_error) = runtime.join().await {
+                log::error!("OpenVMM worker also failed while cleaning up startup: {stop_error:#}");
+            }
+            return Err(error);
         }
-    } else {
-        cmd.arg("-vga");
-        cmd.arg("none");
+    };
+
+    if let Some(endpoint) = vpn_endpoint {
+        data.vpn.replace(endpoint);
     }
-
-    if runtime_dir.join(FILE_NVIDIA_FILES).exists() {
-        cmd.args([
-            "-drive",
-            format!(
-                "file={},cache=unsafe,readonly=on,format=raw,id=nvidia-files,if=none",
-                runtime_dir.join(FILE_NVIDIA_FILES).display()
-            )
-            .as_str(),
-            "-device",
-            "virtio-blk-pci,drive=nvidia-files,serial=nvidia-files"
-                .to_string()
-                .as_ref(),
-        ]);
+    if let Some(endpoint) = inet_endpoint {
+        data.inet.replace(endpoint);
     }
-
-    kernel_cmdline.push_str(&format!(" hostname={}", deployment.hostname));
-
-    cmd.args(["-append", &kernel_cmdline]);
-
-    if vpn_remote.is_some() || inet_remote.is_some() {
-        let mut pair = SocketPairConf::default();
-
-        pair.probe().await?;
-
-        if let Some(vpn_remote) = vpn_remote {
-            let vpn = configure_netdev_endpoint(&mut cmd, "vpn", &vpn_remote, pair.first)?;
-            data.vpn.replace(vpn);
-        }
-
-        if let Some(inet_remote) = inet_remote {
-            let inet = configure_netdev_endpoint(&mut cmd, "inet", &inet_remote, pair.second)?;
-            data.inet.replace(inet);
-        }
-    }
-
-    for (idx, volume) in volumes.iter().enumerate() {
-        cmd.arg("-virtfs");
-        cmd.arg(format!(
-            "local,id={tag},path={path},security_model=none,mount_tag={tag}",
-            tag = format!("mnt{}", idx),
-            path = work_dir.join(&volume.name).to_string_lossy(),
-        ));
-    }
-
-    log::info!("Executing command: {cmd:?}");
-
-    let mut runtime = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
-
-    let stdout = runtime.stdout.take().unwrap();
-    spawn(reader_to_log(stdout));
-
-    let ga = GuestAgent::connected(manager_sock, 10, move |notification, ga| {
-        let mut emitter = emitter.clone();
-        async move {
-            let status = notification_into_status(notification, ga).await;
-            emitter.emit(status).await;
-        }
-        .boxed()
-    })
-    .await?;
-
-    {
-        let mut ga = ga.lock().await;
-        for (idx, volume) in deployment.volumes.iter().enumerate() {
-            ga.mount(format!("mnt{}", idx).as_str(), volume.path.as_str())
-                .await?
-                .expect("Mount failed");
-        }
-    }
-
     data.runtime.replace(runtime);
+    data.vm_rpc.replace(vm_rpc);
     data.ga.replace(ga);
+
+    let runtime_data_for_halt = runtime_data.clone();
+    spawn(async move {
+        match notify_recv.recv().await {
+            Ok(reason) => {
+                log::warn!("OpenVMM guest halted: {reason:?}");
+                let mut worker = runtime_data_for_halt.lock().await.runtime.take();
+                if let Some(mut worker) = worker.take() {
+                    worker.stop();
+                    if let Err(error) = worker.join().await {
+                        log::error!("OpenVMM worker failed while stopping: {error:#}");
+                    }
+                }
+            }
+            Err(error) => log::debug!("OpenVMM halt channel closed: {error}"),
+        }
+    });
 
     Ok(None)
 }
 
-#[derive(Copy, Clone, Debug)]
-struct SocketConf {
-    ip: Ipv4Addr,
-    udp: u16,
-    tcp: u16,
-}
+struct SocketPathCleanup(PathBuf);
 
-#[derive(Debug)]
-struct SocketPairConf {
-    first: SocketConf,
-    second: SocketConf,
-}
-
-impl Default for SocketPairConf {
-    fn default() -> Self {
-        let ip = Ipv4Addr::new(127, 0, 0, 1);
-        Self {
-            first: SocketConf { ip, udp: 0, tcp: 0 },
-            second: SocketConf { ip, udp: 0, tcp: 0 },
+impl Drop for SocketPathCleanup {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_file(&self.0) {
+            if error.kind() != io::ErrorKind::NotFound {
+                log::warn!(
+                    "failed to remove guest agent socket {}: {error}",
+                    self.0.display()
+                );
+            }
         }
-    }
-}
-
-impl SocketPairConf {
-    // FIXME: TOC/TOU
-    async fn probe(&mut self) -> anyhow::Result<()> {
-        let first = std::net::UdpSocket::bind((self.first.ip, self.first.udp))?;
-        let second = std::net::UdpSocket::bind((self.second.ip, self.second.udp))?;
-
-        self.first.udp = first.local_addr()?.port();
-        self.second.udp = second.local_addr()?.port();
-
-        let first = std::net::TcpListener::bind((self.first.ip, self.first.tcp))?;
-        let second = std::net::TcpListener::bind((self.second.ip, self.second.tcp))?;
-
-        self.first.tcp = first.local_addr()?.port();
-        self.second.tcp = second.local_addr()?.port();
-
-        Ok(())
-    }
-}
-
-fn configure_netdev_endpoint(
-    cmd: &mut process::Command,
-    id: &str,
-    endpoint: &ContainerEndpoint,
-    conf: SocketConf,
-) -> anyhow::Result<ContainerEndpoint> {
-    static COUNTER: AtomicU32 = AtomicU32::new(1);
-
-    let ipv4 = conf.ip;
-
-    let endpoint = match endpoint {
-        ContainerEndpoint::UdpDatagram(remote_addr) => {
-            let port = conf.udp;
-
-            cmd.arg("-netdev");
-            cmd.arg(format!(
-                "socket,id={id},udp={remote_addr},localaddr={ipv4}:{port}"
-            ));
-
-            ContainerEndpoint::UdpDatagram(SocketAddrV4::new(ipv4, port).into())
-        }
-        ContainerEndpoint::TcpStream(remote_addr) => {
-            cmd.arg("-netdev");
-            cmd.arg(format!("socket,id={id},connect={remote_addr}"));
-
-            ContainerEndpoint::TcpStream(*remote_addr)
-        }
-        ContainerEndpoint::TcpListener(_) => {
-            let port = conf.tcp;
-
-            cmd.arg("-netdev");
-            cmd.arg(format!("socket,id={id},listen={ipv4}:{port}"));
-
-            ContainerEndpoint::TcpStream(SocketAddrV4::new(ipv4, port).into())
-        }
-        _ => return Err(anyhow::anyhow!("Unsupported remote VPN VM endpoint")),
-    };
-
-    let counter = COUNTER.fetch_add(1, Relaxed);
-    let bytes = counter.to_be_bytes();
-
-    cmd.arg("-device");
-    cmd.arg(format!(
-        "virtio-net-pci,netdev={id},mac=90:13:{:0x}",
-        HexWriter(&bytes),
-    ));
-
-    Ok(endpoint)
-}
-
-struct HexWriter<'a>(&'a [u8]);
-
-impl<'a> std::fmt::LowerHex for HexWriter<'a> {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
-        for (i, byte) in self.0.iter().enumerate() {
-            let sep = if i < self.0.len().saturating_sub(1) {
-                ":"
-            } else {
-                ""
-            };
-            fmt.write_fmt(format_args!("{:02x}{}", byte, sep))?;
-        }
-        Ok(())
     }
 }
 
@@ -373,26 +198,10 @@ pub fn runtime_dir() -> io::Result<PathBuf> {
         .join(DIR_RUNTIME))
 }
 
-async fn reader_to_log<T: io::AsyncRead + Unpin>(reader: T) {
-    let mut reader = io::BufReader::new(reader);
-    let mut buf = Vec::new();
-    loop {
-        match reader.read_until(b'\n', &mut buf).await {
-            Ok(0) => break,
-            Ok(_) => {
-                let bytes = strip_ansi_escapes::strip(&buf).unwrap();
-                log::debug!("VM: {}", String::from_utf8_lossy(&bytes).trim_end());
-                buf.clear();
-            }
-            Err(e) => log::error!("VM output error: {}", e),
-        }
-    }
-}
-
 async fn notification_into_status(
     notification: Notification,
     ga: Arc<Mutex<GuestAgent>>,
-) -> server::ProcessStatus {
+) -> Option<server::ProcessStatus> {
     match notification {
         Notification::OutputAvailable { id, fd } => {
             log::debug!("Process {} has output available on fd {}", id, fd);
@@ -419,25 +228,29 @@ async fn notification_into_status(
                 _ => (Vec::new(), output),
             };
 
-            server::ProcessStatus {
+            Some(server::ProcessStatus {
                 pid: id,
                 running: true,
                 return_code: 0,
                 stdout,
                 stderr,
-            }
+            })
         }
         Notification::ProcessDied { id, reason } => {
             log::debug!("Process {} died with {:?}", id, reason);
 
             // TODO: reason._type ?
-            server::ProcessStatus {
+            Some(server::ProcessStatus {
                 pid: id,
                 running: false,
                 return_code: reason.status as i32,
                 stdout: Vec::new(),
                 stderr: Vec::new(),
-            }
+            })
+        }
+        Notification::SerialProbe { port } => {
+            log::info!("Guest serial probe reached host through port {port}");
+            None
         }
     }
 }

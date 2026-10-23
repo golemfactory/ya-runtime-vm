@@ -210,6 +210,10 @@ enum GUEST_MSG_TYPE {
     NOTIFY_OUTPUT_AVAILABLE,
     /* ID of process and exit reason (two bytes). (u64 + u8 + u8) */
     NOTIFY_PROCESS_DIED,
+    /* Diagnostic serial-port probe (u8 port index). */
+    NOTIFY_SERIAL_PROBE,
+    /* Command loop is initialized; no body, message ID 0. */
+    NOTIFY_READY,
 };
 
 #pragma pack(pop)

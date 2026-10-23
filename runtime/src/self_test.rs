@@ -23,7 +23,7 @@ use ya_runtime_sdk::{ProcessStatus, RunProcess, RuntimeStatus};
 
 use crate::deploy::{Deployment, DeploymentMount};
 use crate::vmrt::{runtime_dir, RuntimeData};
-use crate::{qcow2_min, Runtime, TestConfig};
+use crate::{disk_image, Runtime, TestConfig};
 
 const FILE_TEST_IMAGE: &str = "self-test.gvmi";
 const FILE_TEST_EXECUTABLE: &str = "ya-self-test";
@@ -222,14 +222,16 @@ async fn self_test_deployment(
             continue;
         };
 
-        let qcow2_dir = work_dir.join(name);
+        let image_path = work_dir.join(name);
         log::debug!(
-            "Creating qcow2 image: {qcow2_dir:?} for path {guest_path} with parameters {mount:?}"
+            "Creating raw disk image: {image_path:?} for path {guest_path} with parameters {mount:?}"
         );
-        let file = fs::File::create(qcow2_dir).await?;
-        let qcow2 =
-            qcow2_min::Qcow2Image::new(size.as_u64(), preallocate.unwrap_or_default().as_u64());
-        qcow2.write(file).await?;
+        disk_image::create_sparse_raw_image(
+            image_path,
+            size.as_u64(),
+            preallocate.unwrap_or_default().as_u64(),
+        )
+        .await?;
     }
 
     Ok(deployment)

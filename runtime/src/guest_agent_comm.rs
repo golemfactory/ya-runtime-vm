@@ -414,6 +414,9 @@ where
         loop {
             match parse_one_response(&mut stream).await {
                 Ok(msg) => match msg {
+                    GuestAgentMessage::Ready => {
+                        log::debug!("Guest agent repeated its readiness notification");
+                    }
                     GuestAgentMessage::Notification(notification) => {
                         let _ = tx.send(notification).await;
                     }
@@ -441,7 +444,33 @@ impl GuestAgent {
         let mut timeout_remaining = timeout;
         loop {
             match UnixStream::connect(&path).await {
-                Ok(s) => {
+                Ok(mut s) => {
+                    log::info!("Guest agent socket connected; waiting for guest READY");
+                    time::timeout(time::Duration::from_secs(u64::from(timeout)), async {
+                        loop {
+                            match parse_one_response(&mut s).await? {
+                                GuestAgentMessage::Ready => return Ok::<(), io::Error>(()),
+                                GuestAgentMessage::Notification(Notification::SerialProbe {
+                                    port,
+                                }) => {
+                                    log::info!(
+                                        "Guest serial probe reached host through port {port}"
+                                    );
+                                }
+                                _ => {
+                                    return Err(io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        "Unexpected guest message before READY",
+                                    ))
+                                }
+                            }
+                        }
+                    })
+                    .await
+                    .map_err(|_| {
+                        io::Error::new(io::ErrorKind::TimedOut, "Guest agent did not send READY")
+                    })??;
+                    log::info!("Guest agent READY received");
                     let (stream_read, stream_write) = split(s);
                     let (response_send, response_receive) = mpsc::channel(10);
                     let ga = Arc::new(Mutex::new(GuestAgent {
@@ -496,10 +525,7 @@ impl GuestAgent {
                     .unwrap()
                     .await
                     .unwrap_or_else(|join_error| {
-                        io::Error::new(
-                            io::ErrorKind::Other,
-                            format!("Unexpected error in reader task: {}", join_error),
-                        )
+                        io::Error::other(format!("Unexpected error in reader task: {}", join_error))
                     }))
             }
         };
@@ -683,7 +709,7 @@ impl GuestAgent {
         self.get_ok_response(msg_id).await
     }
 
-    pub async fn add_hosts<'a, I, T, S>(&mut self, hosts: I) -> io::Result<RemoteCommandResult<()>>
+    pub async fn add_hosts<I, T, S>(&mut self, hosts: I) -> io::Result<RemoteCommandResult<()>>
     where
         I: Iterator<Item = (T, S)>,
         T: AsRef<str>,
@@ -771,5 +797,41 @@ impl GuestAgent {
         self.stream.write_all(msg.as_ref()).await?;
 
         self.get_bytes_response(msg_id).await
+    }
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn connection_waits_for_guest_ready_after_serial_probe() {
+        let path = std::env::temp_dir().join(format!("ya-vm-ready-{}.sock", uuid::Uuid::new_v4()));
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let mut connection = spawn(GuestAgent::connected(path.clone(), 2, |_, _| {
+            async {}.boxed()
+        }));
+        let (mut guest, _) = listener.accept().await.unwrap();
+        // A diagnostic probe confirms outgoing serial traffic, but does not
+        // indicate that the command loop can receive requests yet.
+        guest
+            .write_all(&[0, 0, 0, 0, 0, 0, 0, 0, 6, 1])
+            .await
+            .unwrap();
+        assert!(
+            time::timeout(time::Duration::from_millis(30), &mut connection)
+                .await
+                .is_err()
+        );
+        guest.write_all(&[0, 0, 0, 0, 0, 0, 0, 0, 7]).await.unwrap();
+        let agent = connection.await.unwrap().unwrap();
+        agent
+            .lock()
+            .await
+            .responses_reader_handle
+            .take()
+            .unwrap()
+            .abort();
+        std::fs::remove_file(path).unwrap();
     }
 }

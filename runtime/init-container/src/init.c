@@ -31,6 +31,7 @@
 #include <sched.h>
 #include <time.h>
 #include <dirent.h>
+#include <termios.h>
 
 #include "communication.h"
 #include "cyclic_buffer.h"
@@ -53,6 +54,8 @@
 }
 
 #define VPORT_CMD "/dev/vport0p1"
+#define HVC_CMD "/dev/hvc0"
+#define UART_CMD "/dev/ttyS1"
 #define VPORT_NET "/dev/vport0p2"
 #define VPORT_INET "/dev/vport0p3"
 
@@ -112,6 +115,7 @@ struct epoll_fd_desc
 extern char **environ;
 
 static int g_cmds_fd = -1;
+static const char *g_cmds_path = NULL;
 static int g_sig_fd = -1;
 static int g_epoll_fd = -1;
 static int g_vpn_fd = -1;
@@ -168,6 +172,103 @@ static void load_module(const char *path)
     const int fd = CHECK(open(path, O_RDONLY | O_CLOEXEC));
     CHECK_BOOL(syscall(SYS_finit_module, fd, "", 0) == 0);
     CHECK_BOOL(close(fd) == 0);
+}
+
+static bool is_serial_device_name(const char *name)
+{
+    return strncmp(name, "ttyS", 4) == 0 ||
+           strncmp(name, "hvc", 3) == 0 ||
+           strncmp(name, "vport", 5) == 0;
+}
+
+static uint8_t serial_probe_port(const char *name)
+{
+    const char *digits = NULL;
+    if (strncmp(name, "ttyS", 4) == 0)
+        digits = name + 4;
+    else if (strncmp(name, "hvc", 3) == 0)
+        digits = name + 3;
+    else if (strncmp(name, "vport", 5) == 0)
+        digits = strrchr(name, 'p') ? strrchr(name, 'p') + 1 : NULL;
+
+    if (!digits || !*digits)
+        return UINT8_MAX;
+    char *end = NULL;
+    const unsigned long value = strtoul(digits, &end, 10);
+    return end != digits && *end == '\0' && value < UINT8_MAX
+        ? (uint8_t)value
+        : UINT8_MAX;
+}
+
+static void probe_serial_devices(void)
+{
+    DIR *dev = opendir("/dev");
+    if (!dev)
+    {
+        fprintf(stderr, "Serial diagnostic: opening /dev failed: %s\n", strerror(errno));
+        return;
+    }
+
+    fprintf(stderr, "Serial diagnostic: /dev entries:\n");
+    struct dirent *entry;
+    while ((entry = readdir(dev)) != NULL)
+    {
+        struct stat status;
+        const bool have_status = fstatat(dirfd(dev), entry->d_name, &status, 0) == 0;
+        const char *kind = !have_status ? "unknown" :
+            S_ISCHR(status.st_mode) ? "char" :
+            S_ISBLK(status.st_mode) ? "block" :
+            S_ISDIR(status.st_mode) ? "dir" : "other";
+        fprintf(stderr, "  /dev/%s (%s)\n", entry->d_name, kind);
+
+        if (!is_serial_device_name(entry->d_name))
+            continue;
+
+        char path[sizeof "/dev/vport000p000"];
+        const int path_len = snprintf(path, sizeof path, "/dev/%s", entry->d_name);
+        if (path_len < 0 || (size_t)path_len >= sizeof path)
+        {
+            fprintf(stderr, "  serial probe skipped: device path too long\n");
+            continue;
+        }
+
+        const int fd = open(path, O_WRONLY | O_CLOEXEC | O_NOCTTY | O_NONBLOCK);
+        if (fd < 0)
+        {
+            fprintf(stderr, "  serial probe open failed for %s: %s\n", path, strerror(errno));
+            continue;
+        }
+
+        int result;
+        if (g_cmds_path && strcmp(path, g_cmds_path) == 0)
+        {
+            const struct msg_hdr probe = {
+                .msg_id = 0,
+                .type = NOTIFY_SERIAL_PROBE,
+            };
+            const uint8_t port = serial_probe_port(entry->d_name);
+            result = writen(fd, &probe, sizeof(probe));
+            if (result == 0)
+                result = writen(fd, &port, sizeof(port));
+        }
+        else
+        {
+            char payload[96];
+            const int payload_len = snprintf(payload, sizeof payload,
+                                             "YA_RUNTIME_SERIAL_PROBE %s\r\n",
+                                             path);
+            result = payload_len < 0 || (size_t)payload_len >= sizeof payload
+                ? -1
+                : writen(fd, payload, (size_t)payload_len);
+        }
+
+        if (result == 0)
+            fprintf(stderr, "  serial probe write succeeded for %s\n", path);
+        else
+            fprintf(stderr, "  serial probe write failed for %s: %s\n", path, strerror(errno));
+        close(fd);
+    }
+    closedir(dev);
 }
 
 int make_nonblocking(const int fd)
@@ -1583,12 +1684,15 @@ static uint32_t do_mount(const char *tag, char *path)
     CHECK_BOOL(fd > 2);
     int res = snprintf(buf, sizeof buf, "/proc/self/fd/%d", fd);
     CHECK_BOOL(res >= (int)sizeof "/proc/self/fd/" && res < (int)sizeof buf);
-    if (mount(tag, buf, "9p", 0, "trans=virtio,version=9p2000.L,msize=104857600") < 0) {
+    fprintf(stderr, "Mounting virtio-fs tag '%s' at '%s'\n", tag, path);
+    if (mount(tag, buf, "virtiofs", 0, NULL) < 0) {
         res = errno;
+        fprintf(stderr, "virtio-fs mount failed: %s\n", strerror(res));
     }
     else
     {
         res = 0;
+        fprintf(stderr, "virtio-fs mount complete: %s\n", path);
     }
     close(fd);
     return res;
@@ -1631,6 +1735,7 @@ static void handle_mount(const msg_id_t msg_id)
         goto out;
     }
 
+    fprintf(stderr, "Handling volume mount request: tag='%s' path='%s'\n", tag, path);
     ret = do_mount(tag, path);
 
 out:
@@ -2184,6 +2289,10 @@ static noreturn void main_loop(void)
     event.data.ptr = epoll_fd_desc;
     CHECK(epoll_ctl(g_epoll_fd, EPOLL_CTL_ADD, g_sig_fd, &event));
 
+    const struct msg_hdr ready = {.msg_id = 0, .type = NOTIFY_READY};
+    CHECK(writen(g_cmds_fd, &ready, sizeof(ready)));
+    fprintf(stderr, "Guest agent READY sent through %s\n", g_cmds_path);
+
     while (1)
     {
         if (epoll_wait(g_epoll_fd, &event, 1, -1) < 0)
@@ -2650,6 +2759,8 @@ int main(int argc, char **argv)
     int res = prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
     CHECK_BOOL(res == 0 || res == 1);
     bool nvidia_loaded = false;
+    const char *serial_test_env = environ_get("serial-test");
+    const bool serial_test = serial_test_env && strcmp(serial_test_env, "yes") == 0;
     copy_initramfs();
 
     create_dir("/dev", DEFAULT_DIR_PERMS);
@@ -2663,6 +2774,7 @@ int main(int argc, char **argv)
     load_module("/failover.ko");
     load_module("/virtio.ko");
     load_module("/virtio_ring.ko");
+    load_module("/virtio_mmio.ko");
     if (access("/virtio_pci_modern_dev.ko", R_OK) == 0)
         load_module("/virtio_pci_modern_dev.ko");
     if (access("/virtio_pci_legacy_dev.ko", R_OK) == 0)
@@ -2686,11 +2798,11 @@ int main(int argc, char **argv)
     load_module("/af_packet.ko");
     load_module("/ipv6.ko");
     load_module("/tun.ko");
-    load_module("/9pnet.ko");
-    load_module("/9pnet_virtio.ko");
-    load_module("/9p.ko");
     if (access("/fuse.ko", R_OK) == 0) {
         load_module("/fuse.ko");
+    }
+    if (access("/virtiofs.ko", R_OK) == 0) {
+        load_module("/virtiofs.ko");
     }
 
     if (access("/nvidia.ko", R_OK) == 0)
@@ -2716,7 +2828,41 @@ int main(int argc, char **argv)
         nvidia_loaded = true;
     }
 
-    g_cmds_fd = CHECK(open(VPORT_CMD, O_RDWR | O_CLOEXEC));
+    g_cmds_fd = open(VPORT_CMD, O_RDWR | O_CLOEXEC);
+    if (g_cmds_fd >= 0)
+        g_cmds_path = VPORT_CMD;
+    if (g_cmds_fd < 0 && errno == ENOENT)
+    {
+        /* OpenVMM connects the manager through its second emulated UART. */
+        g_cmds_fd = open(UART_CMD,
+                         O_RDWR | O_CLOEXEC | O_NOCTTY | O_NONBLOCK);
+        if (g_cmds_fd >= 0)
+        {
+            g_cmds_path = UART_CMD;
+            struct termios terminal;
+            CHECK(tcgetattr(g_cmds_fd, &terminal));
+            cfmakeraw(&terminal);
+            terminal.c_cflag |= CLOCAL | CREAD;
+            CHECK(tcsetattr(g_cmds_fd, TCSANOW, &terminal));
+            const int fd_flags = CHECK(fcntl(g_cmds_fd, F_GETFL));
+            CHECK(fcntl(g_cmds_fd, F_SETFL, fd_flags & ~O_NONBLOCK));
+            fprintf(stderr, "Using UART manager channel: %s\n", UART_CMD);
+        }
+        else if (errno == ENOENT)
+        {
+            /* Keep the virtio-console path as a compatibility fallback. */
+            g_cmds_fd = open(HVC_CMD, O_RDWR | O_CLOEXEC);
+            if (g_cmds_fd >= 0)
+            {
+                g_cmds_path = HVC_CMD;
+                fprintf(stderr, "Using virtio-console manager channel: %s\n", HVC_CMD);
+            }
+        }
+    }
+    CHECK(g_cmds_fd);
+
+    if (serial_test)
+        probe_serial_devices();
 
     CHECK(mkdir("/mnt", S_IRWXU));
     CHECK(mkdir("/proc", S_IRWXU));
@@ -2944,9 +3090,13 @@ int main(int argc, char **argv)
                     makedev(5, 2)));
     }
 
+    fprintf(stderr, "Preparing syscall sandbox\n");
     setup_sandbox();
+    fprintf(stderr, "Configuring guest network\n");
     setup_network();
+    fprintf(stderr, "Guest network configured\n");
     setup_agent_directories();
+    fprintf(stderr, "Guest agent directories ready\n");
 
     const char *hostname_env = environ_get("hostname");
     if(hostname_env != NULL) {
@@ -2962,6 +3112,7 @@ int main(int argc, char **argv)
     }
     setup_sigfd();
 
+    fprintf(stderr, "Guest init entering command loop\n");
     main_loop();
     stop_network();
 }

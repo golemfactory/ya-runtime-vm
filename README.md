@@ -15,35 +15,35 @@ This repository consists of 2 crates:
 
 ## Building
 
-Prerequisites:
+The runtime embeds OpenVMM's `VmWorker` in the `ya-runtime-vm` process. It uses
+the pinned OpenVMM `openvmm-v0.3.0` source revision, Rust 1.95, Protocol
+Buffers' `protoc`, and the host OpenSSL development libraries.
 
-- `rustc`
-  
-    Recommendation: use the Rust toolchain installer from [https://rustup.rs/](https://rustup.rs/)
-
-- `musl-gcc` and `gperf`
-
-    On a Ubuntu system, execute in terminal:
-
-    ```bash
-       sudo apt install musl musl-tools gperf
-    ```
-
-Git checkout:
-
-Init `runtime/init-container/liburing` submodule.
+On Ubuntu, install the native build dependencies:
 
 ```bash
-git submodule init
-git submodule update
+sudo apt install autoconf automake cmake cpio curl docker.io gperf liblzma-dev libssl-dev libtool musl-tools pkg-config protobuf-compiler
 ```
 
-Building:
+Docker must be running and accessible to the current user; the init-container
+build uses it to produce the static `mkfs.ext2` utility.
+
+Initialize the init container's C-library submodules:
 
 ```bash
-cd runtime
-cargo build
+git submodule update --init --recursive
 ```
+
+Build the Rust runtime and init image:
+
+```bash
+cargo build --release
+make -C runtime/init-container
+```
+
+OpenVMM uses KVM, so running the VM requires access to `/dev/kvm`. See the
+[OpenVMM source release guide](https://openvmm.dev/guide/dev_guide/contrib/openvmm_source_release.html)
+for details about its pinned source and build inputs.
 
 ## Installing
 
@@ -57,6 +57,14 @@ Prerequisites:
     cargo install cargo-deb
     ```
 
+When building a Debian package locally, fetch the self-test image bundled by
+the release workflow:
+
+```bash
+mkdir -p runtime/image
+curl --fail --location --output runtime/image/self-test.gvmi https://github.com/golemfactory/ya-self-test-img/releases/download/v0.1.4/self-test.gvmi
+```
+
 Installation:
 
 In terminal, change the working directory to `runtime` and install a freshly minted Debian package.
@@ -66,7 +74,9 @@ cd runtime
 sudo dpkg -i $(cargo deb | tail -n1)
 ```
 
-This will install the binary at `/usr/lib/yagna/plugins/ya-runtime-vm/ya-runtime-vm`.
+This installs the runtime at `/usr/lib/yagna/plugins/ya-runtime-vm/ya-runtime-vm`.
+The package also installs the guest kernel and initramfs under the runtime
+directory; OpenVMM itself is linked into the runtime executable.
 
 
 ## Command line
@@ -74,7 +84,7 @@ This will install the binary at `/usr/lib/yagna/plugins/ya-runtime-vm/ya-runtime
 Follow the installation section before executing.
 
 ```
-ya-runtime-vm 0.2.5
+ya-runtime-vm 0.5.4
 
 USAGE:
     ya-runtime-vm [OPTIONS] <SUBCOMMAND>
@@ -103,6 +113,6 @@ SUBCOMMANDS:
 - Docker `VOLUME` command
 
     Directories specified in the `VOLUME` command are a mountpoint for directories on the host filesystem. Contents
-    of those directories will appear as empty during execution.
+    of those directories are passed into the guest through OpenVMM's virtio-fs device.
     
     If you need to place static assets inside the image, try not to use the `VOLUME` command for that directory.

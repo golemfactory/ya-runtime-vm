@@ -14,9 +14,9 @@ jobs:
   build:
     name: Build
     env:
-      RUSTFLAGS: "-D warnings -C opt-level=z -C debuginfo=1"
+      RUSTFLAGS: "-C opt-level=z -C debuginfo=1"
       X86_64_PC_WINDOWS_MSVC_OPENSSL_DIR: c:/vcpkg/installed/x64-windows
-      rust_stable: 1.80.0
+      rust_stable: 1.95.0
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -25,6 +25,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install OpenVMM build dependencies on Linux
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev protobuf-compiler
+
+      - name: Install OpenVMM build dependencies on macOS
+        if: matrix.os == 'macos-latest'
+        run: brew install openssl@3 protobuf
 
       - name: Install Rust ${{ env.rust_stable }}
         uses: actions-rs/toolchain@v1

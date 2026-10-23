@@ -11,7 +11,7 @@ permissions:
 env:
   self-test-img_tag: v0.1.4
   self-test-img_repository: golemfactory/ya-self-test-img
-  rust_stable: 1.80.0
+  rust_stable: 1.95.0
 
 jobs:
   create-release:
@@ -35,18 +35,6 @@ jobs:
             gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "$GITHUB_REF_NAME" --generate-notes
           fi
 
-  build-qemu:
-    name: Build QEMU
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build static Linux x86_64 runtime
-        run: make -C qemu
-      - uses: actions/upload-artifact@v4
-        with:
-          name: qemu-runtime
-          path: runtime/poc/runtime/
-
   build-init:
     name: Build container init
     runs-on: ubuntu-24.04
@@ -67,15 +55,10 @@ jobs:
 
   package:
     name: Build and package Linux runtime
-    needs: [create-release, build-init, build-qemu]
+    needs: [create-release, build-init]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: qemu-runtime
-          path: runtime/poc/runtime/
-      - run: chmod +x runtime/poc/runtime/vmrt
       - uses: actions/download-artifact@v4
         with:
           name: init-container
@@ -92,10 +75,10 @@ jobs:
       - name: Install build dependencies and Rust
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools pkg-config libssl-dev liblzma-dev cmake dpkg-dev
-          rustup toolchain install "$rust_stable" --profile minimal --target x86_64-unknown-linux-musl
+          sudo apt-get install -y pkg-config libssl-dev liblzma-dev cmake dpkg-dev protobuf-compiler
+          rustup toolchain install "$rust_stable" --profile minimal --target x86_64-unknown-linux-gnu
       - name: Build runtime
-        run: cargo +${rust_stable} build --locked --release --target x86_64-unknown-linux-musl
+        run: cargo +${rust_stable} build --locked --release --target x86_64-unknown-linux-gnu
       - name: Synchronize and verify descriptor version
         run: |
           python3 .github/scripts/sync-runtime-version.py
@@ -106,10 +89,9 @@ jobs:
         run: |
           TARGET_DIR="releases/ya-runtime-vm-linux-${GITHUB_REF_NAME}"
           mkdir -p "$TARGET_DIR/ya-runtime-vm/runtime"
-          strip target/x86_64-unknown-linux-musl/release/ya-runtime-vm
-          cp target/x86_64-unknown-linux-musl/release/ya-runtime-vm "$TARGET_DIR/ya-runtime-vm/"
+          strip target/x86_64-unknown-linux-gnu/release/ya-runtime-vm
+          cp target/x86_64-unknown-linux-gnu/release/ya-runtime-vm "$TARGET_DIR/ya-runtime-vm/"
           cp runtime/conf/ya-runtime-vm.json "$TARGET_DIR/"
-          cp -r runtime/poc/runtime/. "$TARGET_DIR/ya-runtime-vm/runtime/"
           cp runtime/image/self-test.gvmi runtime/init-container/initramfs.cpio.gz runtime/init-container/vmlinuz-virt "$TARGET_DIR/ya-runtime-vm/runtime/"
           tar -C releases -czf "releases/ya-runtime-vm-linux-${GITHUB_REF_NAME}.tar.gz" "ya-runtime-vm-linux-${GITHUB_REF_NAME}"
       - name: Pack Debian package
@@ -117,11 +99,10 @@ jobs:
           VERSION="${GITHUB_REF_NAME#pre-rel-}"
           VERSION="${VERSION#v}"
           cargo +${rust_stable} install cargo-deb --version 2.5.1 --locked
-          cargo +${rust_stable} deb --manifest-path runtime/Cargo.toml --no-build --target x86_64-unknown-linux-musl --deb-version "$VERSION" --output "releases/ya-runtime-vm_${GITHUB_REF_NAME}_amd64.deb"
+          cargo +${rust_stable} deb --manifest-path runtime/Cargo.toml --no-build --target x86_64-unknown-linux-gnu --deb-version "$VERSION" --output "releases/ya-runtime-vm_${GITHUB_REF_NAME}_amd64.deb"
       - name: Verify packaged binaries
         run: |
-          target/x86_64-unknown-linux-musl/release/ya-runtime-vm --version
-          runtime/poc/runtime/vmrt --version
+          target/x86_64-unknown-linux-gnu/release/ya-runtime-vm --version
           dpkg-deb --info "releases/ya-runtime-vm_${GITHUB_REF_NAME}_amd64.deb"
           cd releases
           sha256sum "ya-runtime-vm-linux-${GITHUB_REF_NAME}.tar.gz" "ya-runtime-vm_${GITHUB_REF_NAME}_amd64.deb" > SHA256SUMS

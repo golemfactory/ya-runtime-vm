@@ -26,7 +26,7 @@ use ya_runtime_sdk::runtime_api::server;
 use ya_runtime_vm::guest_agent_comm::{GuestAgent, Notification, RedirectFdType};
 
 #[allow(clippy::declare_interior_mutable_const)]
-const IDENTIFICATION: AtomicU16 = AtomicU16::new(42);
+static IDENTIFICATION: AtomicU16 = AtomicU16::new(42);
 const MTU: usize = 1400;
 const PREFIX_LEN: usize = 2;
 
@@ -73,6 +73,9 @@ impl Notifications {
             Notification::ProcessDied { id, reason } => {
                 eprintln!("Process {} died with {:?}", id, reason);
                 self.process_died.notify_waiters();
+            }
+            Notification::SerialProbe { port } => {
+                eprintln!("Serial probe received through port {port}");
             }
         }
     }
@@ -193,7 +196,7 @@ async fn handle_net<P: AsRef<Path>>(path: P) -> anyhow::Result<()> {
                 res.reserve(PREFIX_LEN);
                 res.splice(0..0, u16::to_ne_bytes(len_u16).to_vec());
 
-                eprintln!("<- {:?}", &res);
+                eprintln!("<- {:?}", res);
                 if let Err(e) = write.write_all(&res).await {
                     eprintln!("Write error: {:?}", e);
                 }
@@ -206,10 +209,7 @@ async fn handle_net<P: AsRef<Path>>(path: P) -> anyhow::Result<()> {
 }
 
 fn handle_icmp(src: IpAddr, dst: IpAddr, packet: &[u8]) -> Option<Vec<u8>> {
-    let icmp_packet = match IcmpPacket::new(packet) {
-        Some(icmp_packet) => icmp_packet,
-        None => return None,
-    };
+    let icmp_packet = IcmpPacket::new(packet)?;
 
     match icmp_packet.get_icmp_type() {
         IcmpTypes::EchoReply => {

@@ -35,6 +35,9 @@ impl Notifications {
                 println!("Process {} died with {:?}", id, reason);
                 self.process_died.notify_waiters();
             }
+            Notification::SerialProbe { port } => {
+                println!("Serial probe received through port {port}");
+            }
         }
     }
 }

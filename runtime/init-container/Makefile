@@ -116,6 +116,7 @@ initramfs.cpio.gz: init mkfs $(UNPACKED_KERNEL)
 	cp $< initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/drivers/virtio/virtio.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/drivers/virtio/virtio_ring.ko initramfs
+	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/drivers/virtio/virtio_mmio.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/drivers/virtio/virtio_pci.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/drivers/char/hw_random/rng-core.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/drivers/char/hw_random/virtio-rng.ko initramfs
@@ -124,18 +125,16 @@ initramfs.cpio.gz: init mkfs $(UNPACKED_KERNEL)
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/drivers/net/tun.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/drivers/net/net_failover.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/drivers/net/virtio_net.ko initramfs
-	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/9p/9p.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/mbcache.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/ext2/ext2.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/squashfs/squashfs.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/overlayfs/overlay.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/fscache/fscache.ko initramfs
-	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/9p/9pnet.ko initramfs
-	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/9p/9pnet_virtio.ko initramfs
+	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/fuse/virtiofs.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/core/failover.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/ipv6/ipv6.ko initramfs
 	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/net/packet/af_packet.ko initramfs
-	cp $(UNPACKED_KERNEL)/lib/modules/5.10.29-0-virt/kernel/fs/fuse/fuse.ko initramfs
+	cp $(UNPACKED_KERNEL)/lib/modules/$(KERNEL_VER)/kernel/fs/fuse/fuse.ko initramfs
 
 	cp $(BUSYBOX)/$(MKFS_NAME) initramfs
 	mkdir initramfs/$(NEW_ROOT)

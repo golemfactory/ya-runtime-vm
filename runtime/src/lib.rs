@@ -1,7 +1,9 @@
 pub mod cpu;
 pub mod deploy;
+mod disk_image;
 pub mod guest_agent_comm;
-mod qcow2_min;
+mod net_socket;
+mod openvmm_adapter;
 mod response_parser;
 mod self_test;
 pub mod vmrt;
@@ -295,10 +297,12 @@ async fn deploy(workdir: PathBuf, cli: Cli) -> anyhow::Result<Option<serialize::
             continue;
         };
 
-        let file = fs::File::create(work_dir.join(name)).await?;
-        let qcow2 =
-            qcow2_min::Qcow2Image::new(size.as_u64(), preallocate.unwrap_or_default().as_u64());
-        qcow2.write(file).await?;
+        disk_image::create_sparse_raw_image(
+            work_dir.join(name),
+            size.as_u64(),
+            preallocate.unwrap_or_default().as_u64(),
+        )
+        .await?;
     }
 
     fs::OpenOptions::new()
@@ -390,24 +394,25 @@ pub(crate) async fn stop(
 ) -> Result<(), server::ErrorResponse> {
     log::debug!("got shutdown");
     let mut data = runtime_data.lock().await;
-    let mut runtime = data.runtime().unwrap();
+    let mut runtime = data.runtime().ok();
 
-    {
-        let mutex = data.ga().unwrap();
-        let mut ga = mutex.lock().await;
-        convert_result(ga.quit().await, "Sending quit")?;
+    let quit_result = match data.ga() {
+        Ok(mutex) => {
+            let mut ga = mutex.lock().await;
+            convert_result(ga.quit().await, "Sending quit")
+        }
+        Err(error) => Err(server::ErrorResponse::msg(error.to_string())),
+    };
+
+    if let Some(mut runtime) = runtime.take() {
+        runtime.stop();
+        runtime
+            .join()
+            .await
+            .map_err(|error| server::ErrorResponse::msg(error.to_string()))?;
     }
-
-    runtime
-        .kill()
-        .await
-        .expect("Sending kill to runtime failed");
-
-    runtime
-        .wait()
-        .await
-        .expect("Waiting for runtime stop failed");
-    Ok(())
+    data.vm_rpc.take();
+    quit_result
 }
 
 fn offer(self_test_result: serde_json::Value) -> anyhow::Result<serde_json::Value> {

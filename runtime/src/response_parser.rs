@@ -43,6 +43,7 @@ pub struct ExitReason {
 pub enum Notification {
     OutputAvailable { id: u64, fd: u32 },
     ProcessDied { id: u64, reason: ExitReason },
+    SerialProbe { port: u8 },
 }
 
 #[derive(Debug)]
@@ -55,6 +56,7 @@ pub struct ResponseWithId {
 pub enum GuestAgentMessage {
     Response(ResponseWithId),
     Notification(Notification),
+    Ready,
 }
 
 async fn recv_u8<T: AsyncRead + Unpin>(stream: &mut T) -> io::Result<u8> {
@@ -144,6 +146,19 @@ pub async fn parse_one_response<T: AsyncRead + Unpin>(
                 ))
             }
         }
+        6 => {
+            if id == 0 {
+                Ok(GuestAgentMessage::Notification(Notification::SerialProbe {
+                    port: recv_u8(stream).await?,
+                }))
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Invalid serial probe message ID",
+                ))
+            }
+        }
+        7 if id == 0 => Ok(GuestAgentMessage::Ready),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "Invalid response type",
