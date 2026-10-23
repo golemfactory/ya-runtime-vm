@@ -129,10 +129,12 @@ fn spawn_vm<'a, P: AsRef<Path>>(temp_path: P, mount_args: &'a [(&'a str, impl To
         "virtserialport,chardev=manager_cdev,name=manager_port",
         "-drive",
         format!(
-            "file={},cache=none,readonly=on,format=raw,if=virtio",
+            "file={},cache=none,readonly=on,format=raw,id=rootfs-0,if=none",
             root_dir.join("squashfs_drive").display()
         )
         .as_str(),
+        "-device",
+        "virtio-blk-pci,drive=rootfs-0,serial=rootfs-0",
     ]);
     for (tag, path) in mount_args.iter() {
         cmd.args([

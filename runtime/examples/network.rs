@@ -165,10 +165,12 @@ fn spawn_vm<P: AsRef<Path>>(temp_path: P) -> Child {
         "virtserialport,chardev=net_cdev,name=net_port",
         "-drive",
         format!(
-            "file={},cache=none,readonly=on,format=raw,if=virtio",
+            "file={},cache=none,readonly=on,format=raw,id=rootfs-0,if=none",
             root_dir.join("squashfs_drive").display()
         )
         .as_str(),
+        "-device",
+        "virtio-blk-pci,drive=rootfs-0,serial=rootfs-0",
     ]);
     cmd.stdin(Stdio::null());
     cmd.spawn().expect("failed to spawn VM")
