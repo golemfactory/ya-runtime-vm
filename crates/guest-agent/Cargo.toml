@@ -1,0 +1,15 @@
+[package]
+name = "ya-vm-guest-agent"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0"
+
+[dependencies]
+ya-vm-agent-protocol = { path = "../agent-protocol" }
+anyhow = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1", features = ["fs", "mount", "net", "process", "thread", "system", "event", "linux_5_1"] }
+netlink-packet-core = "0.7"
+netlink-packet-route = "0.19"
+netlink-sys = "0.8"

@@ -1,118 +1,92 @@
 # ya-runtime-vm
 
-`ya-runtime-vm` is an implementation of a Docker-like runtime environment for Linux systems. 
+A runtime for Linux task images, with OpenVMM embedded in the host executable.
+Linux hosts use KVM; Windows hosts use Windows Hypervisor Platform (WHP).
+The Linux kernel starts directly, without BIOS or UEFI firmware.
 
-This repository consists of 2 crates:
+The guest PID 1 agent is written in Rust with rustix. Host and agent share a
+versioned postcard protocol with CRC32C and bounded, length-prefixed frames over
+virtio-vsock. OpenVMM provides the userspace vsock backend inside the runtime;
+no separate host vsock driver or service is needed. UART carries boot logs.
+Host directories use virtio-fs; temporary storage uses sparse raw disk images.
 
-- `ya-runtime-vm`
+## Build
 
-   An application for running Virtual Machine images pre-built for yagna.
+Install [mise](https://mise.jdx.dev/) and run:
 
-- `gvmkit`
-
-   A tool for converting Docker images into yagna Virtual Machine images and uploading them to a public repository.
-   Requires for [Docker](https://docs.docker.com/engine/install/ubuntu/) to be installed on your system.
-
-## Building
-
-The runtime embeds OpenVMM's `VmWorker` in the `ya-runtime-vm` process. It uses
-the pinned OpenVMM `openvmm-v0.3.0` source revision, Rust 1.95, Protocol
-Buffers' `protoc`, and the host OpenSSL development libraries.
-
-On Ubuntu, install the native build dependencies:
-
-```bash
-sudo apt install autoconf automake cmake cpio curl docker.io gperf liblzma-dev libssl-dev libtool musl-tools pkg-config protobuf-compiler
+```sh
+mise trust
+mise install
+mise run build-release
 ```
 
-Docker must be running and accessible to the current user; the init-container
-build uses it to produce the static `mkfs.ext2` utility.
+`mise.toml` pins Rust 1.95.0, rustfmt, Clippy, protoc, CMake, Python and GitHub CLI.
+On Ubuntu, native dependencies are:
 
-Initialize the init container's C-library submodules:
-
-```bash
-git submodule update --init --recursive
+```sh
+sudo apt install pkg-config libssl-dev liblzma-dev
 ```
 
-Build the Rust runtime and init image:
+Windows builds use the MSVC developer environment and static OpenSSL from vcpkg
+(`openssl:x64-windows-static-md`). Set `OPENSSL_DIR` to its installation prefix
+and `OPENSSL_STATIC=1`. CI includes native Linux and Windows builds and tests.
+Windows execution requires WHP enabled; GPU assignment is currently Linux only.
 
-```bash
-cargo build --release
-make -C runtime/init-container
+Build the shared Linux guest assets on Linux:
+
+```sh
+mise run guest-image
+mise run fetch-self-test
+mise run package
 ```
 
-OpenVMM uses KVM, so running the VM requires access to `/dev/kvm`. See the
-[OpenVMM source release guide](https://openvmm.dev/guide/dev_guide/contrib/openvmm_source_release.html)
-for details about its pinned source and build inputs.
+The guest task builds a static musl Rust agent and downloads a checksum-pinned
+Alpine kernel. Docker builds the small BusyBox `mkfs.ext2` formatter used for
+empty storage disks. Alternatively, set `YA_VM_MKFS` to an existing static Linux
+`mkfs.ext2` binary. The guest agent itself has no C sources or C submodules.
+Windows packages consume the same kernel and initramfs built on Linux.
 
-## Installing
+Archives and checksums appear in `releases/`. Extract an archive and run the
+self-test from its `ya-runtime-vm` directory:
 
-Prerequisites:
-
-- `cargo-deb`
-
-    Cargo helper command which automatically creates binary Debian packages. With Rust already installed, execute in terminal:
-
-    ```bash
-    cargo install cargo-deb
-    ```
-
-When building a Debian package locally, fetch the self-test image bundled by
-the release workflow:
-
-```bash
-mkdir -p runtime/image
-curl --fail --location --output runtime/image/self-test.gvmi https://github.com/golemfactory/ya-self-test-img/releases/download/v0.1.4/self-test.gvmi
+```sh
+RUST_LOG=debug ./ya-runtime-vm test
 ```
 
-Installation:
+On Windows use `ya-runtime-vm.exe test`. Linux execution requires access to
+`/dev/kvm`. OpenHCL and software CPU emulation are not part of this runtime.
 
-In terminal, change the working directory to `runtime` and install a freshly minted Debian package.
+For a Debian package, build the runtime and guest assets, fetch the self-test
+image, then run `mise run package-deb`. The package installs under
+`/usr/lib/yagna/plugins/`.
 
-```bash
-cd runtime
-sudo dpkg -i $(cargo deb | tail -n1)
+## Development
+
+```sh
+mise run fmt
+mise run ci
 ```
 
-This installs the runtime at `/usr/lib/yagna/plugins/ya-runtime-vm/ya-runtime-vm`.
-The package also installs the guest kernel and initramfs under the runtime
-directory; OpenVMM itself is linked into the runtime executable.
+Repository layout:
 
-
-## Command line
-
-Follow the installation section before executing.
-
-```
-ya-runtime-vm 0.5.4
-
-USAGE:
-    ya-runtime-vm [OPTIONS] <SUBCOMMAND>
-
-FLAGS:
-    -h, --help       Prints help information
-    -V, --version    Prints version information
-
-OPTIONS:
-    -w, --workdir <workdir>              
-    -t, --task-package <task-package>    
-        --cpu-cores <cpu-cores>           [default: 1]
-        --mem-gib <mem-gib>               [default: 0.25]
-        --storage-gib <storage-gib>       [default: 0.25]
-
-SUBCOMMANDS:
-    test              Perform a self-test
-    offer-template    Print the market offer template (JSON)
-    deploy            Deploy an image
-    start             Start a deployed image
-    help              Prints this message or the help of the given subcommand(s)
+```text
+crates/
+  runtime/         # Native host executable and OpenVMM integration
+  guest-agent/     # Linux PID 1 agent
+  agent-protocol/  # Shared postcard messages and framing
+guest/
+  mkfs/            # Static filesystem formatter build inputs
+packaging/         # Yagna plugin descriptor
+scripts/           # Local and CI build/packaging scripts
+.github/workflows/ # CI orchestration
+build/guest/       # Generated kernel, initramfs and self-test image (ignored)
+releases/          # Generated packages (ignored)
 ```
 
-## Caveats
+Cargo artifacts use `target/` (or `CARGO_TARGET_DIR`). Guest images always use
+`build/guest/`, shared by archive packaging, Debian packaging and CI artifacts.
+Use `ya-runtime-vm --help` for runtime commands.
 
-- Docker `VOLUME` command
-
-    Directories specified in the `VOLUME` command are a mountpoint for directories on the host filesystem. Contents
-    of those directories are passed into the guest through OpenVMM's virtio-fs device.
-    
-    If you need to place static assets inside the image, try not to use the `VOLUME` command for that directory.
+Directories declared with Docker `VOLUME` become host directory shares. Their
+image contents are hidden by the mounted virtio-fs share; place static assets
+outside these mountpoints.

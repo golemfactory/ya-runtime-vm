@@ -1,0 +1,60 @@
+[tools]
+rust = { version = "1.95.0", profile = "minimal", components = ["rustfmt", "clippy"], targets = ["x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl"] }
+protoc = "24.4"
+python = "3.12.13"
+cmake = "3.31.6"
+gh = "2.102.0"
+
+[tasks.fmt]
+description = "Format Rust sources"
+run = "cargo fmt --all"
+
+[tasks.fmt-check]
+description = "Check Rust formatting"
+run = "cargo fmt --all -- --check"
+
+[tasks.lint]
+description = "Check all Rust targets with Clippy"
+run = "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings"
+
+[tasks.test]
+description = "Run workspace tests"
+run = "cargo test --locked --workspace"
+
+[tasks.build]
+description = "Build native runtime"
+run = "cargo build --locked -p ya-runtime-vm"
+
+[tasks.build-release]
+description = "Build native release runtime"
+run = "cargo build --locked --release -p ya-runtime-vm"
+
+[tasks.guest-build]
+description = "Build the static Linux guest agent"
+run = "cargo build --locked --release -p ya-vm-guest-agent --target x86_64-unknown-linux-musl"
+run_windows = "python -c \"raise SystemExit('Build the Linux guest on a Linux host')\""
+
+[tasks.guest-image]
+description = "Build the Linux kernel and Rust-agent initramfs"
+depends = ["guest-build"]
+run = "python scripts/build-guest-image.py"
+
+[tasks.fetch-self-test]
+description = "Fetch the pinned guest self-test image"
+run = "python scripts/fetch-self-test.py"
+
+[tasks.package]
+description = "Package the native runtime with its Linux guest assets"
+run = "python scripts/package-runtime.py"
+
+[tasks.package-deb]
+description = "Package the already-built Linux runtime as a Debian package"
+tools = { "cargo:cargo-deb" = "2.5.1" }
+run = "cargo deb --manifest-path crates/runtime/Cargo.toml --no-build"
+
+[tasks.sync-version]
+run = "python scripts/sync-runtime-version.py"
+
+[tasks.ci]
+description = "Run the same checks as CI"
+run = [{ task = "fmt-check" }, { task = "lint" }, { task = "test" }, { task = "build-release" }]

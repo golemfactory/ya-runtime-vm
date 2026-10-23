@@ -1,0 +1,114 @@
+[package]
+name = "ya-runtime-vm"
+description = "OpenVMM runtime for Linux task images"
+version = "0.5.4"
+authors = ["Golem Factory <contact@golem.network>"]
+edition = "2021"
+license = "GPL-3.0"
+
+[package.metadata.deb]
+assets = [
+    [
+        "target/release/ya-runtime-vm",
+        "usr/lib/yagna/plugins/ya-runtime-vm/",
+        "755",
+    ],
+    [
+        "../../packaging/ya-runtime-vm.json",
+        "usr/lib/yagna/plugins/",
+        "644",
+    ],
+    # self-test.gvmi is downloaded by .github/workflows/release.yml from https://github.com/golemfactory/ya-self-test-img/releases
+    [
+        "../../build/guest/self-test.gvmi",
+        "usr/lib/yagna/plugins/ya-runtime-vm/runtime/",
+        "644",
+    ],
+
+    [
+        "../../build/guest/initramfs.cpio.gz",
+        "usr/lib/yagna/plugins/ya-runtime-vm/runtime/",
+        "644",
+    ],
+    [
+        "../../build/guest/vmlinuz-virt",
+        "usr/lib/yagna/plugins/ya-runtime-vm/runtime/",
+        "644",
+    ],
+]
+
+[dependencies.ya-runtime-sdk]
+workspace = true
+features = ["macros", "logger"]
+
+[dependencies]
+ya-vm-agent-protocol = { path = "../agent-protocol" }
+async-trait = "0.1"
+anyhow = "1.0"
+bollard-stubs = "1.40.2"
+crc = "1.8"
+futures = "0.3"
+libc = "0.2"
+log = "0.4.8"
+mesh = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
+mesh_worker = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
+net_backend = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
+inspect = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
+pal_async = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
+parking_lot = "0.12"
+openvmm_core = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
+openvmm_defs = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
+hypervisor_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
+virtio_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
+disk_backend_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
+net_backend_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
+serial_socket = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
+serial_core = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
+vm_resource = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
+vm_manifest_builder = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
+vmgs_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
+unix_socket = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
+# "crossbeam-channel" and "macos_fsevent" are default features. 
+# Remove `macos_fsevent` if `macos` build will get dropped.
+notify = { version = "6.0", features = ["crossbeam-channel", "macos_fsevent"] }
+rand = "0.8"
+raw-cpuid = "10.7"
+serde = { version = "^1.0", features = ["derive"] }
+serde_json = "1.0"
+socket2 = { version = "0.6", features = ["all"] }
+structopt = "0.3"
+tokio = { version = "1.21.2", features = [
+    "fs",
+    "io-std",
+    "io-util",
+    "macros",
+    "rt",
+    "rt-multi-thread",
+    "sync",
+    "time",
+    "net",
+] }
+tokio-byteorder = "0.3"
+tokio-util = { version = "0.7", features = ["compat"] }
+uuid = { version = "1.1", features = ["v4"] }
+url = "2.3"
+ya-client-model.workspace = true
+
+[dev-dependencies]
+env_logger = "0.10"
+tempdir = "0.3.7"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+openvmm_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad", features = ["virt_kvm"] }
+vfio_assigned_device_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
+
+[target.'cfg(windows)'.dependencies]
+openvmm_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad", features = ["virt_whp"] }
+
+[lib]
+name = "ya_runtime_vm"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ya-runtime-vm"
+path = "src/main.rs"

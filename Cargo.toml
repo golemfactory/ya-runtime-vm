@@ -1,7 +1,10 @@
 [workspace]
 members = [
-    "runtime"
+    "crates/runtime",
+    "crates/agent-protocol",
+    "crates/guest-agent",
 ]
+default-members = ["crates/runtime", "crates/agent-protocol"]
 resolver = "2"
 
 [workspace.dependencies]

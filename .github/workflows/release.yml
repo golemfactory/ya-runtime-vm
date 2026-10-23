@@ -1,131 +1,55 @@
 name: Release
 on:
   push:
-    tags:
-      - v*
-      - pre-rel-*
+    tags: ['v*', 'pre-rel-*']
 
 permissions:
   contents: write
 
-env:
-  self-test-img_tag: v0.1.4
-  self-test-img_repository: golemfactory/ya-self-test-img
-  rust_stable: 1.95.0
-
 jobs:
-  create-release:
-    name: Create draft release
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: Create draft with release notes
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          VERSION="${GITHUB_REF_NAME#pre-rel-}"
-          VERSION="${VERSION#v}"
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            exit 0
-          fi
-          NOTES=".github/release-notes/${VERSION}.md"
-          if test -f "$NOTES"; then
-            gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "$GITHUB_REF_NAME" --notes-file "$NOTES"
-          else
-            gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "$GITHUB_REF_NAME" --generate-notes
-          fi
-
-  build-init:
-    name: Build container init
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-      - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y musl-tools autoconf gperf libtool automake cpio
-      - name: Build and test init
-        run: make -C runtime/init-container SHELL=/bin/bash all test
-      - uses: actions/upload-artifact@v4
-        with:
-          name: init-container
-          path: |
-            runtime/init-container/initramfs.cpio.gz
-            runtime/init-container/vmlinuz-virt
-
-  package:
-    name: Build and package Linux runtime
-    needs: [create-release, build-init]
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: init-container
-          path: runtime/init-container/
-      - name: Download self-test image
-        run: |
-          mkdir -p runtime/image
-          gh release download "$self_test_tag" --repo "$self_test_repo" --pattern self-test.gvmi --dir runtime/image
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          self_test_tag: ${{ env.self-test-img_tag }}
-          self_test_repo: ${{ env.self-test-img_repository }}
-      - name: Install build dependencies and Rust
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev liblzma-dev cmake dpkg-dev protobuf-compiler
-          rustup toolchain install "$rust_stable" --profile minimal --target x86_64-unknown-linux-gnu
-      - name: Build runtime
-        run: cargo +${rust_stable} build --locked --release --target x86_64-unknown-linux-gnu
-      - name: Synchronize and verify descriptor version
-        run: |
-          python3 .github/scripts/sync-runtime-version.py
-          VERSION="${GITHUB_REF_NAME#pre-rel-}"
-          VERSION="${VERSION#v}"
-          python3 -c 'import json, sys; assert json.load(open("runtime/conf/ya-runtime-vm.json"))[0]["version"] == sys.argv[1]' "$VERSION"
-      - name: Pack Linux archive
-        run: |
-          TARGET_DIR="releases/ya-runtime-vm-linux-${GITHUB_REF_NAME}"
-          mkdir -p "$TARGET_DIR/ya-runtime-vm/runtime"
-          strip target/x86_64-unknown-linux-gnu/release/ya-runtime-vm
-          cp target/x86_64-unknown-linux-gnu/release/ya-runtime-vm "$TARGET_DIR/ya-runtime-vm/"
-          cp runtime/conf/ya-runtime-vm.json "$TARGET_DIR/"
-          cp runtime/image/self-test.gvmi runtime/init-container/initramfs.cpio.gz runtime/init-container/vmlinuz-virt "$TARGET_DIR/ya-runtime-vm/runtime/"
-          tar -C releases -czf "releases/ya-runtime-vm-linux-${GITHUB_REF_NAME}.tar.gz" "ya-runtime-vm-linux-${GITHUB_REF_NAME}"
-      - name: Pack Debian package
-        run: |
-          VERSION="${GITHUB_REF_NAME#pre-rel-}"
-          VERSION="${VERSION#v}"
-          cargo +${rust_stable} install cargo-deb --version 2.5.1 --locked
-          cargo +${rust_stable} deb --manifest-path runtime/Cargo.toml --no-build --target x86_64-unknown-linux-gnu --deb-version "$VERSION" --output "releases/ya-runtime-vm_${GITHUB_REF_NAME}_amd64.deb"
-      - name: Verify packaged binaries
-        run: |
-          target/x86_64-unknown-linux-gnu/release/ya-runtime-vm --version
-          dpkg-deb --info "releases/ya-runtime-vm_${GITHUB_REF_NAME}_amd64.deb"
-          cd releases
-          sha256sum "ya-runtime-vm-linux-${GITHUB_REF_NAME}.tar.gz" "ya-runtime-vm_${GITHUB_REF_NAME}_amd64.deb" > SHA256SUMS
-      - name: Upload release assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release upload "$GITHUB_REF_NAME" "releases/ya-runtime-vm-linux-${GITHUB_REF_NAME}.tar.gz" "releases/ya-runtime-vm_${GITHUB_REF_NAME}_amd64.deb" releases/SHA256SUMS --clobber
+  build:
+    uses: ./.github/workflows/build.yml
+    permissions:
+      contents: read
 
   publish:
-    name: Publish release
-    needs: package
+    name: Publish validated runtime packages
+    needs: build
     runs-on: ubuntu-24.04
     steps:
-      - name: Publish completed release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: runtime-*
+          merge-multiple: true
+          path: releases
+      - name: Verify release version and checksums
+        shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#pre-rel-}"
           VERSION="${VERSION#v}"
+          mise exec -- python -c 'import tomllib,sys; assert tomllib.load(open("crates/runtime/Cargo.toml","rb"))["package"]["version"] == sys.argv[1], "tag differs from Cargo version"' "$VERSION"
+          cd releases
+          sha256sum --check *.sha256
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#pre-rel-}"
+          VERSION="${VERSION#v}"
+          if ! mise exec -- gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            NOTES=".github/release-notes/${VERSION}.md"
+            if test -f "$NOTES"; then
+              mise exec -- gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "$GITHUB_REF_NAME" --notes-file "$NOTES"
+            else
+              mise exec -- gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "$GITHUB_REF_NAME" --generate-notes
+            fi
+          fi
+          mise exec -- gh release upload "$GITHUB_REF_NAME" releases/*.tar.gz releases/*.zip releases/*.deb releases/*.sha256 --clobber
           if [[ "$VERSION" == *-* || "$GITHUB_REF_NAME" == pre-rel-* ]]; then
-            gh release edit "$GITHUB_REF_NAME" --draft=false --prerelease --latest=false
+            mise exec -- gh release edit "$GITHUB_REF_NAME" --draft=false --prerelease --latest=false
           else
-            gh release edit "$GITHUB_REF_NAME" --draft=false --prerelease=false --latest
+            mise exec -- gh release edit "$GITHUB_REF_NAME" --draft=false --prerelease=false --latest
           fi
