@@ -104,13 +104,15 @@ A successful `mise run vm-test` exits with code zero and reports all three cases
 | `inet-only` | Runtime connects to the TCP peer | `NETWORK_OK inet-only` |
 | `vpn-only` | Peer connects to the runtime's TCP listener | `NETWORK_OK vpn-only` |
 
-Each case must also report `FILES_OK root`, `FILES_OK user`, `KILL_OK`,
+Each case must also report `VOLUMES_OK`, `FILES_OK root`, `FILES_OK user`, `KILL_OK`,
 `RAPID_EXITS_OK`, `CYCLIC_OUTPUT_OK`, both `OUTPUT_OK` results, `ENTRYPOINT_SHUTDOWN_OK` and
 `OPENVMM_INTEGRATION_OK`. Expected output lengths are 262147 stdout bytes and
 196608 stderr bytes. The file checks exercise a 3 MiB transfer, rename, truncate,
 link rejection and synthetic guest permissions. Linux host mode-bit checks are
 conditional on Unix; Windows instead exercises its own filesystem and junction
 handling. This test does not assert that Windows ACLs are POSIX mode bits.
+The volume probe verifies a 4 MiB disk at `/tmp/cache`, a separate RAM mount at
+`/dev/shm/cache`, and an explicit 8 MiB `/tmp` limit that rejects a 9 MiB write.
 
 Keep the native command output and `target/vm-test/*.stderr.log`. If
 `CARGO_TARGET_DIR` is set, use its `vm-test/` directory instead. Record:

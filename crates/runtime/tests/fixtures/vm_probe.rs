@@ -146,6 +146,29 @@ fn network(mode: &str) {
 fn main() {
     let args: Vec<_> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
+        Some("volumes") => {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                fs::metadata("/tmp/cache").unwrap().dev(),
+                fs::metadata("/dev/vdb").unwrap().rdev()
+            );
+            assert_ne!(
+                fs::metadata("/dev/shm/cache").unwrap().dev(),
+                fs::metadata("/dev/shm").unwrap().dev()
+            );
+            fs::write("/tmp/cache/disk-marker", b"disk").unwrap();
+            fs::write("/dev/shm/cache/ram-marker", b"ram").unwrap();
+            let mut file = fs::File::create("/tmp/size-check").unwrap();
+            let error = file.write_all(&vec![0; 9 * 1024 * 1024]).unwrap_err();
+            assert_eq!(
+                error.raw_os_error(),
+                Some(28),
+                "configured 8 MiB /tmp limit is missing"
+            );
+            drop(file);
+            fs::remove_file("/tmp/size-check").unwrap();
+            println!("VOLUMES_OK");
+        }
         Some("network") => network(&args[2]),
         Some("files") => files(&args[2]),
         Some("burst") => {

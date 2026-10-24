@@ -92,7 +92,12 @@ where
     let output_volume =
         get_self_test_only_volume(&deployment).context("self-test image has no output volume")?;
     let output_file_name = format!("out_{}.json", Uuid::new_v4());
-    let output_file_vm = PathBuf::from(&output_volume.path).join(&output_file_name);
+    // This path is consumed by Linux even when the host is Windows.
+    let output_file_vm = format!(
+        "{}/{}",
+        output_volume.path.trim_end_matches('/'),
+        output_file_name
+    );
     let output_dir = work_dir.join(output_volume.name);
     let output_file = output_dir.join(&output_file_name);
 
@@ -266,15 +271,12 @@ async fn run_self_test_command(
     runtime_data: Arc<Mutex<RuntimeData>>,
     output_dir: &Path,
     output_file: &Path,
-    output_file_vm: &Path,
+    output_file_vm: &str,
     timeout: Duration,
 ) -> anyhow::Result<()> {
     let run_process: RunProcess = server::RunProcess {
         bin: format!("/{FILE_TEST_EXECUTABLE}"),
-        args: vec![
-            FILE_TEST_EXECUTABLE.into(),
-            output_file_vm.to_string_lossy().into(),
-        ],
+        args: vec![FILE_TEST_EXECUTABLE.into(), output_file_vm.into()],
         ..Default::default()
     };
     log::info!("Self test process: {run_process:?}");

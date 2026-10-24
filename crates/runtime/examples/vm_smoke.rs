@@ -4,6 +4,7 @@ use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
 use anyhow::{Context, ensure};
 use futures::{FutureExt, future::BoxFuture, lock::Mutex};
 use tokio::sync::mpsc;
+use ya_client_model::activity::exe_script_command::VolumeMount;
 use ya_runtime_sdk::{
     EventEmitter,
     runtime_api::server::{self, RuntimeHandler},
@@ -63,6 +64,27 @@ async fn commands(
         Some(RedirectFdType::RedirectFdPipeBlocking(4096)),
         Some(RedirectFdType::RedirectFdPipeBlocking(4096)),
     ];
+    let pid = ga
+        .lock()
+        .await
+        .run_process(
+            "/mnt/out/probe",
+            &["probe", "volumes"],
+            None,
+            0,
+            0,
+            &redirects,
+            Some("/"),
+        )
+        .await?
+        .map_err(|e| anyhow::anyhow!("volume probe exec: {e}"))?;
+    let (out, err, status) = collect(&mut events, pid).await?;
+    ensure!(
+        status == 0 && out == b"VOLUMES_OK\n",
+        "volume probe failed: {}",
+        String::from_utf8_lossy(&err)
+    );
+    println!("VOLUMES_OK: explicit /tmp, /tmp/cache and /dev/shm/cache mounts remain visible");
     for role in 0..=1 {
         if (mode == "inet-only" && role == 0) || (mode == "vpn-only" && role == 1) {
             continue;
@@ -289,10 +311,37 @@ async fn check(
         1,
         512,
         std::slice::from_ref(&image),
-        HashMap::new(),
+        HashMap::from([
+            (
+                "/tmp".into(),
+                VolumeMount::Ram {
+                    size: "8mi".parse().expect("valid fixture size"),
+                },
+            ),
+            (
+                "/tmp/cache".into(),
+                VolumeMount::Storage {
+                    size: "4mi".parse().expect("valid fixture size"),
+                    preallocate: None,
+                    errors: None,
+                },
+            ),
+            (
+                "/dev/shm/cache".into(),
+                VolumeMount::Ram {
+                    size: "4mi".parse().expect("valid fixture size"),
+                },
+            ),
+        ]),
         "golem".into(),
     )
     .await?;
+    for mount in &deployment.mounts {
+        if let VolumeMount::Storage { size, .. } = &mount.mount {
+            // A tiny fixture disk; production image allocation is tested separately.
+            std::fs::File::create(work.path().join(&mount.name))?.set_len(size.as_u64())?;
+        }
+    }
     ensure!(
         deployment.volumes.len() == 1 && deployment.volumes[0].path == "/mnt/out",
         "integration test expects the pinned self-test image"

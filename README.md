@@ -300,8 +300,10 @@ mise run vm-test
 This builds a static Linux test workload and the native test harness. It runs
 the runtime's standard self-test, then boots three VMs to check virtio-fs
 reads/writes as root and UID 1000, link rejection, host permissions, rename,
-truncate, process kill, rapid exits, cyclic output overflow, and complete stdout/stderr before both
-normal and entrypoint termination. Network cases cover both interfaces over UDP,
+truncate, process kill, rapid exits, cyclic output overflow, and complete
+stdout/stderr before both normal and entrypoint termination. Explicit RAM/storage
+mounts under `/tmp` and `/dev/shm` must remain visible, with the configured `/tmp`
+size limit enforced. Network cases cover both interfaces over UDP,
 INET-only over TCP connect, and VPN-only over TCP listen. A local Ethernet peer
 answers ARP/NDP and exchanges labelled UDP payloads over IPv4 and IPv6, including
 routing through the configured gateways and partial TCP framing. No external

@@ -155,11 +155,6 @@ pub fn prepare(environment: &[CString]) -> Result<()> {
             lowerdirs.join(":")
         ),
     )?;
-    for (device, path, kind, options) in volumes {
-        if path != "/" {
-            mount(&device, &guest_path(&path)?, kind, Flags::NODEV, &options)?;
-        }
-    }
     for (name, source, kind, options, flags) in [
         (
             "proc",
@@ -193,6 +188,14 @@ pub fn prepare(environment: &[CString]) -> Result<()> {
         ),
     ] {
         mount(source, &format!("{ROOT}/{name}"), kind, flags, options)?;
+    }
+    // Built-in /tmp, /dev and /dev/shm mounts must not hide explicit volumes.
+    // Mount configured parents before children, independent of device order.
+    volumes.sort_by_key(|(_, path, _, _)| path.split('/').filter(|p| !p.is_empty()).count());
+    for (device, path, kind, options) in volumes {
+        if path != "/" {
+            mount(&device, &guest_path(&path)?, kind, Flags::NODEV, &options)?;
+        }
     }
     let dev_fd = format!("{ROOT}/dev/fd");
     if !fs::exists(&dev_fd) {
