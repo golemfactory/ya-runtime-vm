@@ -1,5 +1,5 @@
 //! Local relay sockets driven by OpenVMM's portable Linux/Windows I/O pool.
-use pal_async::{socket::PolledSocket, DefaultDriver, DefaultPool};
+use pal_async::{DefaultDriver, DefaultPool, socket::PolledSocket};
 use std::{
     io,
     path::Path,

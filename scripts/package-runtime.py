@@ -3,11 +3,12 @@
 import argparse
 import hashlib
 import json
-import os
 from pathlib import Path
 import shutil
 import sys
 import tomllib
+
+from runtime_artifacts import release_dir, require_static_linux, require_windows_standalone
 
 root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser()
@@ -20,14 +21,22 @@ if not label or any(c in label for c in "/\\") or label in (".", ".."):
 windows = sys.platform == "win32"
 platform = "windows" if windows else "linux"
 executable = "ya-runtime-vm.exe" if windows else "ya-runtime-vm"
-target = Path(os.environ.get("CARGO_TARGET_DIR", root / "target")).resolve()
 dest = root / "releases" / f"ya-runtime-vm-{platform}-{label}"
 assets = dest / "ya-runtime-vm/runtime"
 assets.mkdir(parents=True, exist_ok=True)
-shutil.copy2(target / "release" / executable, dest / "ya-runtime-vm" / executable)
+binary = release_dir() / executable
+if windows:
+    require_windows_standalone(binary)
+else:
+    require_static_linux(binary)
+shutil.copy2(binary, dest / "ya-runtime-vm" / executable)
 for name in ("vmlinuz-virt", "initramfs.cpio.gz"):
     shutil.copy2(root / "build/guest" / name, assets / name)
 shutil.copy2(root / "build/guest/self-test.gvmi", assets / "self-test.gvmi")
+licenses = dest / "licenses"
+licenses.mkdir(exist_ok=True)
+shutil.copy2(root / "LICENSE", licenses / "ya-runtime-vm-GPL-3.0.txt")
+shutil.copy2(root / "third_party/fuse/LICENSE", licenses / "OpenVMM-MIT.txt")
 descriptors = json.loads((root / "packaging/ya-runtime-vm.json").read_text())
 for descriptor in descriptors:
     if descriptor["name"] == "vm":

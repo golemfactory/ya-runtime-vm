@@ -1,10 +1,9 @@
 //! Incremental, bounded framing for a nonblocking manager connection.
-use std::{
-    collections::VecDeque,
-    fs::File,
-    io::{self, Read, Write},
-};
-use ya_vm_agent_protocol::{Message, MAX_FRAME};
+use super::io::File;
+use crate::error::Result;
+use alloc::{collections::VecDeque, vec::Vec};
+use rustix::io::Errno;
+use ya_vm_agent_protocol::{MAX_FRAME, Message};
 
 const MAX_PENDING: usize = 4 * (MAX_FRAME + 4);
 
@@ -16,7 +15,7 @@ struct Decoder {
     body_read: usize,
 }
 impl Decoder {
-    fn next(&mut self, stream: &mut File) -> io::Result<Option<Message>> {
+    fn next(&mut self, stream: &mut File) -> Result<Option<Message>> {
         loop {
             let target = if self.header_read < 4 {
                 &mut self.header[self.header_read..]
@@ -25,15 +24,12 @@ impl Decoder {
             };
             let read = match stream.read(target) {
                 Ok(0) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "manager disconnected during frame",
-                    ))
+                    crate::bail!("manager disconnected during frame")
                 }
                 Ok(n) => n,
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(None),
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e),
+                Err(e) if e == Errno::AGAIN => return Ok(None),
+                Err(e) if e == Errno::INTR => continue,
+                Err(e) => return Err(e.into()),
             };
             if self.header_read < 4 {
                 self.header_read += read;
@@ -44,7 +40,8 @@ impl Decoder {
             } else {
                 self.body_read += read;
                 if self.body_read == self.body.len() {
-                    let result = ya_vm_agent_protocol::decode(&self.body).map_err(io::Error::other);
+                    let result =
+                        ya_vm_agent_protocol::decode(&self.body).map_err(crate::error::Error::from);
                     self.header_read = 0;
                     self.body_read = 0;
                     self.body.clear();
@@ -63,7 +60,7 @@ pub struct Connection {
     pending_bytes: usize,
 }
 impl Connection {
-    pub fn new(stream: File) -> io::Result<Self> {
+    pub fn new(stream: File) -> Result<Self> {
         nonblocking(&stream)?;
         Ok(Self {
             stream,
@@ -73,7 +70,7 @@ impl Connection {
             pending_bytes: 0,
         })
     }
-    pub fn next(&mut self) -> io::Result<Option<Message>> {
+    pub fn next(&mut self) -> Result<Option<Message>> {
         self.decoder.next(&mut self.stream)
     }
     pub fn can_read(&self) -> bool {
@@ -82,10 +79,10 @@ impl Connection {
     pub fn wants_write(&self) -> bool {
         !self.pending.is_empty()
     }
-    pub fn queue(&mut self, message: &Message) -> io::Result<()> {
-        let frame = ya_vm_agent_protocol::encode(message).map_err(io::Error::other)?;
+    pub fn queue(&mut self, message: &Message) -> Result<()> {
+        let frame = ya_vm_agent_protocol::encode(message).map_err(crate::error::Error::from)?;
         if frame.len() > MAX_FRAME || self.pending_bytes + frame.len() + 4 > MAX_PENDING {
-            return Err(io::Error::other("manager transmit queue exceeds limit"));
+            crate::bail!("manager transmit queue exceeds limit");
         }
         let mut bytes = Vec::with_capacity(frame.len() + 4);
         bytes.extend_from_slice(&(frame.len() as u32).to_le_bytes());
@@ -94,10 +91,14 @@ impl Connection {
         self.pending.push_back(bytes);
         Ok(())
     }
-    pub fn flush(&mut self) -> io::Result<()> {
+    pub fn flush(&mut self) -> Result<()> {
         while let Some(frame) = self.pending.front() {
-            match self.stream.write(&frame[self.written..]) {
-                Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            match rustix::net::send(
+                &self.stream,
+                &frame[self.written..],
+                rustix::net::SendFlags::NOSIGNAL,
+            ) {
+                Ok(0) => return Err(Errno::IO.into()),
                 Ok(n) => {
                     self.written += n;
                     self.pending_bytes -= n;
@@ -106,15 +107,15 @@ impl Connection {
                         self.written = 0;
                     }
                 }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(e),
+                Err(e) if e == Errno::AGAIN => break,
+                Err(e) if e == Errno::INTR => {}
+                Err(e) => return Err(e.into()),
             }
         }
         Ok(())
     }
 }
-pub fn nonblocking(fd: &impl rustix::fd::AsFd) -> io::Result<()> {
+pub fn nonblocking(fd: &impl rustix::fd::AsFd) -> rustix::io::Result<()> {
     rustix::fs::fcntl_setfl(
         fd,
         rustix::fs::fcntl_getfl(fd)? | rustix::fs::OFlags::NONBLOCK,
@@ -179,7 +180,7 @@ mod tests {
             loop {
                 match peer.read(&mut scratch) {
                     Ok(n) => got.extend_from_slice(&scratch[..n]),
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(e) if e == Errno::AGAIN => break,
                     other => panic!("unexpected read: {other:?}"),
                 }
             }

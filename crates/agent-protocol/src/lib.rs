@@ -1,7 +1,13 @@
 //! Shared, versioned protocol for the host runtime and Linux guest agent.
+#![no_std]
+extern crate alloc;
+#[cfg(feature = "std")]
+extern crate std;
+use alloc::{string::String, vec::Vec};
+pub use postcard::Error as CodecError;
 use serde::{Deserialize, Serialize};
 
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 pub const VSOCK_PORT: u32 = 1024;
 pub const MAX_FRAME: usize = 1024 * 1024;
 pub const OUTPUT_CHUNK: usize = 64 * 1024;
@@ -21,6 +27,10 @@ pub enum Message {
         result: Result<Value, AgentError>,
     },
     Event(Event),
+    /// Host confirms output and the terminal status have entered the client queue.
+    ExitAck {
+        id: u64,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -113,13 +123,24 @@ pub fn decode(bytes: &[u8]) -> Result<Message, postcard::Error> {
     postcard::from_bytes_crc32(bytes, CRC.digest())
 }
 
-pub fn frame_len(bytes: [u8; 4]) -> std::io::Result<usize> {
+#[derive(Debug, Clone, Copy)]
+pub struct FrameSizeError;
+impl core::fmt::Display for FrameSizeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("agent frame exceeds size limit")
+    }
+}
+impl core::error::Error for FrameSizeError {}
+#[cfg(feature = "std")]
+impl From<FrameSizeError> for std::io::Error {
+    fn from(error: FrameSizeError) -> Self {
+        Self::new(std::io::ErrorKind::InvalidData, error)
+    }
+}
+pub fn frame_len(bytes: [u8; 4]) -> Result<usize, FrameSizeError> {
     let len = u32::from_le_bytes(bytes) as usize;
     if !(4..=MAX_FRAME).contains(&len) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "agent frame exceeds size limit",
-        ));
+        return Err(FrameSizeError);
     }
     Ok(len)
 }

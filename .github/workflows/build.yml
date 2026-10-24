@@ -20,7 +20,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: guest
+      - run: mise run lint-workflows
+      - run: mise run guest-lint
       - run: mise run guest-image
+      - run: mise run vm-probe-build
       - run: mise run fetch-self-test
       - uses: actions/upload-artifact@v4
         with:
@@ -29,6 +32,7 @@ jobs:
             build/guest/vmlinuz-virt
             build/guest/initramfs.cpio.gz
             build/guest/self-test.gvmi
+            build/guest/vm-test-probe
           if-no-files-found: error
 
   native:
@@ -45,36 +49,37 @@ jobs:
         with:
           name: linux-guest
           path: build/guest
-      - name: Linux build dependencies
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev liblzma-dev
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
-      - name: Cache Windows OpenSSL
-        if: runner.os == 'Windows'
-        uses: actions/cache@v4
-        with:
-          path: C:/vcpkg/installed
-          key: windows-openssl-static-md-v1
-      - name: Windows build dependencies
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          vcpkg install openssl:x64-windows-static-md
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          "OPENSSL_DIR=$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows-static-md" >> $env:GITHUB_ENV
-          "OPENSSL_STATIC=1" >> $env:GITHUB_ENV
       - uses: jdx/mise-action@v4
       - uses: Swatinem/rust-cache@v2
+      - name: Configure musl C toolchain
+        if: runner.os == 'Linux'
+        run: mise run ci-setup-linux
       - run: mise run ci
+      - name: Enable KVM for the Linux VM tests
+        if: runner.os == 'Linux'
+        run: |
+          sudo chgrp "$(id -gn)" /dev/kvm
+          sudo chmod 660 /dev/kvm
+      - name: OpenVMM integration tests
+        if: runner.os == 'Linux'
+        run: mise run vm-test
+      - name: VM boot and runtime logs
+        if: runner.os == 'Linux' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vm-test-linux-logs
+          path: target/vm-test/*.stderr.log
+          if-no-files-found: ignore
       - run: mise run package
       - name: Debian package
         if: runner.os == 'Linux'
         run: |
           mise run package-deb
-          cp target/debian/*.deb releases/
+          cp target/x86_64-unknown-linux-musl/debian/*.deb releases/
           cd releases
-          sha256sum *.deb > debian.sha256
+          sha256sum ./*.deb > debian.sha256
       - uses: actions/upload-artifact@v4
         with:
           name: runtime-${{ runner.os }}

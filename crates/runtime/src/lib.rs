@@ -7,13 +7,14 @@ mod local_socket;
 mod net_socket;
 mod openvmm_adapter;
 mod self_test;
+mod shared_dir;
 pub mod vmrt;
 
 use bollard_stubs::models::ContainerConfig;
 use deploy::DeploymentMount;
+use futures::TryFutureExt;
 use futures::future::FutureExt;
 use futures::lock::Mutex;
-use futures::TryFutureExt;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::env;
@@ -32,17 +33,18 @@ use crate::{
     cpu::CpuInfo,
     deploy::Deployment,
     guest_agent_comm::{RedirectFdType, RemoteCommandResult},
-    vmrt::{start_vmrt, RuntimeData},
+    vmrt::{RuntimeData, start_vmrt},
 };
 use ya_runtime_sdk::runtime_api::deploy::ContainerEndpoint;
 
 use ya_runtime_sdk::{
+    Context, EmptyResponse, EndpointResponse, Error, ErrorExt, EventEmitter, OutputResponse,
+    ProcessId, ProcessIdResponse, RuntimeMode,
     runtime_api::{
         deploy::{DeployResult, StartMode},
         server,
     },
-    serialize, Context, EmptyResponse, EndpointResponse, Error, ErrorExt, EventEmitter,
-    OutputResponse, ProcessId, ProcessIdResponse, RuntimeMode,
+    serialize,
 };
 
 const FILE_DEPLOYMENT: &str = "deployment.json";
@@ -239,7 +241,11 @@ impl ya_runtime_sdk::Runtime for Runtime {
             pci_device_id,
             test_config,
         )
-        .map(|_| Ok(None))
+        .map(|result| {
+            result
+                .map(|()| None)
+                .map_err(|error| Error::from(format!("{error:#}")))
+        })
         .boxed_local()
     }
 

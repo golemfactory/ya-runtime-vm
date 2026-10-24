@@ -3,7 +3,7 @@
 //! rustix 1.1 does not expose signalfd. This small x86-64 Linux ABI bridge
 //! complements its epoll/waitpid APIs and does not depend on libc.
 use linux_raw_sys::general::{
-    __NR_rt_sigprocmask, __NR_signalfd4, SIGCHLD, SIG_BLOCK, SIG_SETMASK,
+    __NR_rt_sigprocmask, __NR_signalfd4, SIG_BLOCK, SIG_SETMASK, SIGCHLD,
 };
 use rustix::{
     fd::{FromRawFd, OwnedFd},

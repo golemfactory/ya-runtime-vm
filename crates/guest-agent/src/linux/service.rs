@@ -1,28 +1,20 @@
-use super::{
-    boot,
-    signals::ChildSignals,
-    transport::{self, Connection},
-    ROOT,
+use super::{ROOT, boot, signals::ChildSignals, transport::Connection};
+use super::{io::File, process};
+use crate::error::{Context, Result};
+use alloc::{
+    collections::{BTreeMap, VecDeque},
+    ffi::CString,
+    vec::Vec,
 };
-use anyhow::{Context, Result};
 use rustix::{
     event::epoll::{self, EventData, EventFlags},
     fd::{AsRawFd, OwnedFd},
     fs::{Mode, OFlags, ResolveFlags},
     process::{Pid, Signal, WaitOptions},
 };
-use std::{
-    collections::{BTreeMap, VecDeque},
-    ffi::{CString, OsString},
-    fs::File,
-    io::{self, Read, Write},
-    os::unix::{ffi::OsStringExt, process::CommandExt},
-    path::Path,
-    process::{Command as ProcessCommand, Stdio},
-};
 use ya_vm_agent_protocol::{
-    AgentError, Command, Event, ExitReason, ExitType, Message, Redirect, Run, Value, MAX_FRAME,
-    OUTPUT_CHUNK, VERSION,
+    AgentError, Command, Event, ExitReason, ExitType, MAX_FRAME, Message, OUTPUT_CHUNK, Redirect,
+    Run, VERSION, Value,
 };
 
 const MANAGER: u64 = 0;
@@ -34,6 +26,7 @@ struct Process {
     output: [Output; 2],
     exit: Option<ExitReason>,
     notified_exit: bool,
+    acknowledged_exit: bool,
     entrypoint: bool,
 }
 struct Output {
@@ -83,11 +76,12 @@ struct Reactor {
     connection: Connection,
     processes: BTreeMap<u64, Process>,
     next_id: u64,
+    environment: Vec<CString>,
     quitting: bool,
     shutdown: bool,
 }
 impl Reactor {
-    fn new(stream: File) -> Result<Self> {
+    fn new(stream: File, environment: Vec<CString>) -> Result<Self> {
         let poll = epoll::create(epoll::CreateFlags::CLOEXEC)?;
         let signals = ChildSignals::new()?;
         let connection = Connection::new(stream)?;
@@ -109,12 +103,13 @@ impl Reactor {
             connection,
             processes: BTreeMap::new(),
             next_id: 0,
+            environment,
             quitting: false,
             shutdown: false,
         })
     }
     fn event(&mut self, event: Event) -> Result<()> {
-        Ok(self.connection.queue(&Message::Event(event))?)
+        self.connection.queue(&Message::Event(event))
     }
     fn stream_interest(&self) -> Result<()> {
         let mut flags = EventFlags::RDHUP;
@@ -157,7 +152,7 @@ impl Reactor {
                         // Flush first so a slow receiver cannot starve commands.
                         self.connection.flush()?;
                         if flags.intersects(EventFlags::HUP | EventFlags::RDHUP | EventFlags::ERR) {
-                            anyhow::bail!("manager connection closed");
+                            crate::bail!("manager connection closed");
                         }
                         for _ in 0..32 {
                             if self.quitting || !self.connection.can_read() {
@@ -185,23 +180,26 @@ impl Reactor {
         }
     }
     fn request(&mut self, message: Message) -> Result<()> {
+        if let Message::ExitAck { id } = message {
+            let process = self
+                .processes
+                .get_mut(&id)
+                .context("acknowledging unknown process")?;
+            crate::ensure!(
+                process.notified_exit,
+                "exit acknowledged before output was drained"
+            );
+            process.acknowledged_exit = true;
+            self.shutdown |= process.entrypoint;
+            return Ok(());
+        }
         let Message::Request { id, command } = message else {
-            anyhow::bail!("expected agent request");
+            crate::bail!("expected agent request");
         };
-        anyhow::ensure!(id != 0, "request ID cannot be zero");
+        crate::ensure!(id != 0, "request ID cannot be zero");
         let quit = matches!(command, Command::Quit);
         let result = self.handle(command).map_err(|error| {
-            let errno = error
-                .chain()
-                .find_map(|e| {
-                    e.downcast_ref::<io::Error>()
-                        .and_then(io::Error::raw_os_error)
-                        .or_else(|| {
-                            e.downcast_ref::<rustix::io::Errno>()
-                                .map(|e| e.raw_os_error())
-                        })
-                })
-                .unwrap_or(22) as u32;
+            let errno = error.errno.map(|e| e.raw_os_error()).unwrap_or(22) as u32;
             eprintln!("Guest request {id}: {error:#}");
             AgentError {
                 errno,
@@ -218,11 +216,11 @@ impl Reactor {
             // guest reboot could discard the queued response in the backend.
             for process in self.processes.values_mut() {
                 for output in &mut process.output {
-                    if let Some(pipe) = output.pipe.take() {
-                        if output.registered {
-                            epoll::delete(&self.poll, &pipe)?;
-                            output.registered = false;
-                        }
+                    if let Some(pipe) = output.pipe.take()
+                        && output.registered
+                    {
+                        epoll::delete(&self.poll, &pipe)?;
+                        output.registered = false;
                     }
                 }
             }
@@ -242,12 +240,11 @@ impl Reactor {
                 Ok(Value::Ok)
             }
             Command::Mount { tag, path } => {
-                let path = OsString::from_vec(path);
-                let target = directory_in_root(Path::new(&path))?;
+                let target = directory_in_root(&path)?;
                 let target_path = format!("/proc/self/fd/{}", target.as_raw_fd());
                 boot::mount(
                     &tag,
-                    Path::new(&target_path),
+                    &target_path,
                     "virtiofs",
                     rustix::mount::MountFlags::NODEV | rustix::mount::MountFlags::NOSUID,
                     "",
@@ -257,11 +254,11 @@ impl Reactor {
             }
             Command::Hosts { entries } => {
                 let mut file = root_file(
-                    Path::new("/etc/hosts"),
+                    b"/etc/hosts",
                     OFlags::WRONLY | OFlags::APPEND | OFlags::CREATE,
                 )?;
                 for (host, ip) in entries {
-                    anyhow::ensure!(
+                    crate::ensure!(
                         !host.contains(['\r', '\n']) && !ip.contains(['\r', '\n']),
                         "invalid host entry"
                     );
@@ -279,7 +276,7 @@ impl Reactor {
                 offset,
                 len,
             } => {
-                anyhow::ensure!(fd == 1 || fd == 2, "invalid output descriptor");
+                crate::ensure!(fd == 1 || fd == 2, "invalid output descriptor");
                 let output = &mut self
                     .processes
                     .get_mut(&id)
@@ -370,8 +367,8 @@ impl Reactor {
                     break;
                 }
                 Ok(n) => output.append(&chunk[..n]),
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) if e == rustix::io::Errno::AGAIN => break,
+                Err(e) if e == rustix::io::Errno::INTR => continue,
                 Err(e) => return Err(e.into()),
             }
         }
@@ -424,7 +421,6 @@ impl Reactor {
                     id,
                     reason: process.exit.take().unwrap(),
                 });
-                self.shutdown |= process.entrypoint;
             }
         }
         for event in events {
@@ -433,81 +429,19 @@ impl Reactor {
         Ok(())
     }
     fn spawn(&mut self, run: Run) -> Result<Value> {
-        self.processes.retain(|_, p| !p.notified_exit);
-        anyhow::ensure!(
+        self.processes.retain(|_, p| !p.acknowledged_exit);
+        crate::ensure!(
             self.processes.len() < MAX_PROCESSES,
             "too many processes with pending output"
         );
-        anyhow::ensure!(
-            run.uid != u32::MAX && run.gid != u32::MAX,
-            "invalid uid/gid"
-        );
-        let mut command = ProcessCommand::new(OsString::from_vec(run.bin));
-        if let Some(arg0) = run.argv.first() {
-            command.arg0(OsString::from_vec(arg0.clone()));
-        }
-        command.args(
-            run.argv
-                .iter()
-                .skip(1)
-                .map(|s| OsString::from_vec(s.clone())),
-        );
-        if let Some(env) = run.env {
-            command.env_clear();
-            for var in env {
-                let equal = var
-                    .iter()
-                    .position(|b| *b == b'=')
-                    .context("invalid process environment")?;
-                anyhow::ensure!(equal != 0, "empty environment variable name");
-                command.env(
-                    OsString::from_vec(var[..equal].to_vec()),
-                    OsString::from_vec(var[equal + 1..].to_vec()),
-                );
-            }
-        }
-        command
-            .stdin(stdio(&run.fds[0], 0)?)
-            .stdout(stdio(&run.fds[1], 1)?)
-            .stderr(stdio(&run.fds[2], 2)?);
-        command.process_group(0);
-        let cwd = CString::new(run.cwd.unwrap_or_else(|| b"/".to_vec()))?;
-        let uid = rustix::process::Uid::from_raw(run.uid);
-        let gid = rustix::process::Gid::from_raw(run.gid);
-        let signal_mask = self.signals.child_mask();
-        // SAFETY: only async-signal-safe syscalls run after fork, with prebuilt C strings.
-        unsafe {
-            command.pre_exec(move || {
-                ChildSignals::restore_for_child(signal_mask)?;
-                rustix::process::chroot(c"/mnt/newroot")?;
-                rustix::process::chdir(cwd.as_c_str())?;
-                rustix::thread::set_thread_groups(&[])?;
-                rustix::thread::set_thread_res_gid(gid, gid, gid)?;
-                rustix::thread::set_thread_res_uid(uid, uid, uid)?;
-                Ok(())
-            });
-        }
-        let mut child = command.spawn().context("spawning guest process")?;
+        let child = process::spawn(&run, &self.environment, self.signals.child_mask())?;
         self.next_id += 1;
         let id = self.next_id;
-        let pipes = [
-            child.stdout.take().map(|p| File::from(OwnedFd::from(p))),
-            child.stderr.take().map(|p| File::from(OwnedFd::from(p))),
-        ];
-        let setup = pipes.iter().flatten().try_for_each(transport::nonblocking);
-        if let Err(error) = setup {
-            let _ = rustix::process::kill_process_group(
-                Pid::from_raw(child.id() as i32).unwrap(),
-                Signal::KILL,
-            );
-            let _ = child.wait();
-            return Err(error.into());
-        }
-        let [stdout, stderr] = pipes;
+        let [stdout, stderr] = child.output;
         self.processes.insert(
             id,
             Process {
-                pid: Pid::from_raw(child.id() as i32),
+                pid: Some(child.pid),
                 output: [
                     Output::new(&run.fds[1], stdout),
                     Output::new(&run.fds[2], stderr),
@@ -515,6 +449,7 @@ impl Reactor {
                 entrypoint: run.entrypoint,
                 exit: None,
                 notified_exit: false,
+                acknowledged_exit: false,
             },
         );
         if let Err(error) = self
@@ -522,40 +457,17 @@ impl Reactor {
             .and_then(|_| self.output_interest(id, 1))
         {
             self.processes.remove(&id);
-            let _ = rustix::process::kill_process_group(
-                Pid::from_raw(child.id() as i32).unwrap(),
-                Signal::KILL,
-            );
-            let _ = child.wait();
+            let _ = rustix::process::kill_process_group(child.pid, Signal::KILL);
+            let _ = process::wait_for(child.pid);
             return Err(error);
         }
-        // This single PID 1 event loop owns waitpid for tracked and orphaned children.
-        drop(child);
         Ok(Value::Id(id))
     }
 }
-
-pub fn serve(stream: File) -> Result<()> {
-    Reactor::new(stream)?.run()
+pub fn serve(stream: File, environment: Vec<CString>) -> Result<()> {
+    Reactor::new(stream, environment)?.run()
 }
-
-fn stdio(redirect: &Option<Redirect>, fd: usize) -> Result<Stdio> {
-    match redirect {
-        Some(Redirect::File(path)) => Ok(root_file(
-            Path::new(&OsString::from_vec(path.clone())),
-            if fd == 0 {
-                OFlags::RDONLY
-            } else {
-                OFlags::WRONLY | OFlags::CREATE
-            },
-        )?
-        .into()),
-        Some(Redirect::Pipe { .. }) if fd != 0 => Ok(Stdio::piped()),
-        Some(Redirect::Pipe { .. }) => anyhow::bail!("stdin streaming is unsupported"),
-        None => Ok(Stdio::null()),
-    }
-}
-pub fn root_file(path: &Path, flags: OFlags) -> Result<File> {
+pub fn root_file(path: &[u8], flags: OFlags) -> Result<File> {
     let root = File::open(ROOT)?;
     Ok(rustix::fs::openat2(
         &root,
@@ -570,34 +482,32 @@ pub fn root_file(path: &Path, flags: OFlags) -> Result<File> {
     )?
     .into())
 }
-pub fn directory_in_root(path: &Path) -> Result<File> {
-    use std::path::Component;
-    anyhow::ensure!(path.is_absolute(), "mount path must be absolute");
+pub fn directory_in_root(path: &[u8]) -> Result<File> {
+    crate::ensure!(path.starts_with(b"/"), "mount path must be absolute");
     let mut dir = File::open(ROOT)?;
-    for component in path.components() {
-        match component {
-            Component::RootDir | Component::CurDir => continue,
-            Component::Normal(name) => {
-                match rustix::fs::mkdirat(&dir, name, Mode::from_raw_mode(0o755)) {
-                    Ok(()) | Err(rustix::io::Errno::EXIST) => {}
-                    Err(e) => return Err(e.into()),
-                }
-                dir = rustix::fs::openat(
-                    &dir,
-                    name,
-                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                    Mode::empty(),
-                )?
-                .into();
-            }
-            _ => anyhow::bail!("invalid mount path"),
+    for component in path.split(|&b| b == b'/') {
+        if component.is_empty() || component == b"." {
+            continue;
         }
+        crate::ensure!(component != b"..", "invalid mount path");
+        match rustix::fs::mkdirat(&dir, component, Mode::from_raw_mode(0o755)) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+            Err(e) => return Err(e.into()),
+        }
+        dir = rustix::fs::openat(
+            &dir,
+            component,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?
+        .into();
     }
     Ok(dir)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::transport;
     use super::*;
     use std::os::unix::net::UnixStream;
 
@@ -619,7 +529,7 @@ mod tests {
     #[test]
     fn full_closed_pipe_is_paused_then_resumed_after_output_query() {
         let (stream, _peer) = UnixStream::pair().unwrap();
-        let mut reactor = Reactor::new(OwnedFd::from(stream).into()).unwrap();
+        let mut reactor = Reactor::new(OwnedFd::from(stream).into(), Vec::new()).unwrap();
         let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).unwrap();
         let read = File::from(read);
         transport::nonblocking(&read).unwrap();
@@ -632,6 +542,7 @@ mod tests {
                 pid: None,
                 exit: None,
                 notified_exit: false,
+                acknowledged_exit: false,
                 entrypoint: false,
                 output: [
                     Output::new(
@@ -686,10 +597,11 @@ mod tests {
 mod process_tests {
     use super::*;
     use std::os::unix::net::UnixStream;
+    use std::{os::unix::process::CommandExt, process::Command as ProcessCommand};
     #[test]
     fn reaps_children_in_their_own_process_group() {
         let (stream, _peer) = UnixStream::pair().unwrap();
-        let mut reactor = Reactor::new(OwnedFd::from(stream).into()).unwrap();
+        let mut reactor = Reactor::new(OwnedFd::from(stream).into(), Vec::new()).unwrap();
         let child = ProcessCommand::new("/bin/sh")
             .args(["-c", "exit 7"])
             .process_group(0)
@@ -713,6 +625,7 @@ mod process_tests {
                 output: [Output::new(&None, None), Output::new(&None, None)],
                 exit: None,
                 notified_exit: false,
+                acknowledged_exit: false,
                 entrypoint: false,
             },
         );
@@ -720,5 +633,104 @@ mod process_tests {
         assert!(reactor.processes[&1].pid.is_none());
         assert_eq!(reactor.processes[&1].exit.as_ref().unwrap().status, 7);
         drop(child);
+    }
+}
+
+#[cfg(test)]
+mod exit_order_tests {
+    use super::*;
+    use std::os::unix::net::UnixStream;
+    #[test]
+    fn exit_waits_for_both_streams_to_reach_eof_and_be_drained() {
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let mut reactor = Reactor::new(OwnedFd::from(socket).into(), Vec::new()).unwrap();
+        let (out_read, out_write) =
+            rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).unwrap();
+        let (err_read, err_write) =
+            rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).unwrap();
+        let mut out_write = File::from(out_write);
+        let mut err_write = File::from(err_write);
+        out_write.write_all(b"stdout tail").unwrap();
+        err_write.write_all(b"stderr tail").unwrap();
+        drop(err_write);
+        let out = File::from(out_read);
+        let err = File::from(err_read);
+        super::super::transport::nonblocking(&out).unwrap();
+        super::super::transport::nonblocking(&err).unwrap();
+        let redirect = Some(Redirect::Pipe {
+            capacity: 1024,
+            cyclic: false,
+        });
+        reactor.processes.insert(
+            1,
+            Process {
+                pid: None,
+                exit: Some(ExitReason {
+                    status: 0,
+                    type_: ExitType::Exited,
+                }),
+                notified_exit: false,
+                acknowledged_exit: false,
+                entrypoint: true,
+                output: [
+                    Output::new(&redirect, Some(out)),
+                    Output::new(&redirect, Some(err)),
+                ],
+            },
+        );
+        reactor.output_interest(1, 0).unwrap();
+        reactor.output_interest(1, 1).unwrap();
+        reactor.read_output(1, 0).unwrap();
+        reactor.read_output(1, 1).unwrap();
+        reactor.completed().unwrap();
+        assert!(!reactor.processes[&1].notified_exit);
+        let query = |fd| Command::QueryOutput {
+            id: 1,
+            fd,
+            offset: 0,
+            len: u64::MAX,
+        };
+        assert_eq!(
+            reactor.handle(query(1)).unwrap(),
+            Value::Bytes(b"stdout tail".to_vec())
+        );
+        reactor.completed().unwrap();
+        assert!(!reactor.processes[&1].notified_exit);
+        assert_eq!(
+            reactor.handle(query(2)).unwrap(),
+            Value::Bytes(b"stderr tail".to_vec())
+        );
+        reactor.completed().unwrap();
+        assert!(
+            !reactor.processes[&1].notified_exit,
+            "empty buffer alone is insufficient until EOF"
+        );
+        drop(out_write);
+        // A concurrently spawned test child may briefly inherit the writers
+        // until exec closes their CLOEXEC descriptors. Follow actual pipe
+        // readiness, as the reactor does, instead of assuming immediate EOF.
+        for index in 0..2 {
+            if let Some(pipe) = reactor.processes[&1].output[index].pipe.as_ref() {
+                let mut fds = [rustix::event::PollFd::new(
+                    pipe,
+                    rustix::event::PollFlags::IN,
+                )];
+                let timeout = rustix::event::Timespec {
+                    tv_sec: 3,
+                    tv_nsec: 0,
+                };
+                assert_eq!(rustix::event::poll(&mut fds, Some(&timeout)).unwrap(), 1);
+                assert!(fds[0].revents().contains(rustix::event::PollFlags::HUP));
+                reactor.read_output(1, index).unwrap();
+            }
+        }
+        reactor.completed().unwrap();
+        assert!(reactor.processes[&1].notified_exit);
+        assert!(
+            !reactor.shutdown,
+            "entrypoint must stay alive until host ACK"
+        );
+        reactor.request(Message::ExitAck { id: 1 }).unwrap();
+        assert!(reactor.shutdown);
     }
 }

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import struct
 import subprocess
 import tarfile
 import urllib.request
@@ -60,7 +61,18 @@ def main():
     if hashlib.sha256(apk.read_bytes()).hexdigest() != KERNEL_SHA256:
         apk.unlink()
         raise SystemExit("Kernel APK checksum verification failed")
-    entries = [("init", (TARGET / "x86_64-unknown-linux-musl/guest/ya-vm-guest-agent").read_bytes(), stat.S_IFREG | 0o755),
+    agent = TARGET / "x86_64-unknown-linux-musl/guest/ya-vm-guest-agent"
+    binary = agent.read_bytes()
+    if binary[:6] != b"\x7fELF\x02\x01" or struct.unpack_from("<H", binary, 16)[0] != 2:
+        raise SystemExit("Guest agent must be a static ELF64 executable")
+    offset = struct.unpack_from("<Q", binary, 32)[0]
+    entry_size, count = struct.unpack_from("<HH", binary, 54)
+    for index in range(count):
+        kind = struct.unpack_from("<I", binary, offset + index * entry_size)[0]
+        if kind in (2, 3):
+            raise SystemExit("Freestanding agent must have no dynamic loader or dynamic segment")
+    subprocess.run([str(agent), "--self-check"], check=True, timeout=10)
+    entries = [("init", binary, stat.S_IFREG | 0o755),
                ("mkfs.ext2", formatter(cache), stat.S_IFREG | 0o755)]
     with tarfile.open(apk, "r:gz") as package:
         members = {member.name.removeprefix("./"): member for member in package.getmembers()}

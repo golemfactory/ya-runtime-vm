@@ -1,32 +1,24 @@
-use super::ROOT;
-use anyhow::{Context, Result};
-use rustix::mount::MountFlags as Flags;
-use std::{
-    collections::BTreeMap, ffi::CString, fs, io::Write, os::fd::AsRawFd, path::Path,
-    process::Command,
-};
+use super::{ROOT, io as fs};
+use crate::error::{Context, Result};
+use alloc::{collections::BTreeMap, ffi::CString, string::String, vec::Vec};
+use rustix::{fd::AsRawFd, mount::MountFlags as Flags};
 
-pub fn mount(source: &str, target: &Path, kind: &str, flags: Flags, data: &str) -> Result<()> {
-    // Resolve guest mountpoints from a directory FD, rejecting symlinks into
-    // PID 1's initramfs. Workload images control their directory contents.
+pub fn mount(source: &str, target: &str, kind: &str, flags: Flags, data: &str) -> Result<()> {
     let directory = target
-        .strip_prefix(ROOT)
-        .ok()
-        .filter(|p| !p.as_os_str().is_empty())
-        .map(|relative| super::service::directory_in_root(&Path::new("/").join(relative)))
+        .strip_prefix("/mnt/newroot/")
+        .map(|relative| super::service::directory_in_root(format!("/{relative}").as_bytes()))
         .transpose()?;
     let fd_path = directory
         .as_ref()
         .map(|fd| format!("/proc/self/fd/{}", fd.as_raw_fd()));
-    let target = fd_path.as_deref().map(Path::new).unwrap_or(target);
+    let target = fd_path.as_deref().unwrap_or(target);
     fs::create_dir_all(target)?;
     let data = CString::new(data)?;
     rustix::mount::mount(source, target, kind, flags, Some(data.as_c_str()))
-        .with_context(|| format!("mounting {source} at {} ({kind})", target.display()))?;
-    eprintln!("Mounted {source} at {} ({kind})", target.display());
+        .with_context(|| format!("mounting {source} at {target} ({kind})"))?;
+    eprintln!("Mounted {source} at {target} ({kind})");
     Ok(())
 }
-
 const MODULES: &[&str] = &[
     "failover",
     "virtio",
@@ -53,48 +45,47 @@ const MODULES: &[&str] = &[
     "fuse",
     "virtiofs",
 ];
-
-pub fn prepare() -> Result<()> {
-    mount(
-        "devtmpfs",
-        Path::new("/dev"),
-        "devtmpfs",
-        Flags::NOSUID,
-        "mode=0755",
-    )?;
+pub fn prepare(environment: &[CString]) -> Result<()> {
+    mount("devtmpfs", "/dev", "devtmpfs", Flags::NOSUID, "mode=0755")?;
     mount(
         "sysfs",
-        Path::new("/sys"),
+        "/sys",
         "sysfs",
         Flags::NOSUID | Flags::NOEXEC | Flags::NODEV,
         "",
     )?;
     mount(
         "proc",
-        Path::new("/proc"),
+        "/proc",
         "proc",
         Flags::NOSUID | Flags::NOEXEC | Flags::NODEV,
         "",
     )?;
     for module in MODULES {
         let path = format!("/{module}.ko");
-        if !Path::new(&path).exists() {
+        if !fs::exists(&path) {
             continue;
         }
         let file = fs::File::open(&path)?;
         rustix::system::finit_module(&file, c"", 0).with_context(|| format!("loading {module}"))?;
-        fs::remove_file(path)?;
+        rustix::fs::unlink(&path)?;
     }
-    let env: BTreeMap<_, _> = std::env::vars().collect();
+    let mut env = BTreeMap::new();
+    for value in environment {
+        if let Ok(value) = value.to_str()
+            && let Some((key, value)) = value.split_once('=')
+        {
+            env.insert(String::from(key), String::from(value));
+        }
+    }
     let mut roots = BTreeMap::new();
     let mut volumes = Vec::new();
-    for entry in fs::read_dir("/sys/class/block")? {
-        let entry = entry?;
-        let Ok(serial) = fs::read_to_string(entry.path().join("serial")) else {
+    for name in fs::read_dir("/sys/class/block")? {
+        let Ok(serial) = fs::read_to_string(format!("/sys/class/block/{name}/serial")) else {
             continue;
         };
         let serial = serial.trim();
-        let device = format!("/dev/{}", entry.file_name().to_string_lossy());
+        let device = format!("/dev/{name}");
         if let Some(index) = serial.strip_prefix("rootfs-") {
             roots.insert(index.parse::<usize>()?, device);
         } else if let Some(index) = serial.strip_prefix("vol-") {
@@ -105,16 +96,15 @@ pub fn prepare() -> Result<()> {
                 .get(&format!("vol-{index}-errors"))
                 .map(String::as_str)
                 .unwrap_or("continue");
-            anyhow::ensure!(
+            crate::ensure!(
                 ["continue", "remount-ro", "panic"].contains(&errors),
                 "invalid ext2 error policy"
             );
-            let status = Command::new("/mkfs.ext2").arg(&device).status()?;
-            anyhow::ensure!(status.success(), "formatting {device} failed: {status}");
+            super::process::format(&device, environment)?;
             volumes.push((device, path.clone(), "ext2", format!("errors={errors}")));
         }
     }
-    anyhow::ensure!(!roots.is_empty(), "no task package block devices found");
+    crate::ensure!(!roots.is_empty(), "no task package block devices found");
     for (key, size) in &env {
         if let Some(index) = key
             .strip_prefix("vol-")
@@ -125,20 +115,19 @@ pub fn prepare() -> Result<()> {
                 .get(&format!("vol-{index}-path"))
                 .context("missing RAM volume path")?;
             volumes.push((
-                "tmpfs".into(),
+                String::from("tmpfs"),
                 path.clone(),
                 "tmpfs",
                 format!("mode=0700,size={size}"),
             ));
         }
     }
-    let overlay = Path::new("/mnt/overlay");
     if let Some((device, _, kind, options)) = volumes.iter().find(|v| v.1 == "/") {
-        mount(device, overlay, kind, Flags::NODEV, options)?;
+        mount(device, "/mnt/overlay", kind, Flags::NODEV, options)?;
     } else {
         mount(
             "tmpfs",
-            overlay,
+            "/mnt/overlay",
             "tmpfs",
             Flags::NOSUID | Flags::NODEV,
             "mode=0700,size=128M",
@@ -146,25 +135,19 @@ pub fn prepare() -> Result<()> {
     }
     let mut lowerdirs = Vec::new();
     for (expected, (index, device)) in roots.into_iter().enumerate() {
-        anyhow::ensure!(
+        crate::ensure!(
             index == expected,
             "task package layer sequence contains a gap"
         );
         let path = format!("/mnt/image-{index}");
-        mount(
-            &device,
-            Path::new(&path),
-            "squashfs",
-            Flags::RDONLY | Flags::NODEV,
-            "",
-        )?;
+        mount(&device, &path, "squashfs", Flags::RDONLY | Flags::NODEV, "")?;
         lowerdirs.push(path);
     }
-    fs::create_dir_all(overlay.join("upper"))?;
-    fs::create_dir_all(overlay.join("work"))?;
+    fs::create_dir_all("/mnt/overlay/upper")?;
+    fs::create_dir_all("/mnt/overlay/work")?;
     mount(
         "overlay",
-        Path::new(ROOT),
+        ROOT,
         "overlay",
         Flags::NODEV,
         &format!(
@@ -173,13 +156,10 @@ pub fn prepare() -> Result<()> {
         ),
     )?;
     for (device, path, kind, options) in volumes {
-        if path == "/" {
-            continue;
+        if path != "/" {
+            mount(&device, &guest_path(&path)?, kind, Flags::NODEV, &options)?;
         }
-        let target = guest_path(&path)?;
-        mount(&device, &target, kind, Flags::NODEV, &options)?;
     }
-    let root = Path::new(ROOT);
     for (name, source, kind, options, flags) in [
         (
             "proc",
@@ -212,35 +192,31 @@ pub fn prepare() -> Result<()> {
             Flags::NOSUID | Flags::NODEV,
         ),
     ] {
-        mount(source, &root.join(name), kind, flags, options)?;
+        mount(source, &format!("{ROOT}/{name}"), kind, flags, options)?;
     }
-    if !root.join("dev/fd").exists() {
-        std::os::unix::fs::symlink("/proc/self/fd", root.join("dev/fd"))?;
+    let dev_fd = format!("{ROOT}/dev/fd");
+    if !fs::exists(&dev_fd) {
+        rustix::fs::symlink("/proc/self/fd", &dev_fd)?;
     }
-    let _etc = super::service::directory_in_root(Path::new("/etc"))?;
-    super::service::root_file(
-        Path::new("/etc/hosts"),
-        rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::CREATE | rustix::fs::OFlags::TRUNC,
-    )?
-    .write_all(b"127.0.0.1 localhost\n::1 localhost ip6-localhost\n")?;
-    super::service::root_file(
-        Path::new("/etc/resolv.conf"),
-        rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::CREATE | rustix::fs::OFlags::TRUNC,
-    )?
-    .write_all(b"nameserver 1.1.1.1\nnameserver 8.8.8.8\n")?;
+    let _etc = super::service::directory_in_root(b"/etc")?;
+    let flags = rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::CREATE | rustix::fs::OFlags::TRUNC;
+    super::service::root_file(b"/etc/hosts", flags)?
+        .write_all(b"127.0.0.1 localhost\n::1 localhost ip6-localhost\n")?;
+    super::service::root_file(b"/etc/resolv.conf", flags)?
+        .write_all(b"nameserver 1.1.1.1\nnameserver 8.8.8.8\n")?;
     if let Some(hostname) = env.get("hostname") {
         rustix::system::sethostname(hostname.as_bytes())?;
     }
     super::network::loopback()?;
     Ok(())
 }
-
-pub fn guest_path(path: &str) -> Result<std::path::PathBuf> {
-    use std::path::Component;
-    let path = Path::new(path);
-    anyhow::ensure!(
-        path.is_absolute() && !path.components().any(|c| matches!(c, Component::ParentDir)),
+pub fn guest_path(path: &str) -> Result<String> {
+    crate::ensure!(
+        path.starts_with('/') && !path.split('/').any(|p| p == ".."),
         "invalid guest path"
     );
-    Ok(Path::new(ROOT).join(path.strip_prefix("/")?))
+    Ok(format!(
+        "{ROOT}/{path}",
+        path = path.trim_start_matches('/')
+    ))
 }

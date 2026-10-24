@@ -3,6 +3,7 @@ members = [
     "crates/runtime",
     "crates/agent-protocol",
     "crates/guest-agent",
+    "third_party/fuse",
 ]
 default-members = ["crates/runtime", "crates/agent-protocol"]
 resolver = "2"
@@ -16,3 +17,8 @@ ya-client-model = { git = "https://github.com/golemfactory/ya-client.git", rev =
 inherits = "release"
 lto = "fat"
 strip = "symbols"
+panic = "abort"
+
+# Apply the bounded decoder to every OpenVMM FUSE consumer, including virtiofs.
+[patch."https://github.com/microsoft/openvmm.git"]
+fuse = { path = "third_party/fuse" }

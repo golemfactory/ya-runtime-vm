@@ -3,24 +3,39 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
-use futures::lock::Mutex;
 use futures::FutureExt;
+use futures::lock::Mutex;
 use mesh::rpc::RpcSend;
-use mesh_worker::{launch_local_worker, WorkerHandle};
+use mesh_worker::{WorkerHandle, launch_local_worker};
 use openvmm_core::VmWorker;
 use openvmm_defs::rpc::VmRpc;
 use openvmm_defs::worker::VmWorkerParameters;
 use tokio::spawn;
+use vmm_core_defs::HaltReason;
 
 use ya_runtime_sdk::runtime_api::server;
 use ya_runtime_sdk::server::ContainerEndpoint;
-use ya_runtime_sdk::{serialize, ErrorExt, EventEmitter};
+use ya_runtime_sdk::{ErrorExt, EventEmitter, serialize};
 
 use crate::deploy::Deployment;
 use crate::guest_agent_comm::{GuestAgent, Notification};
 
 const DIR_RUNTIME: &str = "runtime";
 const GUEST_AGENT_VSOCK_PORT: u32 = ya_vm_agent_protocol::VSOCK_PORT;
+
+fn guest_halt_error(reason: &HaltReason) -> anyhow::Error {
+    let mut message = format!(
+        "OpenVMM guest halted: {reason:?}. See preceding OpenVMM errors for the underlying cause."
+    );
+    if cfg!(target_os = "linux") && matches!(reason, HaltReason::SingleStep { .. }) {
+        // Upstream also reports fatal VMM errors as SingleStep. This is a
+        // diagnostic hint, not proof of a competing hypervisor.
+        message.push_str(" On Linux, inspect journalctl -k. If KVM reports 'vmread failed' or 'vmwrite failed', another native hypervisor such as VirtualBox may be interfering. Safely shut down its VMs and retry; do not force-kill running VMs or unload their modules.");
+    }
+    // Keep the hint and reason in one message: the SDK preserves Display but
+    // does not retain anyhow's chain when serializing an error response.
+    anyhow::anyhow!(message)
+}
 
 #[derive(Default)]
 pub struct RuntimeData {
@@ -115,19 +130,21 @@ pub async fn start_vmrt(
         log::info!("Waiting for guest agent over virtio-vsock port {GUEST_AGENT_VSOCK_PORT}");
         let manager_stream = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            manager_listener.accept(),
+            async {
+                tokio::select! {
+                    stream = manager_listener.accept() => stream.context("accepting guest agent virtio-vsock connection"),
+                    halt = notify_recv.recv() => match halt {
+                        Ok(reason) => Err(guest_halt_error(&reason)),
+                        Err(error) => Err(error).context("OpenVMM halt channel closed during startup"),
+                    },
+                }
+            },
         )
         .await
-        .context("guest agent virtio-vsock connection timed out")?
-        .context("accepting guest agent virtio-vsock connection")?;
+        .context("guest agent virtio-vsock connection timed out")??;
         let ga = GuestAgent::from_stream(manager_stream, 10, move |notification, ga| {
-            let mut emitter = emitter.clone();
-            async move {
-                if let Some(status) = notification_into_status(notification, ga).await {
-                    emitter.emit(status).await;
-                }
-            }
-            .boxed()
+            let emitter = emitter.clone();
+            async move { deliver_notification(notification, ga, emitter).await }.boxed()
         })
         .await?;
         log::info!("Guest agent connected");
@@ -150,6 +167,9 @@ pub async fn start_vmrt(
     let ga = match ga_result {
         Ok(ga) => ga,
         Err(error) => {
+            let mut state = inspect::inspect("partition/vp", &runtime);
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), state.resolve()).await;
+            log::debug!("OpenVMM startup failure state: {}", state.results());
             runtime.stop();
             if let Err(stop_error) = runtime.join().await {
                 log::error!("OpenVMM worker also failed while cleaning up startup: {stop_error:#}");
@@ -172,7 +192,12 @@ pub async fn start_vmrt(
     spawn(async move {
         match notify_recv.recv().await {
             Ok(reason) => {
-                log::warn!("OpenVMM guest halted: {reason:?}");
+                match reason {
+                    HaltReason::PowerOff | HaltReason::Reset | HaltReason::Hibernate => {
+                        log::info!("OpenVMM guest halted: {reason:?}");
+                    }
+                    _ => log::error!("{}", guest_halt_error(&reason)),
+                }
                 let mut worker = runtime_data_for_halt.lock().await.runtime.take();
                 if let Some(mut worker) = worker.take() {
                     worker.stop();
@@ -192,13 +217,13 @@ struct SocketPathCleanup(PathBuf);
 
 impl Drop for SocketPathCleanup {
     fn drop(&mut self) {
-        if let Err(error) = std::fs::remove_file(&self.0) {
-            if error.kind() != io::ErrorKind::NotFound {
-                log::warn!(
-                    "failed to remove guest agent socket {}: {error}",
-                    self.0.display()
-                );
-            }
+        if let Err(error) = std::fs::remove_file(&self.0)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            log::warn!(
+                "failed to remove guest agent socket {}: {error}",
+                self.0.display()
+            );
         }
     }
 }
@@ -209,6 +234,25 @@ pub fn runtime_dir() -> io::Result<PathBuf> {
         .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?
         .to_path_buf()
         .join(DIR_RUNTIME))
+}
+
+async fn deliver_notification(
+    notification: Notification,
+    ga: Arc<Mutex<GuestAgent>>,
+    mut emitter: EventEmitter,
+) {
+    let exited = match &notification {
+        Notification::ProcessDied { id, .. } => Some(*id),
+        _ => None,
+    };
+    if let Some(status) = notification_into_status(notification, ga.clone()).await {
+        emitter.emit(status).await;
+    }
+    if let Some(id) = exited
+        && let Err(error) = ga.lock().await.acknowledge_exit(id).await
+    {
+        log::debug!("Unable to acknowledge guest exit {id}: {error}");
+    }
 }
 
 async fn notification_into_status(
@@ -261,5 +305,137 @@ async fn notification_into_status(
                 stderr: Vec::new(),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fatal_halt_keeps_reason_and_conditional_recovery_hint() {
+        let error = guest_halt_error(&HaltReason::SingleStep { vp: 2 }).to_string();
+        assert!(error.contains("SingleStep { vp: 2 }"));
+        assert!(error.contains("underlying cause"));
+        assert_eq!(error.contains("journalctl -k"), cfg!(target_os = "linux"));
+        assert!(
+            !guest_halt_error(&HaltReason::PowerOff)
+                .to_string()
+                .contains("VirtualBox")
+        );
+    }
+    use crate::{
+        guest_agent_comm::{read_message, write_message},
+        local_socket::LocalStream,
+    };
+    use ya_vm_agent_protocol::{
+        Command, Event, ExitReason, ExitType, Message, OUTPUT_CHUNK, VERSION, Value,
+    };
+
+    struct Observe(tokio::sync::mpsc::UnboundedSender<server::ProcessStatus>);
+    impl server::RuntimeHandler for Observe {
+        fn on_process_status<'a>(
+            &self,
+            status: server::ProcessStatus,
+        ) -> futures::future::BoxFuture<'a, ()> {
+            let sender = self.0.clone();
+            async move {
+                tokio::task::yield_now().await;
+                let _ = sender.send(status);
+            }
+            .boxed()
+        }
+        fn on_runtime_status<'a>(
+            &self,
+            _: server::RuntimeStatus,
+        ) -> futures::future::BoxFuture<'a, ()> {
+            async {}.boxed()
+        }
+    }
+    #[tokio::test]
+    async fn output_reaches_the_client_before_exit_even_with_early_wire_notification() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (host, mut guest) = LocalStream::pair().unwrap();
+                write_message(&mut guest, &Message::Ready { version: VERSION })
+                    .await
+                    .unwrap();
+                let (sender, mut statuses) = tokio::sync::mpsc::unbounded_channel();
+                let emitter = EventEmitter::spawn(Observe(sender));
+                let _agent = GuestAgent::from_stream(host, 2, move |event, agent| {
+                    let emitter = emitter.clone();
+                    async move { deliver_notification(event, agent, emitter).await }.boxed()
+                })
+                .await
+                .unwrap();
+                // Queue a terminal notification before answering any output query.
+                // It must never overtake pending queries or the SDK emitter queue.
+                for fd in [1, 2, 1, 2] {
+                    write_message(
+                        &mut guest,
+                        &Message::Event(Event::OutputAvailable { id: 9, fd }),
+                    )
+                    .await
+                    .unwrap();
+                }
+                write_message(
+                    &mut guest,
+                    &Message::Event(Event::ProcessDied {
+                        id: 9,
+                        reason: ExitReason {
+                            status: 37,
+                            type_: ExitType::Exited,
+                        },
+                    }),
+                )
+                .await
+                .unwrap();
+                let responder = tokio::spawn(async move {
+                    for expected in [1, 2, 1, 2] {
+                        let Message::Request {
+                            id,
+                            command: Command::QueryOutput { fd, .. },
+                        } = read_message(&mut guest).await.unwrap()
+                        else {
+                            panic!("expected output query");
+                        };
+                        assert_eq!(fd, expected);
+                        tokio::task::yield_now().await;
+                        write_message(
+                            &mut guest,
+                            &Message::Response {
+                                id,
+                                result: Ok(Value::Bytes(vec![fd; OUTPUT_CHUNK])),
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    assert_eq!(
+                        read_message(&mut guest).await.unwrap(),
+                        Message::ExitAck { id: 9 }
+                    );
+                });
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                for index in 0..5 {
+                    let status =
+                        tokio::time::timeout(std::time::Duration::from_secs(3), statuses.recv())
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    assert_eq!(status.pid, 9);
+                    assert_eq!(status.running, index < 4);
+                    stdout.extend(status.stdout);
+                    stderr.extend(status.stderr);
+                    if !status.running {
+                        assert_eq!(status.return_code, 37);
+                    }
+                }
+                assert_eq!(stdout, vec![1; 2 * OUTPUT_CHUNK]);
+                assert_eq!(stderr, vec![2; 2 * OUTPUT_CHUNK]);
+                responder.await.unwrap();
+            })
+            .await;
     }
 }

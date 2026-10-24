@@ -1,10 +1,10 @@
 use crate::local_socket::LocalStream;
-use futures::{channel::mpsc, future::BoxFuture, lock::Mutex, SinkExt, StreamExt};
+use futures::{SinkExt, StreamExt, channel::mpsc, future::BoxFuture, lock::Mutex};
 use std::{io, path::Path, sync::Arc};
-use tokio::io::{split, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf, split};
 pub use ya_vm_agent_protocol::Event as Notification;
 use ya_vm_agent_protocol::{
-    AgentError, Command, Message, Network, Redirect, Run, Value, MAX_FRAME, VERSION,
+    AgentError, Command, MAX_FRAME, Message, Network, Redirect, Run, VERSION, Value,
 };
 
 pub enum RedirectFdType<'a> {
@@ -21,7 +21,7 @@ pub struct GuestAgent {
     responses_reader_handle: Option<tokio::task::JoinHandle<io::Error>>,
 }
 
-async fn read_message(stream: &mut (impl AsyncRead + Unpin)) -> io::Result<Message> {
+pub(crate) async fn read_message(stream: &mut (impl AsyncRead + Unpin)) -> io::Result<Message> {
     let mut prefix = [0; 4];
     stream.read_exact(&mut prefix).await?;
     let mut frame = vec![0; ya_vm_agent_protocol::frame_len(prefix)?];
@@ -29,7 +29,7 @@ async fn read_message(stream: &mut (impl AsyncRead + Unpin)) -> io::Result<Messa
     ya_vm_agent_protocol::decode(&frame).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-async fn write_message(
+pub(crate) async fn write_message(
     stream: &mut (impl AsyncWrite + Unpin),
     message: &Message,
 ) -> io::Result<()> {
@@ -110,6 +110,10 @@ impl GuestAgent {
             }
         }
         unreachable!()
+    }
+
+    pub async fn acknowledge_exit(&mut self, id: u64) -> io::Result<()> {
+        write_message(&mut self.stream, &Message::ExitAck { id }).await
     }
 
     async fn call(&mut self, command: Command) -> io::Result<RemoteCommandResult<Value>> {
@@ -388,8 +392,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(GuestAgent::from_stream(host, 2, |_, _| async {}.boxed())
-            .await
-            .is_err());
+        assert!(
+            GuestAgent::from_stream(host, 2, |_, _| async {}.boxed())
+                .await
+                .is_err()
+        );
     }
 }

@@ -15,12 +15,12 @@ use openvmm_defs::config::{
 use openvmm_defs::config::{PcieMmioRangeConfig, PciePortConfig};
 use vm_manifest_builder::{BaseChipsetType, MachineArch, VmManifestBuilder};
 use vm_resource::kind::{DiskHandleKind, NetEndpointHandleKind, VirtioDeviceHandle};
-use vm_resource::{declare_static_resolver, IntoResource, ResolveResource, ResourceId};
+use vm_resource::{IntoResource, ResolveResource, ResourceId, declare_static_resolver};
 use ya_client_model::activity::exe_script_command::VolumeMount;
 
 use crate::deploy::Deployment;
 use crate::net_socket::{
-    take_registered_endpoint, SocketEndpoint, SocketMode, SocketRegistrationGuard,
+    SocketEndpoint, SocketMode, SocketRegistrationGuard, take_registered_endpoint,
 };
 
 extern crate openvmm_resources as _;
@@ -103,12 +103,10 @@ pub(crate) fn build_config(
     for (index, volume) in deployment.volumes.iter().enumerate() {
         virtio_devices.push((
             openvmm_defs::config::VirtioBus::Mmio,
-            virtio_resources::fs::VirtioFsHandle {
+            crate::shared_dir::SharedDirHandle {
                 tag: format!("mnt{index}"),
-                fs: virtio_resources::fs::VirtioFsBackend::HostFs {
-                    root_path: work_dir.join(&volume.name).to_string_lossy().into_owned(),
-                    mount_options: String::new(),
-                },
+                root: crate::shared_dir::open_root(work_dir, &volume.name)
+                    .with_context(|| format!("opening shared volume {}", volume.name))?,
             }
             .into_resource(),
         ));

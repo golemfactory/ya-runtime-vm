@@ -31,7 +31,7 @@ jobs:
           VERSION="${VERSION#v}"
           mise exec -- python -c 'import tomllib,sys; assert tomllib.load(open("crates/runtime/Cargo.toml","rb"))["package"]["version"] == sys.argv[1], "tag differs from Cargo version"' "$VERSION"
           cd releases
-          sha256sum --check *.sha256
+          sha256sum --check ./*.sha256
       - name: Publish release assets
         env:
           GH_TOKEN: ${{ github.token }}

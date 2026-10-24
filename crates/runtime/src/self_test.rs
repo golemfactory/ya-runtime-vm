@@ -1,7 +1,7 @@
-use anyhow::bail;
+use anyhow::{Context, bail};
+use futures::FutureExt;
 use futures::future::BoxFuture;
 use futures::lock::Mutex;
-use futures::FutureExt;
 use notify::event::{AccessKind, AccessMode};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::Value;
@@ -9,7 +9,6 @@ use std::collections::HashMap;
 use std::future;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs;
@@ -18,12 +17,12 @@ use uuid::Uuid;
 use ya_client_model::activity::exe_script_command::VolumeMount;
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 use ya_runtime_sdk::runtime_api::server::RuntimeHandler;
-use ya_runtime_sdk::{runtime_api::server, Error, ErrorExt, EventEmitter};
+use ya_runtime_sdk::{Error, ErrorExt, EventEmitter, runtime_api::server};
 use ya_runtime_sdk::{ProcessStatus, RunProcess, RuntimeStatus};
 
 use crate::deploy::{Deployment, DeploymentMount};
-use crate::vmrt::{runtime_dir, RuntimeData};
-use crate::{disk_image, Runtime, TestConfig};
+use crate::vmrt::{RuntimeData, runtime_dir};
+use crate::{Runtime, TestConfig, disk_image};
 
 const FILE_TEST_IMAGE: &str = "self-test.gvmi";
 const FILE_TEST_EXECUTABLE: &str = "ya-self-test";
@@ -39,8 +38,9 @@ impl RaiiDir {
 
 impl Drop for RaiiDir {
     fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0)
-            .unwrap_or_else(|_| panic!("Couldn't remove {}", self.0.display()));
+        if let Err(error) = std::fs::remove_dir_all(&self.0) {
+            log::warn!("Couldn't remove {}: {error}", self.0.display());
+        }
     }
 }
 
@@ -48,8 +48,9 @@ pub(crate) async fn test(
     pci_device_id: Option<Vec<String>>,
     test_config: TestConfig,
 ) -> Result<(), Error> {
-    run_self_test(verify_status, pci_device_id, test_config).await;
-    Ok(())
+    run_self_test(verify_status, pci_device_id, test_config)
+        .await
+        .map_err(|error| Error::from(format!("{error:#}")))
 }
 
 pub(crate) fn verify_status(status: anyhow::Result<Value>) -> anyhow::Result<String> {
@@ -61,7 +62,8 @@ pub(crate) async fn run_self_test<HANDLER>(
     handle_result: HANDLER,
     pci_device_id: Option<Vec<String>>,
     test_config: TestConfig,
-) where
+) -> anyhow::Result<()>
+where
     HANDLER: Fn(anyhow::Result<Value>) -> anyhow::Result<String>,
 {
     struct Emitter;
@@ -81,18 +83,16 @@ pub(crate) async fn run_self_test<HANDLER>(
     let tmp = std::env::temp_dir();
     let work_dir = tmp.join(format!("ya-runtime-vm-self-test-{}", Uuid::new_v4()));
     let work_dir_handle =
-        RaiiDir::create(work_dir.clone()).expect("Failed to create workdir for self-test");
+        RaiiDir::create(work_dir.clone()).context("creating self-test workdir")?;
 
     let deployment = self_test_deployment(&work_dir, &test_config)
         .await
-        .expect("Prepares self test img deployment");
+        .context("preparing self-test deployment")?;
 
     let output_volume =
-        get_self_test_only_volume(&deployment).expect("Self test image has an output volume");
+        get_self_test_only_volume(&deployment).context("self-test image has no output volume")?;
     let output_file_name = format!("out_{}.json", Uuid::new_v4());
-    let output_file_vm = PathBuf::from_str(&output_volume.path)
-        .expect("Can create self test volume path")
-        .join(&output_file_name);
+    let output_file_vm = PathBuf::from(&output_volume.path).join(&output_file_name);
     let output_dir = work_dir.join(output_volume.name);
     let output_file = output_dir.join(&output_file_name);
 
@@ -103,13 +103,13 @@ pub(crate) async fn run_self_test<HANDLER>(
     log::info!("Starting runtime");
     let start_response = start_runtime(emitter, work_dir.clone(), runtime.data.clone())
         .await
-        .expect("Starts runtime");
+        .context("starting self-test runtime")?;
     log::info!("Runtime start response {:?}", start_response);
 
     log::info!("Runtime: {:?}", runtime.data);
     log::info!("Running self test command");
     let timeout = test_config.test_timeout();
-    run_self_test_command(
+    let command_result = run_self_test_command(
         runtime.data.clone(),
         &output_dir,
         &output_file,
@@ -117,28 +117,31 @@ pub(crate) async fn run_self_test<HANDLER>(
         timeout,
     )
     .await
-    .expect("Can run self-test command");
+    .context("running self-test command");
 
     log::info!("Stopping runtime");
-    crate::stop(runtime.data.clone())
+    let stop_result = crate::stop(runtime.data.clone())
         .await
-        .expect("Stops runtime");
+        .map_err(|error| anyhow::anyhow!("stopping self-test runtime: {error:?}"));
+    command_result?;
+    stop_result?;
 
     log::info!("Handling result");
     let out_result = read_json(&output_file);
-    let result = handle_result(out_result).expect("Handles test result");
+    let result = handle_result(out_result).context("handling self-test result")?;
     if !result.is_empty() {
         // the server refuses to stop by itself; print output to stdout
         let mut stdout = std::io::stdout().lock();
-        stdout.write_all(result.as_bytes()).unwrap();
-        stdout.write_all(b"\n").unwrap();
-        stdout.flush().unwrap();
+        stdout.write_all(result.as_bytes())?;
+        stdout.write_all(b"\n")?;
+        stdout.flush()?;
     }
 
     log::debug!("Deleting output files");
-    std::fs::remove_dir_all(output_dir).expect("Removes self-test output dir");
+    std::fs::remove_dir_all(output_dir).context("removing self-test output directory")?;
 
     drop(work_dir_handle);
+    Ok(())
 }
 
 fn self_test_runtime(deployment: Deployment, pci_device_id: Option<Vec<String>>) -> Runtime {
@@ -158,10 +161,10 @@ async fn self_test_deployment(
     test_config: &TestConfig,
 ) -> anyhow::Result<Deployment> {
     let package_path = runtime_dir()
-        .expect("Runtime directory not found")
+        .context("finding runtime directory")?
         .join(FILE_TEST_IMAGE)
         .canonicalize()
-        .expect("Test image not found");
+        .context("finding self-test image")?;
 
     let package_paths = [package_path];
 
