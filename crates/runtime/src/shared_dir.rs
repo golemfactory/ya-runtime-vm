@@ -33,6 +33,8 @@ const MAX_IO: usize = 1024 * 1024;
 const MAX_REQUEST: u32 = 128 * 1024;
 // Total bytes of directory snapshots per share, including approximate entry overhead.
 const MAX_DIRECTORY_BYTES: usize = 8 * 1024 * 1024;
+// libfuse's FUSE_UNKNOWN_INO. Never 0: glibc < 2.37 readdir() skips d_ino == 0.
+const UNKNOWN_INO: u64 = 0xffff_ffff;
 
 #[derive(MeshPayload)]
 pub(crate) struct SharedDirHandle {
@@ -668,10 +670,31 @@ impl Fuse for SharedDir {
             .filter(|d| d.node == request.node_id())
             .ok_or(lx::Error::EBADF)?;
         let offset = usize::try_from(arg.offset).map_err(|_| lx::Error::EINVAL)?;
+        let node = request.node_id();
         let mut data = Vec::with_capacity(arg.size as usize);
         for (index, (name, kind)) in dir.entries.iter().enumerate().skip(offset) {
             let raw = name_bytes(name).ok_or(lx::Error::EINVAL)?;
-            if !data.dir_entry(lx::LxStr::from_bytes(raw), 0, index as u64 + 1, *kind >> 12) {
+            // Match getattr for known nodes; entries not looked up yet have no node ID.
+            let ino = match index {
+                0 => node,
+                1 if node == FUSE_ROOT_ID => node,
+                1 => state
+                    .nodes
+                    .get(&node)
+                    .and_then(|n| n.location.as_ref())
+                    .map_or(UNKNOWN_INO, |l| l.0),
+                _ => state
+                    .names
+                    .get(&(node, name.clone()))
+                    .copied()
+                    .unwrap_or(UNKNOWN_INO),
+            };
+            if !data.dir_entry(
+                lx::LxStr::from_bytes(raw),
+                ino,
+                index as u64 + 1,
+                *kind >> 12,
+            ) {
                 break;
             }
         }

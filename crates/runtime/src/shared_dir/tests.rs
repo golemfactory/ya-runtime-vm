@@ -1,5 +1,5 @@
 use super::*;
-use zerocopy::{FromZeros, IntoBytes};
+use zerocopy::{FromBytes, FromZeros, IntoBytes};
 
 fn request(node: u64) -> Request {
     let header = fuse_in_header {
@@ -219,6 +219,51 @@ fn names_can_be_reused_while_old_handles_remain_open() {
     assert_ne!(first.nodeid, second.nodeid);
     create(&fs, second.nodeid, "new");
     assert!(contains(&list(&fs, second.nodeid), b"new"));
+}
+
+fn dirents(data: &[u8]) -> Vec<(u64, String)> {
+    let mut entries = Vec::new();
+    let mut rest = data;
+    while !rest.is_empty() {
+        let (dirent, tail) = fuse_dirent::read_from_prefix(rest).unwrap();
+        let name = &tail[..dirent.namelen as usize];
+        entries.push((dirent.ino, String::from_utf8(name.to_vec()).unwrap()));
+        rest = &rest[fuse_dirent_align(size_of::<fuse_dirent>() + name.len())..];
+    }
+    entries
+}
+
+#[test]
+fn directory_entries_have_nonzero_inodes_matching_lookups() {
+    let (temp, fs) = setup();
+    let dir = fs
+        .mkdir(
+            &request(1),
+            name("dir"),
+            &fuse_mkdir_in {
+                mode: 0o777,
+                umask: 0,
+            },
+        )
+        .unwrap();
+    let file = create(&fs, dir.nodeid, "known");
+    release(&fs, file.entry.nodeid, file.open.fh);
+    std::fs::write(temp.path().join("share/dir/unknown"), b"").unwrap();
+    let mut entries = dirents(&list(&fs, dir.nodeid));
+    entries[2..].sort_by(|a, b| a.1.cmp(&b.1));
+    assert_eq!(
+        entries,
+        [
+            (dir.nodeid, ".".into()),
+            (1, "..".into()),
+            (file.entry.nodeid, "known".into()),
+            (UNKNOWN_INO, "unknown".into()),
+        ]
+    );
+    assert!(entries.iter().all(|(ino, _)| *ino != 0));
+    let root = dirents(&list(&fs, 1));
+    assert_eq!(root[..2], [(1, ".".into()), (1, "..".into())]);
+    assert!(root.contains(&(dir.nodeid, "dir".into())));
 }
 
 #[test]
@@ -514,7 +559,6 @@ fn forget_waits_for_handles_and_resources_are_bounded() {
 
 #[test]
 fn fuse_negotiates_page_requests_that_fit_the_virtqueue() {
-    use zerocopy::FromBytes;
     struct Reply(Vec<u8>);
     impl fuse::ReplySender for Reply {
         fn send(&mut self, bufs: &[io::IoSlice<'_>]) -> io::Result<()> {

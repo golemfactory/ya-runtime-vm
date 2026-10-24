@@ -1,7 +1,7 @@
 // Static Linux workload used by the native OpenVMM integration test.
 use std::fs;
 use std::io::{self, Write};
-use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+use std::os::unix::fs::{DirEntryExt, MetadataExt, PermissionsExt, symlink};
 use std::path::Path;
 
 fn files(role: &str) {
@@ -13,13 +13,19 @@ fn files(role: &str) {
         (0, 0, 0o777)
     );
     assert_eq!(fs::read(input).unwrap(), b"host data");
+    // glibc < 2.37 readdir() drops d_ino == 0; musl does not, so check it here.
+    let listed: Vec<_> = fs::read_dir(share)
+        .unwrap()
+        .map(|e| {
+            let e = e.unwrap();
+            assert_ne!(e.ino(), 0, "{:?} has d_ino 0", e.file_name());
+            e.file_name()
+        })
+        .collect();
+    assert!(listed.iter().any(|name| name == "input"), "{listed:?}");
     for name in ["outside-link", "outside-hardlink", "outside-directory"] {
         assert!(fs::symlink_metadata(share.join(name)).is_err());
-        assert!(
-            !fs::read_dir(share)
-                .unwrap()
-                .any(|e| e.unwrap().file_name() == name)
-        );
+        assert!(!listed.iter().any(|e| e == name));
     }
     assert!(symlink("/etc/passwd", share.join("guest-link")).is_err());
     assert!(fs::hard_link(share.join("input"), share.join("guest-hardlink")).is_err());
