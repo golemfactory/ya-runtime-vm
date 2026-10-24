@@ -61,7 +61,7 @@ pub trait ReplySender {
     ) -> io::Result<()> {
         tracing::trace!(unique, ?arg, len = data.len(), "reply");
 
-        let header = make_header(unique, size_of_val(&arg), 0);
+        let header = make_header(unique, size_of_val(&arg) + data.len(), 0);
         let header = header.as_bytes();
         let arg = arg.as_bytes();
         self.send(&[
@@ -201,4 +201,34 @@ impl DirEntryWriter for Vec<u8> {
 fn write_padding(writer: &mut impl Write, count: usize) {
     const PADDING: [u8; 8] = [0; 8];
     writer.write_all(&PADDING[..count]).unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zerocopy::FromBytes;
+
+    #[test]
+    fn argument_and_data_reply_header_covers_the_complete_frame() {
+        struct Reply(Vec<u8>);
+        impl ReplySender for Reply {
+            fn send(&mut self, buffers: &[io::IoSlice<'_>]) -> io::Result<()> {
+                for buffer in buffers {
+                    self.0.extend_from_slice(buffer);
+                }
+                Ok(())
+            }
+        }
+        let argument = fuse_ioctl_out::new_zeroed();
+        let argument_bytes = argument.as_bytes().to_vec();
+        let data = b"ioctl payload";
+        let mut reply = Reply(Vec::new());
+        reply.send_arg_data(73, argument, data).unwrap();
+        let head = size_of::<fuse_out_header>();
+        let header = fuse_out_header::read_from_bytes(&reply.0[..head]).unwrap();
+        assert_eq!(header.len as usize, reply.0.len());
+        assert_eq!((header.unique, header.error), (73, 0));
+        assert_eq!(&reply.0[head..head + argument_bytes.len()], argument_bytes);
+        assert_eq!(&reply.0[head + argument_bytes.len()..], data);
+    }
 }

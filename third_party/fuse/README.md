@@ -19,6 +19,10 @@ Local changes in `src/request.rs`:
 - Reject payload counts exceeding the remaining bytes before allocating.
 - Preserve the request header for an error reply when a payload is malformed.
 
+`src/reply.rs` also includes the data payload in the length of a reply carrying
+both an argument and data. A regression checks the complete serialized frame,
+including the reply header, argument and nonempty IOCTL data.
+
 Tests cover excessive WRITE, SETXATTR and IOCTL sizes, invalid frame lengths,
 oversized transport descriptors, string parsing and valid maximum writes. The
 upstream parser/session tests run with workspace tests. A real `/dev/fuse` mount
