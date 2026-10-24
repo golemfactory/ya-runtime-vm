@@ -20,6 +20,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: guest
+          cache-on-failure: true
       - run: mise run lint-workflows
       - run: mise run guest-lint
       - run: mise run guest-image
@@ -53,6 +54,8 @@ jobs:
         if: runner.os == 'Windows'
       - uses: jdx/mise-action@v4
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Configure musl C toolchain
         if: runner.os == 'Linux'
         run: mise run ci-setup-linux

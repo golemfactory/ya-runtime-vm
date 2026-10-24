@@ -169,6 +169,101 @@ fn simple_share_has_synthetic_permissions_and_preserves_host_permissions() {
 }
 
 #[test]
+fn names_can_be_reused_while_old_handles_remain_open() {
+    let (_temp, fs) = setup();
+    let old = create(&fs, 1, "file");
+    write(&fs, old.entry.nodeid, old.open.fh, b"old");
+    fs.unlink(&request(1), name("file")).unwrap();
+    let new = create(&fs, 1, "file");
+    write(&fs, new.entry.nodeid, new.open.fh, b"new");
+    assert_ne!(old.entry.nodeid, new.entry.nodeid);
+    assert_eq!(read(&fs, old.entry.nodeid, old.open.fh), b"old");
+    assert_eq!(read(&fs, new.entry.nodeid, new.open.fh), b"new");
+
+    let first = fs
+        .mkdir(
+            &request(1),
+            name("dir"),
+            &fuse_mkdir_in {
+                mode: 0o777,
+                umask: 0,
+            },
+        )
+        .unwrap();
+    fs.rmdir(&request(1), name("dir")).unwrap();
+    let second = fs
+        .mkdir(
+            &request(1),
+            name("dir"),
+            &fuse_mkdir_in {
+                mode: 0o777,
+                umask: 0,
+            },
+        )
+        .unwrap();
+    assert_ne!(first.nodeid, second.nodeid);
+    create(&fs, second.nodeid, "new");
+    assert!(contains(&list(&fs, second.nodeid), b"new"));
+}
+
+#[test]
+fn rename_replaces_an_open_destination_without_redirecting_its_handle() {
+    let (_temp, fs) = setup();
+    let source = create(&fs, 1, "source");
+    let target = create(&fs, 1, "target");
+    write(&fs, source.entry.nodeid, source.open.fh, b"source");
+    write(&fs, target.entry.nodeid, target.open.fh, b"target");
+    fs.rename(&request(1), name("source"), 1, name("target"), 0)
+        .unwrap();
+    assert_eq!(lookup(&fs, 1, "target").nodeid, source.entry.nodeid);
+    assert_eq!(read(&fs, source.entry.nodeid, source.open.fh), b"source");
+    assert_eq!(read(&fs, target.entry.nodeid, target.open.fh), b"target");
+    assert!(fs.lookup(&request(1), name("source")).is_err());
+}
+
+#[test]
+fn file_and_directory_timestamps_can_be_changed_without_changing_permissions() {
+    let (temp, fs) = setup();
+    let file = create(&fs, 1, "file");
+    let dir = fs
+        .mkdir(
+            &request(1),
+            name("dir"),
+            &fuse_mkdir_in {
+                mode: 0o777,
+                umask: 0,
+            },
+        )
+        .unwrap();
+    for (node, path) in [(file.entry.nodeid, "share/file"), (dir.nodeid, "share/dir")] {
+        let path = temp.path().join(path);
+        let before = std::fs::metadata(&path).unwrap().permissions();
+        let result = fs
+            .set_attr(
+                &request(node),
+                &fuse_setattr_in {
+                    valid: FATTR_MTIME,
+                    mtime: 1_000_000_000,
+                    ..FromZeros::new_zeroed()
+                },
+            )
+            .unwrap();
+        assert_eq!(result.attr.mtime, 1_000_000_000);
+        let after = std::fs::metadata(&path).unwrap();
+        assert_eq!(after.permissions(), before);
+        assert_eq!(
+            after
+                .modified()
+                .unwrap()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            1_000_000_000
+        );
+    }
+}
+
+#[test]
 fn guest_cannot_create_links_special_files_or_access_host_xattrs() {
     let (_temp, fs) = setup();
     let r = request(FUSE_ROOT_ID);

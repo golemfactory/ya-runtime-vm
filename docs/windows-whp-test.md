@@ -32,6 +32,10 @@ when no `YA_VM_MKFS` override is provided.
 
 ## Prepare the Windows host
 
+Use a local NTFS directory for the checkout and test files. The Windows export
+backend uses native POSIX disposition and rename operations so cached/open
+handles do not prevent unlink, name reuse or replacing an open destination.
+
 Use a Windows 11 x86_64 machine with hardware virtualization enabled in its
 firmware. A nested VM is not a substitute for this first physical-host check.
 Install mise, Git and the Visual Studio C++ build tools with an x64 MSVC compiler

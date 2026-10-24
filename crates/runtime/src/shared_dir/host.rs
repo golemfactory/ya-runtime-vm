@@ -1,6 +1,8 @@
 //! Host handle operations and portable name restrictions for directory exports.
 use super::Object;
-use cap_fs_ext::{DirExt, MetadataExt};
+#[cfg(target_os = "linux")]
+use cap_fs_ext::DirExt;
+use cap_fs_ext::MetadataExt;
 #[cfg(windows)]
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 #[cfg(windows)]
@@ -17,9 +19,67 @@ pub(crate) fn open_root(work_dir: &Path, name: &str) -> io::Result<File> {
     let name = component(name.as_bytes()).map_err(io::Error::other)?;
     // Only this trusted host-supplied work directory uses ambient authority.
     let parent = Dir::open_ambient_dir(work_dir, cap_std::ambient_authority())?;
-    let dir = parent.open_dir_nofollow(name)?;
-    check_metadata(&dir.dir_metadata()?).map_err(io::Error::other)?;
-    Ok(dir.into_std_file())
+    #[cfg(target_os = "linux")]
+    let file = parent.open_dir_nofollow(name)?.into_std_file();
+    #[cfg(windows)]
+    let file = {
+        use cap_std::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+        parent
+            .open_with(
+                name,
+                OpenOptions::new()
+                    .read(true)
+                    .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                    .follow(FollowSymlinks::No),
+            )?
+            .into_std()
+    };
+    let metadata = Metadata::from_file(&file)?;
+    check_metadata(&metadata).map_err(io::Error::other)?;
+    if !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotADirectory,
+            "share root must be a directory",
+        ));
+    }
+    Ok(file)
+}
+
+/// Open a short-lived directory capability from its pinned object, never its
+/// cached name. On Windows cap-std needs a no-delete-share handle while it
+/// performs operations that use the directory's current host path. Keep that
+/// lock for the whole operation, rather than preventing rename/rmdir for the
+/// lifetime of a cached FUSE inode.
+pub(super) fn lock_directory(file: &File) -> lx::Result<Dir> {
+    #[cfg(target_os = "linux")]
+    let file = file.try_clone()?;
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle};
+        use windows_sys::Win32::Foundation::{GENERIC_READ, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, ReOpenFile,
+        };
+        // SAFETY: the input is a live pinned directory handle. ReOpenFile
+        // operates on that same object even if the host has renamed it.
+        let handle = unsafe {
+            ReOpenFile(
+                file.as_raw_handle(),
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error().into());
+        }
+        // SAFETY: ReOpenFile returned a new owned handle.
+        unsafe { File::from_raw_handle(handle) }
+    };
+    check_metadata(&Metadata::from_file(&file)?)?;
+    Ok(Dir::from_std_file(file))
 }
 
 // Reject path syntax on both hosts, including Windows alternate streams and DOS aliases.
@@ -113,12 +173,15 @@ pub(super) fn pin(parent: &Dir, name: &OsStr) -> lx::Result<Object> {
     };
     #[cfg(windows)]
     let file = {
-        use cap_fs_ext::OpenOptionsMaybeDirExt;
+        use cap_std::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
         let mut options = OpenOptions::new();
         options
             .read(true)
             .write(true)
-            .maybe_dir(true)
+            // Unlike maybe_dir(), this preserves FILE_SHARE_DELETE on the
+            // persistent pin. lock_directory adds the per-operation lock.
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
             .follow(FollowSymlinks::No);
         // Directories and host read-only files need only a read handle.
         parent
@@ -132,7 +195,7 @@ pub(super) fn pin(parent: &Dir, name: &OsStr) -> lx::Result<Object> {
     let metadata = Metadata::from_file(&file)?;
     check_metadata(&metadata)?;
     Ok(if metadata.is_dir() {
-        Object::Directory(Arc::new(Dir::from_std_file(file)))
+        Object::Directory(Arc::new(file))
     } else {
         Object::File(Arc::new(file))
     })
@@ -155,6 +218,155 @@ pub(super) fn reopen(file: &File, read: bool, write: bool) -> lx::Result<File> {
         Ok(file.reopen(OpenOptions::new().read(read).write(write))?)
     }
 }
+
+pub(super) fn reopen_for_times(file: &File) -> lx::Result<File> {
+    #[cfg(target_os = "linux")]
+    {
+        reopen(file, true, false)
+    }
+    #[cfg(windows)]
+    {
+        use cap_fs_ext::Reopen;
+        use cap_std::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_WRITE_ATTRIBUTES,
+        };
+        check_metadata(&Metadata::from_file(file)?)?;
+        Ok(file.reopen(
+            OpenOptions::new()
+                .access_mode(FILE_WRITE_ATTRIBUTES)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT),
+        )?)
+    }
+}
+
+pub(super) fn remove_entry(parent: &Dir, name: &OsStr, directory: bool) -> lx::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        if directory {
+            parent.remove_dir(name)?;
+        } else {
+            parent.remove_file_or_symlink(name)?;
+        }
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Wdk::Storage::FileSystem::{
+            FILE_DISPOSITION_DELETE, FILE_DISPOSITION_INFORMATION_EX,
+            FILE_DISPOSITION_POSIX_SEMANTICS, FileDispositionInformationEx,
+        };
+        let file = open_for_namespace_change(parent, name)?;
+        let metadata = Metadata::from_file(&file)?;
+        if metadata.is_dir() != directory {
+            return Err(if directory {
+                lx::Error::ENOTDIR
+            } else {
+                lx::Error::EISDIR
+            });
+        }
+        let disposition = FILE_DISPOSITION_INFORMATION_EX {
+            Flags: FILE_DISPOSITION_DELETE | FILE_DISPOSITION_POSIX_SEMANTICS,
+        };
+        // Unlink the name now while cached/open handles retain their object.
+        // Legacy RemoveDirectoryW would leave the name delete-pending until
+        // the final cached inode handle closes, preventing immediate reuse.
+        set_information(
+            &file,
+            &disposition as *const _ as *const _,
+            size_of_val(&disposition) as u32,
+            FileDispositionInformationEx,
+        )
+    }
+}
+
+pub(super) fn rename_entry(
+    parent: &Dir,
+    name: &OsStr,
+    target: &Dir,
+    new_name: &OsStr,
+) -> lx::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        parent.rename(name, target, new_name)?;
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::{ffi::OsStrExt, io::AsRawHandle};
+        use windows_sys::Wdk::Storage::FileSystem::{
+            FILE_RENAME_INFORMATION, FILE_RENAME_POSIX_SEMANTICS, FILE_RENAME_REPLACE_IF_EXISTS,
+            FileRenameInformationEx,
+        };
+        let file = open_for_namespace_change(parent, name)?;
+        let name = new_name.encode_wide().collect::<Vec<_>>();
+        let size = (core::mem::offset_of!(FILE_RENAME_INFORMATION, FileName) + name.len() * 2)
+            .max(size_of::<FILE_RENAME_INFORMATION>());
+        // usize storage gives the variable-length NT record proper alignment.
+        let mut storage = vec![0usize; size.div_ceil(size_of::<usize>())];
+        let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
+        // SAFETY: the allocation is aligned for this record and has enough
+        // initialized space for the header and the entire UTF-16 name. Both
+        // directory capabilities remain locked during this relative rename.
+        unsafe {
+            core::ptr::addr_of_mut!((*info).Anonymous.Flags)
+                .write(FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS);
+            core::ptr::addr_of_mut!((*info).RootDirectory).write(target.as_raw_handle());
+            core::ptr::addr_of_mut!((*info).FileNameLength).write((name.len() * 2) as u32);
+            core::ptr::copy_nonoverlapping(
+                name.as_ptr(),
+                core::ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
+                name.len(),
+            );
+        }
+        set_information(&file, info.cast(), size as u32, FileRenameInformationEx)
+    }
+}
+
+#[cfg(windows)]
+fn open_for_namespace_change(parent: &Dir, name: &OsStr) -> lx::Result<File> {
+    use cap_std::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_READ,
+    };
+    let file = parent
+        .open_with(
+            name,
+            OpenOptions::new()
+                .access_mode(DELETE | FILE_GENERIC_READ)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .follow(FollowSymlinks::No),
+        )?
+        .into_std();
+    check_metadata(&Metadata::from_file(&file)?)?;
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn set_information(
+    file: &File,
+    info: *const core::ffi::c_void,
+    size: u32,
+    class: windows_sys::Wdk::Storage::FileSystem::FILE_INFORMATION_CLASS,
+) -> lx::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Wdk::Storage::FileSystem::NtSetInformationFile;
+    use windows_sys::Win32::{Foundation::RtlNtStatusToDosError, System::IO::IO_STATUS_BLOCK};
+    let mut iosb = std::mem::MaybeUninit::<IO_STATUS_BLOCK>::uninit();
+    // SAFETY: all callers supply a correctly sized, initialized NT record;
+    // file is a synchronous handle, so the kernel finishes using it and the
+    // output buffer before returning. We never read an uninitialized iosb.
+    let status =
+        unsafe { NtSetInformationFile(file.as_raw_handle(), iosb.as_mut_ptr(), info, size, class) };
+    if status < 0 {
+        // SAFETY: this pure status-code conversion has no pointer arguments.
+        return Err(
+            io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(status) } as i32).into(),
+        );
+    }
+    Ok(())
+}
+
 pub(super) fn filesystem_stats(root: &Dir) -> lx::Result<fuse_kstatfs> {
     #[cfg(target_os = "linux")]
     let (blocks, bfree, bavail, files, ffree, bsize) = {

@@ -10,7 +10,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
-use cap_fs_ext::{DirExt, FollowSymlinks, MetadataExt, OpenOptionsFollowExt};
+use cap_fs_ext::{FollowSymlinks, MetadataExt, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, Metadata, OpenOptions};
 use fuse::protocol::*;
 use fuse::{DirEntryWriter, Fuse, Request, SessionInfo};
@@ -22,7 +22,10 @@ use vm_resource::{ResolveResource, ResourceId, declare_static_resolver};
 
 mod host;
 pub(crate) use host::open_root;
-use host::{check_metadata, component, filesystem_stats, name_bytes, pin, reopen};
+use host::{
+    check_metadata, component, filesystem_stats, lock_directory, name_bytes, pin, remove_entry,
+    rename_entry, reopen, reopen_for_times,
+};
 
 const MAX_NODES: usize = 8192;
 const MAX_HANDLES: usize = 1024;
@@ -60,21 +63,21 @@ impl ResolveResource<VirtioDeviceHandle, SharedDirHandle> for SharedDirResolver 
 
 #[derive(Clone)]
 enum Object {
-    Directory(Arc<Dir>),
+    Directory(Arc<File>),
     File(Arc<File>),
 }
 impl Object {
     fn metadata(&self) -> lx::Result<Metadata> {
         let metadata = match self {
-            Self::Directory(dir) => dir.dir_metadata()?,
+            Self::Directory(dir) => Metadata::from_file(dir)?,
             Self::File(file) => Metadata::from_file(file)?,
         };
         check_metadata(&metadata)?;
         Ok(metadata)
     }
-    fn directory(&self) -> lx::Result<Arc<Dir>> {
+    fn directory(&self) -> lx::Result<Dir> {
         match self {
-            Self::Directory(dir) => Ok(dir.clone()),
+            Self::Directory(dir) => lock_directory(dir),
             _ => Err(lx::Error::ENOTDIR),
         }
     }
@@ -117,7 +120,7 @@ impl State {
             .map(|node| node.object.clone())
             .ok_or(lx::Error::ENOENT)
     }
-    fn directory(&self, id: u64) -> lx::Result<Arc<Dir>> {
+    fn directory(&self, id: u64) -> lx::Result<Dir> {
         self.object(id)?.directory()
     }
     fn handle_capacity(&self) -> lx::Result<()> {
@@ -193,7 +196,7 @@ impl SharedDir {
         state.nodes.insert(
             FUSE_ROOT_ID,
             Node {
-                object: Object::Directory(Arc::new(Dir::from_std_file(root))),
+                object: Object::Directory(Arc::new(root)),
                 lookups: 1,
                 location: None,
             },
@@ -289,7 +292,7 @@ impl Fuse for SharedDir {
         log::trace!("share lookup node={} name={:?}", request.node_id(), name);
         let name = component(name.as_bytes())?;
         let mut state = self.0.lock();
-        let object = pin(state.directory(request.node_id())?.as_ref(), &name)?;
+        let object = pin(&state.directory(request.node_id())?, &name)?;
         state.entry(request.node_id(), name, object)
     }
     fn forget(&self, node: u64, count: u64) {
@@ -357,8 +360,7 @@ impl Fuse for SharedDir {
             let times = FATTR_ATIME | FATTR_MTIME | FATTR_ATIME_NOW | FATTR_MTIME_NOW;
             if arg.valid & times != 0 {
                 let file = match state.object(request.node_id())? {
-                    Object::File(file) => reopen(&file, true, false)?,
-                    Object::Directory(dir) => dir.open(".")?.into_std(),
+                    Object::File(file) | Object::Directory(file) => reopen_for_times(&file)?,
                 };
                 let mut times = std::fs::FileTimes::new();
                 let time = |sec, nsec| {
@@ -564,16 +566,14 @@ impl Fuse for SharedDir {
     fn unlink(&self, request: &Request, name: &lx::LxStr) -> lx::Result<()> {
         let name = component(name.as_bytes())?;
         let mut state = self.0.lock();
-        state
-            .directory(request.node_id())?
-            .remove_file_or_symlink(&name)?;
+        remove_entry(&state.directory(request.node_id())?, &name, false)?;
         state.detach(&(request.node_id(), name));
         Ok(())
     }
     fn rmdir(&self, request: &Request, name: &lx::LxStr) -> lx::Result<()> {
         let name = component(name.as_bytes())?;
         let mut state = self.0.lock();
-        state.directory(request.node_id())?.remove_dir(&name)?;
+        remove_entry(&state.directory(request.node_id())?, &name, true)?;
         state.detach(&(request.node_id(), name));
         Ok(())
     }
@@ -599,7 +599,7 @@ impl Fuse for SharedDir {
         let parent = state.directory(from.0)?;
         // Validate the source too; rename itself never follows the final component.
         pin(&parent, &from.1)?;
-        parent.rename(&from.1, state.directory(to.0)?.as_ref(), &to.1)?;
+        rename_entry(&parent, &from.1, &state.directory(to.0)?, &to.1)?;
         state.detach(&to);
         if let Some(id) = state.detach(&from) {
             state.nodes.get_mut(&id).unwrap().location = Some(to.clone());
