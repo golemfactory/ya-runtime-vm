@@ -122,7 +122,7 @@ vfio_assigned_device_resources = { git = "https://github.com/microsoft/openvmm.g
 [target.'cfg(windows)'.dependencies]
 openvmm_crypto = { package = "crypto", git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad", features = ["native"] }
 openvmm_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad", features = ["virt_whp"] }
-windows-sys = { version = "0.61", features = ["Wdk_Storage_FileSystem", "Wdk_System_SystemServices", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl"] }
+windows-sys = { version = "0.61", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Wdk_System_SystemServices", "Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl"] }
 
 [lib]
 name = "ya_runtime_vm"

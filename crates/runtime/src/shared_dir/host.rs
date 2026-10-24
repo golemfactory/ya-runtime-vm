@@ -55,31 +55,83 @@ pub(super) fn lock_directory(file: &File) -> lx::Result<Dir> {
     #[cfg(target_os = "linux")]
     let file = file.try_clone()?;
     #[cfg(windows)]
-    let file = {
-        use std::os::windows::io::{AsRawHandle, FromRawHandle};
-        use windows_sys::Win32::Foundation::{GENERIC_READ, INVALID_HANDLE_VALUE};
-        use windows_sys::Win32::Storage::FileSystem::{
-            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
-            FILE_SHARE_WRITE, ReOpenFile,
-        };
-        // SAFETY: the input is a live pinned directory handle. ReOpenFile
-        // operates on that same object even if the host has renamed it.
-        let handle = unsafe {
-            ReOpenFile(
-                file.as_raw_handle(),
-                GENERIC_READ,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-            )
-        };
-        if handle == INVALID_HANDLE_VALUE {
-            return Err(io::Error::last_os_error().into());
-        }
-        // SAFETY: ReOpenFile returned a new owned handle.
-        unsafe { File::from_raw_handle(handle) }
-    };
+    let file = reopen_directory(
+        file,
+        windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ,
+        false,
+    )?;
     check_metadata(&Metadata::from_file(&file)?)?;
     Ok(Dir::from_std_file(file))
+}
+
+#[cfg(windows)]
+fn reopen_directory(file: &File, access: u32, share_delete: bool) -> io::Result<File> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use windows_sys::Wdk::{
+        Foundation::OBJECT_ATTRIBUTES,
+        Storage::FileSystem::{
+            FILE_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+            NtCreateFile,
+        },
+    };
+    use windows_sys::Win32::{
+        Foundation::{RtlNtStatusToDosError, UNICODE_STRING},
+        Storage::FileSystem::{FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE},
+        System::IO::IO_STATUS_BLOCK,
+    };
+    let empty = [0u16];
+    let name = UNICODE_STRING {
+        Length: 0,
+        MaximumLength: 2,
+        Buffer: empty.as_ptr().cast_mut(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: file.as_raw_handle(),
+        ObjectName: &name,
+        ..Default::default()
+    };
+    let mut handle = std::ptr::null_mut();
+    let mut iosb = std::mem::MaybeUninit::<IO_STATUS_BLOCK>::uninit();
+    // SAFETY: an empty name relative to the live pinned handle reopens that
+    // exact object. DIRECTORY_FILE prevents treating a regular file as a
+    // directory; REPARSE_POINT prevents traversal. All buffers live until this
+    // synchronous operation completes. ReOpenFile rejects directory handles.
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            access,
+            &attributes,
+            iosb.as_mut_ptr(),
+            std::ptr::null(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | if share_delete { FILE_SHARE_DELETE } else { 0 },
+            FILE_OPEN,
+            FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if status < 0 {
+        // SAFETY: scalar status conversion; no pointers are passed.
+        let error = io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(status) } as i32);
+        log::debug!("reopening pinned directory failed (NTSTATUS={status:#x}): {error}");
+        return Err(error);
+    }
+    // SAFETY: successful NtCreateFile returned a new owned handle.
+    Ok(unsafe { File::from_raw_handle(handle) })
+}
+
+pub(super) fn sync_directory(file: &File) -> lx::Result<()> {
+    #[cfg(target_os = "linux")]
+    let handle = reopen(file, true, false)?;
+    #[cfg(windows)]
+    let handle = {
+        use windows_sys::Win32::Storage::FileSystem::{FILE_GENERIC_READ, FILE_GENERIC_WRITE};
+        reopen_directory(file, FILE_GENERIC_READ | FILE_GENERIC_WRITE, true)?
+    };
+    handle.sync_all()?;
+    Ok(())
 }
 
 // Reject path syntax on both hosts, including Windows alternate streams and DOS aliases.
@@ -215,7 +267,11 @@ pub(super) fn reopen(file: &File, read: bool, write: bool) -> lx::Result<File> {
     #[cfg(windows)]
     {
         use cap_fs_ext::Reopen;
-        Ok(file.reopen(OpenOptions::new().read(read).write(write))?)
+        file.reopen(OpenOptions::new().read(read).write(write))
+            .map_err(|error| {
+                log::debug!("reopening file for read={read} write={write} failed: {error}");
+                error.into()
+            })
     }
 }
 
@@ -229,9 +285,17 @@ pub(super) fn reopen_for_times(file: &File) -> lx::Result<File> {
         use cap_fs_ext::Reopen;
         use cap_std::fs::OpenOptionsExt;
         use windows_sys::Win32::Storage::FileSystem::{
-            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_WRITE_ATTRIBUTES,
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
+            FILE_WRITE_ATTRIBUTES,
         };
         check_metadata(&Metadata::from_file(file)?)?;
+        if Metadata::from_file(file)?.is_dir() {
+            return Ok(reopen_directory(
+                file,
+                FILE_GENERIC_READ | FILE_WRITE_ATTRIBUTES,
+                true,
+            )?);
+        }
         Ok(file.reopen(
             OpenOptions::new()
                 .access_mode(FILE_WRITE_ATTRIBUTES)

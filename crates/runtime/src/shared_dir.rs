@@ -24,7 +24,7 @@ mod host;
 pub(crate) use host::open_root;
 use host::{
     check_metadata, component, filesystem_stats, lock_directory, name_bytes, pin, remove_entry,
-    rename_entry, reopen, reopen_for_times,
+    rename_entry, reopen, reopen_for_times, sync_directory,
 };
 
 const MAX_NODES: usize = 8192;
@@ -455,7 +455,10 @@ impl Fuse for SharedDir {
             {
                 pin(&parent, &name)?
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                log::debug!("creating shared file failed: {error}");
+                return Err(error.into());
+            }
         };
         let entry = state.entry(request.node_id(), name, object)?;
         match open_file(&mut state, entry.nodeid, arg.flags) {
@@ -685,12 +688,10 @@ impl Fuse for SharedDir {
             .get(&fh)
             .filter(|d| d.node == request.node_id())
             .ok_or(lx::Error::EBADF)?;
-        state
-            .directory(request.node_id())?
-            .open(".")?
-            .into_std()
-            .sync_all()?;
-        Ok(())
+        match state.object(request.node_id())? {
+            Object::Directory(file) => sync_directory(&file),
+            Object::File(_) => Err(lx::Error::ENOTDIR),
+        }
     }
     fn release_dir(&self, request: &Request, arg: &fuse_release_in) -> lx::Result<()> {
         let mut state = self.0.lock();

@@ -18,6 +18,11 @@ fn name(s: &str) -> &lx::LxStr {
     lx::LxStr::from_bytes(s.as_bytes())
 }
 fn setup() -> (tempdir::TempDir, SharedDir) {
+    #[cfg(windows)]
+    let _ = env_logger::Builder::new()
+        .is_test(true)
+        .filter_level(log::LevelFilter::Trace)
+        .try_init();
     let temp = tempdir::TempDir::new("shared-dir-test").unwrap();
     std::fs::create_dir(temp.path().join("share")).unwrap();
     let fs = SharedDir::new(open_root(temp.path(), "share").unwrap()).unwrap();
@@ -156,6 +161,16 @@ fn simple_share_has_synthetic_permissions_and_preserves_host_permissions() {
         .unwrap();
     assert_eq!(lookup(&fs, dir.nodeid, "renamed").nodeid, id);
     assert!(contains(&list(&fs, dir.nodeid), b"renamed"));
+    let dh = fs.open_dir(&request(dir.nodeid), 0).unwrap().fh;
+    fs.fsync_dir(&request(dir.nodeid), dh, 0).unwrap();
+    fs.release_dir(
+        &request(dir.nodeid),
+        &fuse_release_in {
+            fh: dh,
+            ..FromZeros::new_zeroed()
+        },
+    )
+    .unwrap();
     assert_eq!(read(&fs, id, file.open.fh), b"he");
     fs.unlink(&request(dir.nodeid), name("renamed")).unwrap();
     // Open files survive unlink; the pinned object is still the same file.

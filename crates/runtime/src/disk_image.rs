@@ -10,10 +10,24 @@ pub async fn create_sparse_raw_image(
     let path = path.as_ref().to_owned();
     tokio::task::spawn_blocking(move || -> io::Result<()> {
         let file = std::fs::File::create(path)?;
-        #[cfg(windows)]
-        mark_sparse(&file)?;
-        file.set_len(size)?;
         let preallocate = preallocate.min(size);
+        #[cfg(windows)]
+        {
+            // Reserve the prefix while the file is non-sparse, then expose
+            // the full virtual size as holes. Writing zeroes into a sparse
+            // file is not a reliable allocation primitive on Windows.
+            if preallocate != 0 {
+                mark_sparse(&file, false)?;
+                file.set_len(preallocate)?;
+                // Initialize the prefix while non-sparse so conversion cannot
+                // discard uninitialized zero extents as holes.
+                write_zeroes(file.try_clone()?, preallocate)?;
+                file.sync_all()?;
+            }
+            mark_sparse(&file, true)?;
+        }
+        file.set_len(size)?;
+        #[cfg(unix)]
         if preallocate != 0 {
             reserve_range(file, preallocate)?;
         }
@@ -24,18 +38,22 @@ pub async fn create_sparse_raw_image(
 }
 
 #[cfg(windows)]
-fn mark_sparse(file: &std::fs::File) -> io::Result<()> {
+fn mark_sparse(file: &std::fs::File, sparse: bool) -> io::Result<()> {
     use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::System::{IO::DeviceIoControl, Ioctl::FSCTL_SET_SPARSE};
+    use windows_sys::Win32::System::{
+        IO::DeviceIoControl,
+        Ioctl::{FILE_SET_SPARSE_BUFFER, FSCTL_SET_SPARSE},
+    };
     let mut returned = 0;
-    // SAFETY: file is a synchronous writable handle. A null input buffer
-    // requests sparse=true; this control has no output buffer.
+    let input = FILE_SET_SPARSE_BUFFER { SetSparse: sparse };
+    // SAFETY: file is synchronous and writable; input is a correctly sized
+    // sparse-control buffer. This control has no output buffer.
     let result = unsafe {
         DeviceIoControl(
             file.as_raw_handle(),
             FSCTL_SET_SPARSE,
-            std::ptr::null(),
-            0,
+            &input as *const _ as *const _,
+            size_of_val(&input) as u32,
             std::ptr::null_mut(),
             0,
             &mut returned,
@@ -64,13 +82,6 @@ fn reserve_range(file: std::fs::File, len: u64) -> io::Result<()> {
     }
 
     write_zeroes(file, len as u64)
-}
-
-#[cfg(windows)]
-fn reserve_range(file: std::fs::File, len: u64) -> io::Result<()> {
-    // Only written clusters are allocated in a sparse NTFS file. Avoid
-    // allocating the entire logical disk or using privileged SetFileValidData.
-    write_zeroes(file, len)
 }
 
 fn write_zeroes(mut file: std::fs::File, len: u64) -> io::Result<()> {
