@@ -5,3 +5,9 @@
 /.idea/
 /.vscode/
 logs/
+
+/releases/
+.mise/
+mise.local.toml
+__pycache__/
+/build/

@@ -1,0 +1,99 @@
+[tools]
+rust = { version = "1.99.1", profile = "minimal", components = ["rustfmt", "clippy"], targets = ["x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl"] }
+protoc = "24.4"
+python = "3.12.13"
+cmake = "3.31.6"
+gh = "2.102.0"
+actionlint = "1.7.12"
+shellcheck = "0.11.0"
+
+[env]
+# Apply CRT flags only to the Windows target, not to host build scripts/macros.
+CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = "-C target-feature=+crt-static"
+
+[tasks.fmt]
+description = "Format Rust sources"
+run = ["cargo fmt --all", "rustfmt --edition 2024 crates/runtime/tests/fixtures/vm_probe.rs"]
+
+[tasks.fmt-check]
+description = "Check Rust formatting"
+run = ["cargo fmt --all -- --check", "rustfmt --edition 2024 --check crates/runtime/tests/fixtures/vm_probe.rs"]
+
+[tasks.lint]
+description = "Check all Rust targets with Clippy"
+run = [
+    "cargo clippy --locked --workspace --exclude ya-vm-guest-agent --all-targets --all-features --target x86_64-unknown-linux-musl -- -D warnings",
+    "cargo clippy --locked -p ya-vm-guest-agent --lib --tests --target x86_64-unknown-linux-musl -- -D warnings",
+]
+
+run_windows = [
+    "cargo clippy --locked --workspace --exclude ya-vm-guest-agent --all-targets --all-features --target x86_64-pc-windows-msvc -- -D warnings",
+    "cargo clippy --locked -p ya-vm-guest-agent --lib --tests --target x86_64-pc-windows-msvc -- -D warnings",
+]
+
+[tasks.test]
+description = "Run workspace tests"
+run = "cargo test --locked --workspace --target x86_64-unknown-linux-musl"
+run_windows = "cargo test --locked --workspace --target x86_64-pc-windows-msvc"
+
+[tasks.build]
+description = "Build native runtime"
+run = "cargo build --locked -p ya-runtime-vm --target x86_64-unknown-linux-musl"
+run_windows = "cargo build --locked -p ya-runtime-vm --target x86_64-pc-windows-msvc"
+
+[tasks.build-release]
+description = "Build native release runtime"
+run = "cargo build --locked --release -p ya-runtime-vm --target x86_64-unknown-linux-musl"
+run_windows = "cargo build --locked --release -p ya-runtime-vm --target x86_64-pc-windows-msvc"
+
+[tasks.guest-build]
+description = "Build the static Linux guest agent"
+run = "cargo rustc --locked --profile guest -p ya-vm-guest-agent --features freestanding --bin ya-vm-guest-agent --target x86_64-unknown-linux-musl -- -C relocation-model=static -C link-self-contained=no"
+run_windows = "python -c \"raise SystemExit('Build the Linux guest on a Linux host')\""
+
+[tasks.guest-lint]
+description = "Check the actual freestanding Linux agent"
+run = "cargo clippy --locked --profile guest -p ya-vm-guest-agent --features freestanding --bin ya-vm-guest-agent --target x86_64-unknown-linux-musl -- -D warnings"
+run_windows = "python -c \"raise SystemExit('Check the Linux guest on a Linux host')\""
+
+[tasks.guest-image]
+description = "Build the Linux kernel and Rust-agent initramfs"
+depends = ["guest-build"]
+run = "python scripts/build-guest-image.py"
+
+[tasks.fetch-self-test]
+description = "Fetch the pinned guest self-test image"
+run = "python scripts/fetch-self-test.py"
+
+[tasks.package]
+description = "Package the native runtime with its Linux guest assets"
+run = "python scripts/package-runtime.py"
+
+[tasks.package-deb]
+description = "Package the already-built Linux runtime as a Debian package"
+tools = { "cargo:cargo-deb" = { version = "2.5.1", default-features = false } }
+run = "cargo deb --manifest-path crates/runtime/Cargo.toml --target x86_64-unknown-linux-musl --no-build"
+
+[tasks.sync-version]
+run = "python scripts/sync-runtime-version.py"
+
+[tasks.ci]
+description = "Run the native workspace checks used by CI"
+run = [{ task = "fmt-check" }, { task = "lint" }, { task = "test" }, { task = "build-release" }]
+
+[tasks.vm-probe-build]
+description = "Build the static Linux workload for VM integration tests"
+run = "python scripts/test-vm.py --build-probe"
+
+[tasks.vm-test]
+description = "Run self-test, virtio-fs policy, process output and entrypoint checks in KVM/WHP"
+run = "python scripts/test-vm.py"
+
+[tasks.ci-setup-linux]
+description = "Install the musl C compiler on the Ubuntu CI runner"
+run = "command -v musl-gcc >/dev/null || (sudo apt-get update && sudo apt-get install -y musl-tools)"
+run_windows = "python -c \"raise SystemExit('This task is for Ubuntu Linux CI')\""
+
+[tasks.lint-workflows]
+description = "Check GitHub Actions definitions and their shell scripts"
+run = "actionlint"
