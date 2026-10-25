@@ -215,8 +215,8 @@ async fn commands(
         ensure!(collect(&mut events, pid).await?.2 == 0);
     }
     println!("RAPID_EXITS_OK");
-    // The public runtime API uses cyclic output by default. Force overflow and
-    // verify its retained tail as well as the lossless blocking-pipe checks.
+    // The public runtime API uses cyclic output by default. Like the C init, a
+    // full cyclic buffer applies backpressure; even a tiny one loses nothing.
     let cyclic = [
         None,
         Some(RedirectFdType::RedirectFdPipeCyclic(17)),
@@ -238,12 +238,12 @@ async fn commands(
         .map_err(|e| anyhow::anyhow!("cyclic exec: {e}"))?;
     let (out, err, status) = collect(&mut events, pid).await?;
     ensure!(
-        status == 37 && (17..262147).contains(&out.len()) && (17..196608).contains(&err.len()),
-        "cyclic output did not retain bounded tails: stdout={}, stderr={}",
+        status == 37 && out.len() == 262147 && err.len() == 196608,
+        "cyclic output was truncated: status={status}, stdout={}, stderr={}",
         out.len(),
         err.len()
     );
-    ensure!(out.ends_with(b"END") && out[..out.len() - 3].iter().all(|b| *b == b'A'));
+    ensure!(out[..262144].iter().all(|b| *b == b'A') && out.ends_with(b"END"));
     ensure!(err.iter().all(|b| *b == b'B'));
     println!(
         "CYCLIC_OUTPUT_OK: stdout={}, stderr={}",

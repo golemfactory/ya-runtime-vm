@@ -34,39 +34,32 @@ struct Output {
     registered: bool,
     data: VecDeque<u8>,
     capacity: usize,
-    cyclic: bool,
     notified: bool,
 }
 impl Output {
     fn new(redirect: &Option<Redirect>, pipe: Option<File>) -> Self {
-        let (capacity, cyclic) = match redirect {
-            Some(Redirect::Pipe { capacity, cyclic }) => {
-                ((*capacity).clamp(1, MAX_FRAME as u64) as usize, *cyclic)
+        // Cyclic pipes behave like blocking ones, as in the C init: a full
+        // buffer pauses the pipe until QueryOutput, so no output is dropped.
+        let capacity = match redirect {
+            Some(Redirect::Pipe { capacity, .. }) => {
+                (*capacity).clamp(1, MAX_FRAME as u64) as usize
             }
-            _ => (OUTPUT_CHUNK, true),
+            _ => OUTPUT_CHUNK,
         };
         Self {
             pipe,
             registered: false,
             data: VecDeque::new(),
             capacity,
-            cyclic,
             notified: false,
         }
     }
     fn readable(&self) -> bool {
-        self.pipe.is_some() && (self.cyclic || self.data.len() < self.capacity)
+        self.pipe.is_some() && self.data.len() < self.capacity
     }
     fn append(&mut self, bytes: &[u8]) {
-        debug_assert!(self.cyclic || self.data.len() + bytes.len() <= self.capacity);
-        if self.cyclic {
-            let bytes = &bytes[bytes.len().saturating_sub(self.capacity)..];
-            let remove = (self.data.len() + bytes.len()).saturating_sub(self.capacity);
-            self.data.drain(..remove);
-            self.data.extend(bytes);
-        } else {
-            self.data.extend(bytes);
-        }
+        debug_assert!(self.data.len() + bytes.len() <= self.capacity);
+        self.data.extend(bytes);
     }
 }
 
@@ -352,11 +345,7 @@ impl Reactor {
             if !output.readable() {
                 break;
             }
-            let amount = if output.cyclic {
-                chunk.len()
-            } else {
-                chunk.len().min(output.capacity - output.data.len())
-            };
+            let amount = chunk.len().min(output.capacity - output.data.len());
             match output.pipe.as_mut().unwrap().read(&mut chunk[..amount]) {
                 Ok(0) => {
                     if output.registered {
@@ -512,84 +501,72 @@ mod tests {
     use std::os::unix::net::UnixStream;
 
     #[test]
-    fn cyclic_output_keeps_the_tail_with_bounded_memory() {
-        let mut output = Output::new(
-            &Some(Redirect::Pipe {
-                capacity: 3,
-                cyclic: true,
-            }),
-            None,
-        );
-        output.append(b"ab");
-        output.append(b"cdefgh");
-        assert_eq!(output.data.iter().copied().collect::<Vec<_>>(), b"fgh");
-        output.append(b"ij");
-        assert_eq!(output.data.iter().copied().collect::<Vec<_>>(), b"hij");
-    }
-    #[test]
     fn full_closed_pipe_is_paused_then_resumed_after_output_query() {
-        let (stream, _peer) = UnixStream::pair().unwrap();
-        let mut reactor = Reactor::new(OwnedFd::from(stream).into(), Vec::new()).unwrap();
-        let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).unwrap();
-        let read = File::from(read);
-        transport::nonblocking(&read).unwrap();
-        let mut write = File::from(write);
-        write.write_all(b"abcdef").unwrap();
-        drop(write);
-        reactor.processes.insert(
-            1,
-            Process {
-                pid: None,
-                exit: None,
-                notified_exit: false,
-                acknowledged_exit: false,
-                entrypoint: false,
-                output: [
-                    Output::new(
-                        &Some(Redirect::Pipe {
-                            capacity: 3,
-                            cyclic: false,
-                        }),
-                        Some(read),
-                    ),
-                    Output::new(&None, None),
-                ],
-            },
-        );
-        reactor.output_interest(1, 0).unwrap();
-        reactor.read_output(1, 0).unwrap();
-        assert!(!reactor.processes[&1].output[0].registered);
-        let mut events = [epoll::Event {
-            flags: EventFlags::empty(),
-            data: EventData::new_u64(0),
-        }; 4];
-        let timeout = rustix::event::Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        assert_eq!(
-            epoll::wait(&reactor.poll, &mut events[..], Some(&timeout)).unwrap(),
-            0,
-            "EPOLLHUP must not spin while the buffer is full"
-        );
-        let query = || Command::QueryOutput {
-            id: 1,
-            fd: 1,
-            offset: 0,
-            len: u64::MAX,
-        };
-        assert_eq!(
-            reactor.handle(query()).unwrap(),
-            Value::Bytes(b"abc".to_vec())
-        );
-        assert!(reactor.processes[&1].output[0].registered);
-        reactor.read_output(1, 0).unwrap();
-        assert_eq!(
-            reactor.handle(query()).unwrap(),
-            Value::Bytes(b"def".to_vec())
-        );
-        reactor.read_output(1, 0).unwrap();
-        assert!(reactor.processes[&1].output[0].pipe.is_none());
+        // Cyclic pipes must not drop the oldest bytes; both kinds pause.
+        for cyclic in [false, true] {
+            let (stream, _peer) = UnixStream::pair().unwrap();
+            let mut reactor = Reactor::new(OwnedFd::from(stream).into(), Vec::new()).unwrap();
+            let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).unwrap();
+            let read = File::from(read);
+            transport::nonblocking(&read).unwrap();
+            let mut write = File::from(write);
+            write.write_all(b"abcdef").unwrap();
+            drop(write);
+            reactor.processes.insert(
+                1,
+                Process {
+                    pid: None,
+                    exit: None,
+                    notified_exit: false,
+                    acknowledged_exit: false,
+                    entrypoint: false,
+                    output: [
+                        Output::new(
+                            &Some(Redirect::Pipe {
+                                capacity: 3,
+                                cyclic,
+                            }),
+                            Some(read),
+                        ),
+                        Output::new(&None, None),
+                    ],
+                },
+            );
+            reactor.output_interest(1, 0).unwrap();
+            reactor.read_output(1, 0).unwrap();
+            assert!(!reactor.processes[&1].output[0].registered);
+            let mut events = [epoll::Event {
+                flags: EventFlags::empty(),
+                data: EventData::new_u64(0),
+            }; 4];
+            let timeout = rustix::event::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            assert_eq!(
+                epoll::wait(&reactor.poll, &mut events[..], Some(&timeout)).unwrap(),
+                0,
+                "EPOLLHUP must not spin while the buffer is full"
+            );
+            let query = || Command::QueryOutput {
+                id: 1,
+                fd: 1,
+                offset: 0,
+                len: u64::MAX,
+            };
+            assert_eq!(
+                reactor.handle(query()).unwrap(),
+                Value::Bytes(b"abc".to_vec())
+            );
+            assert!(reactor.processes[&1].output[0].registered);
+            reactor.read_output(1, 0).unwrap();
+            assert_eq!(
+                reactor.handle(query()).unwrap(),
+                Value::Bytes(b"def".to_vec())
+            );
+            reactor.read_output(1, 0).unwrap();
+            assert!(reactor.processes[&1].output[0].pipe.is_none());
+        }
     }
 }
 
