@@ -148,17 +148,7 @@ impl ya_runtime_sdk::Runtime for Runtime {
 
         let cmd_args = ctx.cli.command.args();
         log::debug!("Start command parameters: {cmd_args:?}");
-
-        let entrypoint = if cmd_args.iter().any(|arg| *arg == "start-entrypoint") {
-            match extract_entrypoint(&deployment.config) {
-                None => return async {
-                            Err(Error::from_string("'start_entrypoint' flag is set but the container does not define an entrypoint!"))
-                        }.boxed_local(),
-                entrypoint => entrypoint,
-            }
-        } else {
-            None
-        };
+        let start_entrypoint = cmd_args.iter().any(|arg| *arg == "start-entrypoint");
 
         let data = self.data.clone();
         async move {
@@ -181,12 +171,7 @@ impl ya_runtime_sdk::Runtime for Runtime {
                 data.deployment.replace(deployment);
             }
 
-            let start_response = start(workdir, data.clone(), emitter).await?;
-
-            Ok(match entrypoint {
-                Some(entrypoint) => Some(run_entrypoint(start_response, entrypoint, data).await?),
-                None => start_response,
-            })
+            start_runtime(workdir, data, emitter, start_entrypoint).await
         }
         .boxed_local()
     }
@@ -337,9 +322,49 @@ pub(crate) async fn start(
     start_vmrt(work_dir, runtime_data, emitter).await
 }
 
-pub(crate) async fn run_command(
+/// Starts the VM for a deployment already in `runtime_data`. With
+/// `start_entrypoint` (`start --start-entrypoint`), also runs the image
+/// entrypoint. Its whole output and exit status reach the client before the
+/// guest powers off; later commands then fail and `stop()` succeeds.
+pub async fn start_runtime(
+    work_dir: PathBuf,
+    runtime_data: Arc<Mutex<RuntimeData>>,
+    emitter: EventEmitter,
+    start_entrypoint: bool,
+) -> Result<Option<serialize::json::Value>, Error> {
+    let entrypoint = if start_entrypoint {
+        let data = runtime_data.lock().await;
+        let deployment = data.deployment()?;
+        Some(extract_entrypoint(&deployment.config).ok_or_else(|| {
+            Error::from_string(
+                "'start_entrypoint' flag is set but the container does not define an entrypoint!",
+            )
+        })?)
+    } else {
+        None
+    };
+
+    let start_response = start(work_dir, runtime_data.clone(), emitter).await?;
+
+    Ok(match entrypoint {
+        Some(entrypoint) => Some(run_entrypoint(start_response, entrypoint, runtime_data).await?),
+        None => start_response,
+    })
+}
+
+/// Runs a process in the guest, as the runtime API's `RunProcess` does.
+pub async fn run_command(
     runtime_data: Arc<Mutex<RuntimeData>>,
     run: server::RunProcess,
+) -> Result<ProcessId, server::ErrorResponse> {
+    run_process(runtime_data, run, false).await
+}
+
+/// `entrypoint` marks the process whose acknowledged exit powers the guest off.
+async fn run_process(
+    runtime_data: Arc<Mutex<RuntimeData>>,
+    run: server::RunProcess,
+    entrypoint: bool,
 ) -> Result<ProcessId, server::ErrorResponse> {
     let data = runtime_data.lock().await;
     let deployment = data.deployment().map_err(runtime_error)?;
@@ -358,32 +383,26 @@ pub(crate) async fn run_command(
     log::debug!("got run process: {:?}", run);
     log::debug!("work dir: {:?}", deployment.config.working_dir);
 
-    let result = ga
-        .lock()
-        .await
-        .run_process(
-            &run.bin,
-            run.args
-                .iter()
-                .map(|s| s.as_ref())
-                .collect::<Vec<&str>>()
-                .as_slice(),
-            Some(&env[..]),
-            uid,
-            gid,
-            &[
-                None,
-                Some(RedirectFdType::RedirectFdPipeCyclic(0x1000)),
-                Some(RedirectFdType::RedirectFdPipeCyclic(0x1000)),
-            ],
-            Some(cwd),
-        )
-        .await;
+    let argv = run.args.iter().map(|s| s.as_ref()).collect::<Vec<&str>>();
+    let fds = [
+        None,
+        Some(RedirectFdType::RedirectFdPipeCyclic(0x1000)),
+        Some(RedirectFdType::RedirectFdPipeCyclic(0x1000)),
+    ];
+    let mut ga = ga.lock().await;
+    let result = if entrypoint {
+        ga.run_entrypoint(&run.bin, &argv, Some(&env[..]), uid, gid, &fds, Some(cwd))
+            .await
+    } else {
+        ga.run_process(&run.bin, &argv, Some(&env[..]), uid, gid, &fds, Some(cwd))
+            .await
+    };
 
     convert_result(result, "Running process")
 }
 
-async fn kill_command(
+/// Kills a guest process, as the runtime API's `KillProcess` does.
+pub async fn kill_command(
     runtime_data: Arc<Mutex<RuntimeData>>,
     kill: server::KillProcess,
 ) -> Result<(), server::ErrorResponse> {
@@ -601,13 +620,14 @@ async fn run_entrypoint(
         .to_string();
     let bin = std::mem::replace(&mut args[0], bin_name);
 
-    run_command(
+    run_process(
         data,
         server::RunProcess {
             bin,
             args,
             ..Default::default()
         },
+        true,
     )
     .await
     .map(|pid| {

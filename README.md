@@ -51,9 +51,16 @@ independently; `signalfd` delivers SIGCHLD so the agent can reap children,
 including orphaned processes.
 
 Process exit notifications follow EOF and drained buffers on both stdout and
-stderr. The host acknowledges an exit after queueing the output and terminal
-status for the client. An entrypoint exit waits for this acknowledgement before
-shutting down the VM.
+stderr. Before reporting the exit, the host drains both streams once more, then
+queues the terminal status for the client and acknowledges the exit. The SDK
+delivers queued statuses in order. With `start --start-entrypoint`, the image
+entrypoint runs as the guest's entrypoint process: once its exit is
+acknowledged, after all of its output and its exit code have been queued, the
+guest powers off. The runtime records the halt. `stop()` then succeeds without
+contacting the guest, and later run, kill and network commands return an error
+naming the halt. The runtime API offers runtime state events, but the current
+exe-unit ignores them, so the end is reported only through the entrypoint's
+exit status.
 
 The Rust implementation still uses external system components: a Linux kernel
 and modules, plus a static BusyBox `mkfs.ext2` utility in the guest image. Build
@@ -318,8 +325,13 @@ This builds a static Linux test workload and the native test harness. It runs
 the runtime's standard self-test, then boots three VMs to check virtio-fs
 reads/writes as root and UID 1000, link rejection, host permissions, rename,
 truncate, process kill, rapid exits, exit while a background child holds the
-output pipes, cyclic output backpressure, and complete
-stdout/stderr before both normal and entrypoint termination. Explicit RAM/storage
+output pipes, cyclic output backpressure, and complete stdout/stderr before
+termination. Each VM starts like `start --start-entrypoint`, with the probe as
+the image entrypoint. When signalled, it writes 2.4 MB of numbered stdout lines
+(about 600 times the 4 KiB cyclic buffer) and 150 KB of stderr, then exits with
+42. Every byte must arrive in order with the exit code before the guest powers
+off. After that, `stop()` must succeed, and run, kill and network commands must
+fail, all within finite timeouts. Explicit RAM/storage
 mounts under `/tmp` and `/dev/shm` must remain visible, with the configured `/tmp`
 size limit enforced. Network cases cover both interfaces over UDP,
 INET-only over TCP connect, and VPN-only over TCP listen. A local Ethernet peer

@@ -229,6 +229,38 @@ fn main() {
             println!("BACKGROUND_STARTED");
         }
         Some("exit") => (),
+        // Started with the VM as its entrypoint; vm_smoke checks every byte.
+        Some("entrypoint") => {
+            let signal = Path::new("/tmp/entrypoint-go");
+            for _ in 0..1200 {
+                if signal.exists() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            assert!(signal.exists(), "entrypoint was not signalled");
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            for line in 0..200_000 {
+                out.extend(format!("OUT {line:07}\n").bytes());
+                if line % 16 == 0 {
+                    err.extend(format!("ERR {line:07}\n").bytes());
+                }
+            }
+            // Interleave both streams in pipe-sized writes.
+            let mut stderr = err.chunks(4096);
+            for chunk in out.chunks(65536) {
+                io::stdout().write_all(chunk).unwrap();
+                if let Some(chunk) = stderr.next() {
+                    io::stderr().write_all(chunk).unwrap();
+                }
+            }
+            for chunk in stderr {
+                io::stderr().write_all(chunk).unwrap();
+            }
+            io::stdout().flush().unwrap();
+            std::process::exit(42);
+        }
+        Some("signal-entrypoint") => fs::write("/tmp/entrypoint-go", b"go").unwrap(),
         Some("cwd") => println!("{}", std::env::current_dir().unwrap().display()),
         _ => panic!("unknown probe mode"),
     }

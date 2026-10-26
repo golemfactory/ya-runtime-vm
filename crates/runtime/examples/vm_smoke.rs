@@ -1,5 +1,10 @@
 //! Run via `mise run vm-test` on a host with KVM or WHP enabled.
-use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, VecDeque},
+    path::Path,
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{Context, ensure};
 use futures::{FutureExt, future::BoxFuture, lock::Mutex};
@@ -10,10 +15,7 @@ use ya_runtime_sdk::{
     runtime_api::server::{self, RuntimeHandler},
 };
 use ya_runtime_vm::{
-    deploy::Deployment,
-    guest_agent_comm::RedirectFdType,
-    network_mtu,
-    vmrt::{self, RuntimeData},
+    deploy::Deployment, guest_agent_comm::RedirectFdType, network_mtu, vmrt::RuntimeData,
 };
 
 #[path = "vm_smoke/network.rs"]
@@ -30,32 +32,74 @@ impl RuntimeHandler for Events {
     }
 }
 
-async fn collect(
-    receiver: &mut mpsc::UnboundedReceiver<server::ProcessStatus>,
-    pid: u64,
-) -> anyhow::Result<(Vec<u8>, Vec<u8>, i32)> {
-    let mut out = Vec::new();
-    let mut err = Vec::new();
-    loop {
-        let status = tokio::time::timeout(Duration::from_secs(10), receiver.recv())
-            .await?
-            .context("process event channel closed")?;
-        ensure!(status.pid == pid, "unexpected process ID {}", status.pid);
-        out.extend(status.stdout);
-        err.extend(status.stderr);
-        ensure!(
-            out.len() + err.len() <= 1024 * 1024,
-            "unexpectedly large process output"
-        );
-        if !status.running {
-            return Ok((out, err, status.return_code));
+/// Process statuses in arrival order; statuses of the entrypoint, which runs
+/// alongside other commands, are kept for it.
+struct Statuses {
+    receiver: mpsc::UnboundedReceiver<server::ProcessStatus>,
+    entrypoint: Option<u64>,
+    stashed: VecDeque<server::ProcessStatus>,
+}
+impl Statuses {
+    async fn collect(&mut self, pid: u64) -> anyhow::Result<(Vec<u8>, Vec<u8>, i32)> {
+        self.collect_up_to(pid, 1024 * 1024).await
+    }
+    async fn collect_up_to(
+        &mut self,
+        pid: u64,
+        limit: usize,
+    ) -> anyhow::Result<(Vec<u8>, Vec<u8>, i32)> {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let mut stashed = std::mem::take(&mut self.stashed);
+        loop {
+            let status = match stashed.pop_front() {
+                Some(status) if status.pid == pid => status,
+                Some(status) => {
+                    self.stashed.push_back(status);
+                    continue;
+                }
+                None => tokio::time::timeout(Duration::from_secs(10), self.receiver.recv())
+                    .await?
+                    .context("process event channel closed")?,
+            };
+            if status.pid != pid && Some(status.pid) == self.entrypoint {
+                self.stashed.push_back(status);
+                continue;
+            }
+            ensure!(status.pid == pid, "unexpected process ID {}", status.pid);
+            out.extend(status.stdout);
+            err.extend(status.stderr);
+            ensure!(
+                out.len() + err.len() <= limit,
+                "unexpectedly large process output"
+            );
+            if !status.running {
+                self.stashed.extend(stashed);
+                return Ok((out, err, status.return_code));
+            }
         }
     }
 }
 
+/// Output of the probe's `entrypoint` mode: numbered lines on both streams.
+fn entrypoint_output() -> (Vec<u8>, Vec<u8>) {
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    for line in 0..ENTRYPOINT_LINES {
+        out.extend(format!("OUT {line:07}\n").bytes());
+        if line % 16 == 0 {
+            err.extend(format!("ERR {line:07}\n").bytes());
+        }
+    }
+    (out, err)
+}
+// 2.4 MB of stdout: about 600 times the runtime API's 4 KiB cyclic buffer.
+const ENTRYPOINT_LINES: usize = 200_000;
+const ENTRYPOINT_EXIT: i32 = 42;
+
 async fn commands(
     data: Arc<Mutex<RuntimeData>>,
-    mut events: mpsc::UnboundedReceiver<server::ProcessStatus>,
+    mut events: Statuses,
     share: &Path,
     mode: &str,
 ) -> anyhow::Result<()> {
@@ -79,7 +123,7 @@ async fn commands(
         )
         .await?
         .map_err(|e| anyhow::anyhow!("volume probe exec: {e}"))?;
-    let (out, err, status) = collect(&mut events, pid).await?;
+    let (out, err, status) = events.collect(pid).await?;
     ensure!(
         status == 0 && out == b"VOLUMES_OK\n",
         "volume probe failed: {}",
@@ -157,7 +201,7 @@ async fn commands(
         )
         .await?
         .map_err(|e| anyhow::anyhow!("network probe exec: {e}"))?;
-    let (out, err, status) = collect(&mut events, pid).await?;
+    let (out, err, status) = events.collect(pid).await?;
     ensure!(
         status == 0,
         "network probe failed: {}",
@@ -186,7 +230,7 @@ async fn commands(
             )
             .await?
             .map_err(|errno| anyhow::anyhow!("guest exec failed: errno={errno}"))?;
-        let (out, err, status) = collect(&mut events, pid).await?;
+        let (out, err, status) = events.collect(pid).await?;
         ensure!(
             status == 0,
             "file probe failed: {}",
@@ -219,7 +263,7 @@ async fn commands(
         .await?
         .map_err(|e| anyhow::anyhow!("sleep exec: {e}"))?;
     ensure!(ga.lock().await.kill(pid).await?.is_ok());
-    ensure!(collect(&mut events, pid).await?.2 == 9);
+    ensure!(events.collect(pid).await?.2 == 9);
     println!("KILL_OK");
     for _ in 0..16 {
         let pid = ga
@@ -236,7 +280,7 @@ async fn commands(
             )
             .await?
             .map_err(|e| anyhow::anyhow!("rapid exec: {e}"))?;
-        ensure!(collect(&mut events, pid).await?.2 == 0);
+        ensure!(events.collect(pid).await?.2 == 0);
     }
     println!("RAPID_EXITS_OK");
     let pid = ga
@@ -253,7 +297,7 @@ async fn commands(
         )
         .await?
         .map_err(|e| anyhow::anyhow!("background exec: {e}"))?;
-    let (out, _, status) = collect(&mut events, pid).await?;
+    let (out, _, status) = events.collect(pid).await?;
     ensure!(status == 0 && out == b"BACKGROUND_STARTED\n");
     println!("BACKGROUND_EXIT_OK");
     // A relative working directory resolves inside the container root.
@@ -271,7 +315,7 @@ async fn commands(
         )
         .await?
         .map_err(|e| anyhow::anyhow!("relative cwd exec: {e}"))?;
-    let (out, err, status) = collect(&mut events, pid).await?;
+    let (out, err, status) = events.collect(pid).await?;
     ensure!(
         status == 0 && out == b"/mnt/out\n",
         "relative cwd: status={status}, stdout={:?}, stderr={:?}",
@@ -300,7 +344,7 @@ async fn commands(
         )
         .await?
         .map_err(|e| anyhow::anyhow!("cyclic exec: {e}"))?;
-    let (out, err, status) = collect(&mut events, pid).await?;
+    let (out, err, status) = events.collect(pid).await?;
     ensure!(
         status == 37 && out.len() == 262147 && err.len() == 196608,
         "cyclic output was truncated: status={status}, stdout={}, stderr={}",
@@ -314,43 +358,139 @@ async fn commands(
         out.len(),
         err.len()
     );
-    for entrypoint in [false, true] {
-        let args = ["probe", "burst"];
-        let pid = if entrypoint {
-            ga.lock()
-                .await
-                .run_entrypoint("/mnt/out/probe", &args, None, 0, 0, &redirects, Some("/"))
-                .await?
-        } else {
-            ga.lock()
-                .await
-                .run_process("/mnt/out/probe", &args, None, 0, 0, &redirects, Some("/"))
-                .await?
-        }
+    let pid = ga
+        .lock()
+        .await
+        .run_process(
+            "/mnt/out/probe",
+            &["probe", "burst"],
+            None,
+            0,
+            0,
+            &redirects,
+            Some("/"),
+        )
+        .await?
         .map_err(|e| anyhow::anyhow!("burst exec: {e}"))?;
-        let (out, err, status) = collect(&mut events, pid).await?;
-        ensure!(
-            status == 37 && out.len() == 262147 && err.len() == 196608,
-            "truncated output: status={status}, stdout={}, stderr={}",
-            out.len(),
-            err.len()
-        );
-        ensure!(out[..262144].iter().all(|b| *b == b'A') && out.ends_with(b"END"));
-        ensure!(err.iter().all(|b| *b == b'B'));
-        println!(
-            "OUTPUT_OK entrypoint={entrypoint}: stdout={}, stderr={}",
-            out.len(),
-            err.len()
-        );
-    }
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while data.lock().await.runtime.is_some() {
+    let (out, err, status) = events.collect(pid).await?;
+    ensure!(
+        status == 37 && out.len() == 262147 && err.len() == 196608,
+        "truncated output: status={status}, stdout={}, stderr={}",
+        out.len(),
+        err.len()
+    );
+    ensure!(out[..262144].iter().all(|b| *b == b'A') && out.ends_with(b"END"));
+    ensure!(err.iter().all(|b| *b == b'B'));
+    println!("OUTPUT_OK: stdout={}, stderr={}", out.len(), err.len());
+    drop(ga);
+    entrypoint_exit(data, events, mode).await
+}
+
+/// The entrypoint started with the VM (`start --start-entrypoint`) and waits
+/// for a signal. All its output and its exit code must arrive, then the guest
+/// powers off, and the runtime must keep answering without panics or hangs.
+async fn entrypoint_exit(
+    data: Arc<Mutex<RuntimeData>>,
+    mut events: Statuses,
+    mode: &str,
+) -> anyhow::Result<()> {
+    let entrypoint = events.entrypoint.context("missing entrypoint")?;
+    let signal = ya_runtime_vm::run_command(
+        data.clone(),
+        server::RunProcess {
+            bin: "/mnt/out/probe".into(),
+            args: vec!["probe".into(), "signal-entrypoint".into()],
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("signal exec: {e:?}"))?;
+    ensure!(
+        events.collect(signal).await?.2 == 0,
+        "entrypoint signal failed"
+    );
+    let (out, err, status) = events
+        .collect_up_to(entrypoint, 4 * 1024 * 1024)
+        .await
+        .context("collecting entrypoint output")?;
+    let (expected_out, expected_err) = entrypoint_output();
+    ensure!(
+        status == ENTRYPOINT_EXIT,
+        "entrypoint exit code {status}, expected {ENTRYPOINT_EXIT}"
+    );
+    ensure!(
+        out == expected_out && err == expected_err,
+        "entrypoint output differs: stdout {} of {} bytes, stderr {} of {} bytes",
+        out.len(),
+        expected_out.len(),
+        err.len(),
+        expected_err.len()
+    );
+    println!(
+        "ENTRYPOINT_OUTPUT_OK: stdout={}, stderr={}, exit={status}",
+        out.len(),
+        err.len()
+    );
+    let reason = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(reason) = data.lock().await.halted() {
+                break reason;
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
     .context("entrypoint VM did not halt after exit acknowledgement")?;
-    println!("ENTRYPOINT_SHUTDOWN_OK");
+    ensure!(reason == "PowerOff", "unexpected guest halt: {reason}");
+    let call = Duration::from_secs(10);
+    tokio::time::timeout(call, ya_runtime_vm::stop(data.clone()))
+        .await
+        .context("stop() hung after the guest halted")?
+        .map_err(|e| anyhow::anyhow!("stop() after the guest halted: {e:?}"))?;
+    let run = ya_runtime_vm::run_command(
+        data.clone(),
+        server::RunProcess {
+            bin: "/mnt/out/probe".into(),
+            args: vec!["probe".into(), "exit".into()],
+            ..Default::default()
+        },
+    );
+    ensure!(
+        tokio::time::timeout(call, run).await?.is_err(),
+        "run succeeded after the guest halted"
+    );
+    let kill = ya_runtime_vm::kill_command(
+        data.clone(),
+        server::KillProcess {
+            pid: entrypoint,
+            ..Default::default()
+        },
+    );
+    ensure!(
+        tokio::time::timeout(call, kill).await?.is_err(),
+        "kill succeeded after the guest halted"
+    );
+    let interface = if mode == "inet-only" {
+        server::NetworkInterface::Inet
+    } else {
+        server::NetworkInterface::Vpn
+    };
+    let join = ya_runtime_vm::join_network(
+        data.clone(),
+        server::CreateNetwork {
+            interface: interface as i32,
+            ..Default::default()
+        },
+    );
+    ensure!(
+        tokio::time::timeout(call, join).await?.is_err(),
+        "network update succeeded after the guest halted"
+    );
+    ensure!(
+        events.receiver.try_recv().is_err() && events.stashed.is_empty(),
+        "unexpected process events after the entrypoint exit"
+    );
+    println!("ENTRYPOINT_SHUTDOWN_OK: guest {reason}; stop and later commands returned");
     Ok(())
 }
 
@@ -442,6 +582,10 @@ async fn check(
         );
     }
     std::fs::hard_link(&secret, share.join("outside-hardlink"))?;
+    // Run the probe as the image entrypoint, as `start --start-entrypoint`.
+    let mut deployment = deployment;
+    deployment.config.entrypoint = Some(vec!["/mnt/out/probe".into()]);
+    deployment.config.cmd = Some(vec!["entrypoint".into()]);
     let data = Arc::new(Mutex::new(RuntimeData {
         deployment: Some(deployment),
         ..Default::default()
@@ -455,12 +599,23 @@ async fn check(
         }
     }
     let (tx, rx) = mpsc::unbounded_channel();
-    vmrt::start_vmrt(
+    let started = ya_runtime_vm::start_runtime(
         work.path().into(),
         data.clone(),
         EventEmitter::spawn(Events(tx)),
+        true,
     )
-    .await?;
+    .await
+    .map_err(|e| anyhow::anyhow!("start with entrypoint: {e:?}"))?
+    .context("missing start response")?;
+    let entrypoint = started["entrypoint"]["pid"]
+        .as_u64()
+        .context("start response has no entrypoint PID")?;
+    let events = Statuses {
+        receiver: rx,
+        entrypoint: Some(entrypoint),
+        stashed: VecDeque::new(),
+    };
     let result = tokio::time::timeout(Duration::from_secs(60), async {
         for (role, peer) in &mut peers {
             let exposed = {
@@ -474,7 +629,7 @@ async fn check(
             .context("missing exposed network endpoint")?;
             peer.attach(exposed).await?;
         }
-        commands(data.clone(), rx, &share, mode).await
+        commands(data.clone(), events, &share, mode).await
     })
     .await
     .context("VM integration test timed out")
