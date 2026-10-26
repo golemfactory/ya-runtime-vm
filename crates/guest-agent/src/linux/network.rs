@@ -123,6 +123,10 @@ fn prefix(mask: &str, ipv4: bool) -> Result<u8> {
     crate::ensure!(value == expected, "non-contiguous netmask");
     Ok(ones as u8)
 }
+// An empty mask means "unset", as NULL did in the C init.
+fn mask<'a>(suffix: Option<&'a str>, mask: Option<&'a str>) -> Option<&'a str> {
+    suffix.or(mask).filter(|m| !m.is_empty())
+}
 pub fn configure(config: Network) -> Result<()> {
     let name = match config.iface {
         0 => "eth0",
@@ -141,7 +145,7 @@ pub fn configure(config: Network) -> Result<()> {
             config.iface != 0 || addr.is_ipv4(),
             "IPv6 needs an MTU of at least 1280; the VPN interface uses {MTU_VPN}"
         );
-        let prefix = match suffix.or(config.mask.as_deref()).filter(|m| !m.is_empty()) {
+        let prefix = match mask(suffix, config.mask.as_deref()) {
             Some(mask) => prefix(mask, addr.is_ipv4())?,
             None => {
                 if addr.is_ipv4() {
@@ -201,9 +205,11 @@ pub fn configure(config: Network) -> Result<()> {
                 "route family mismatch"
             );
             message[1] = prefix(
-                suffix
-                    .or(config.mask.as_deref())
-                    .unwrap_or(if gateway.is_ipv4() { "32" } else { "128" }),
+                mask(suffix, config.mask.as_deref()).unwrap_or(if gateway.is_ipv4() {
+                    "32"
+                } else {
+                    "128"
+                }),
                 gateway.is_ipv4(),
             )?;
             attribute(
@@ -230,5 +236,12 @@ mod tests {
         assert!(prefix("255.0.255.0", true).is_err());
         assert_eq!(prefix("ffff:ffff:ffff:ffff::", false).unwrap(), 64);
         assert!(prefix("129", false).is_err());
+    }
+    #[test]
+    fn empty_masks_are_unset() {
+        assert_eq!(mask(None, Some("")), None);
+        assert_eq!(mask(Some(""), Some("24")), None);
+        assert_eq!(mask(None, Some("24")), Some("24"));
+        assert_eq!(mask(Some("16"), Some("24")), Some("16"));
     }
 }
