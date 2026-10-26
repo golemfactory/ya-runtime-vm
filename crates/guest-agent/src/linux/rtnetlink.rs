@@ -2,7 +2,7 @@
 //! Layouts and constants follow include/uapi/linux/{netlink,rtnetlink}.h.
 use crate::error::Result;
 use alloc::vec::Vec;
-use linux_raw_sys::netlink::{NLM_F_ACK, NLM_F_REQUEST, NLMSG_ERROR};
+use linux_raw_sys::netlink::{NLM_F_ACK, NLM_F_REQUEST, NLMSG_ERROR, RTM_GETLINK, RTM_NEWLINK};
 use rustix::net::{
     self, AddressFamily, RecvFlags, SendFlags, SocketFlags, SocketType, netlink::SocketAddrNetlink,
 };
@@ -18,7 +18,7 @@ fn packet(kind: u16, flags: u16, payload: &[u8]) -> Vec<u8> {
     let mut message = Vec::with_capacity(16 + payload.len());
     message.extend_from_slice(&((16 + payload.len()) as u32).to_ne_bytes());
     message.extend_from_slice(&kind.to_ne_bytes());
-    message.extend_from_slice(&(flags | (NLM_F_REQUEST | NLM_F_ACK) as u16).to_ne_bytes());
+    message.extend_from_slice(&(flags | NLM_F_REQUEST as u16).to_ne_bytes());
     message.extend_from_slice(&1u32.to_ne_bytes());
     message.extend_from_slice(&0u32.to_ne_bytes());
     message.extend_from_slice(payload);
@@ -48,7 +48,7 @@ fn acknowledgement(bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 use crate::error::Context;
-pub fn request(kind: u16, flags: u16, payload: &[u8]) -> Result<()> {
+fn exchange(message: &[u8], reply: &mut [u8]) -> Result<usize> {
     let fd = net::socket_with(
         AddressFamily::NETLINK,
         SocketType::RAW,
@@ -57,13 +57,61 @@ pub fn request(kind: u16, flags: u16, payload: &[u8]) -> Result<()> {
     )?;
     net::bind(&fd, &SocketAddrNetlink::new(0, 0))?;
     net::connect(&fd, &SocketAddrNetlink::new(0, 0))?;
-    let message = packet(kind, flags, payload);
-    let sent = net::send(&fd, &message, SendFlags::empty())?;
+    let sent = net::send(&fd, message, SendFlags::empty())?;
     crate::ensure!(sent == message.len(), "short netlink send");
-    let mut reply = [0; 8192];
-    let (length, total) = net::recv(&fd, &mut reply[..], RecvFlags::TRUNC)?;
+    let (length, total) = net::recv(&fd, reply, RecvFlags::TRUNC)?;
     crate::ensure!(length == total, "truncated netlink datagram");
+    Ok(length)
+}
+pub fn request(kind: u16, flags: u16, payload: &[u8]) -> Result<()> {
+    let mut reply = [0; 8192];
+    let length = exchange(&packet(kind, flags | NLM_F_ACK as u16, payload), &mut reply)?;
     acknowledgement(&reply[..length])
+}
+/// Reads a u32 attribute of one link with RTM_GETLINK.
+pub fn link_u32(index: u32, kind: u16) -> Result<Option<u32>> {
+    let mut payload = vec![0; 16];
+    payload[4..8].copy_from_slice(&index.to_ne_bytes());
+    let mut reply = vec![0; 16384];
+    let length = exchange(&packet(RTM_GETLINK as u16, 0, &payload), &mut reply)?;
+    link_attribute(&reply[..length], kind)
+}
+fn link_attribute(bytes: &[u8], kind: u16) -> Result<Option<u32>> {
+    crate::ensure!(bytes.len() >= 16, "truncated netlink reply");
+    let length = u32::from_ne_bytes(bytes[..4].try_into()?) as usize;
+    crate::ensure!(
+        length >= 16 && length <= bytes.len(),
+        "invalid netlink message length"
+    );
+    if u16::from_ne_bytes(bytes[4..6].try_into()?) == NLMSG_ERROR as u16 {
+        acknowledgement(bytes)?;
+        crate::bail!("missing netlink link reply");
+    }
+    crate::ensure!(
+        u16::from_ne_bytes(bytes[4..6].try_into()?) == RTM_NEWLINK as u16,
+        "unexpected netlink reply"
+    );
+    crate::ensure!(
+        u32::from_ne_bytes(bytes[8..12].try_into()?) == 1,
+        "netlink sequence mismatch"
+    );
+    // nlmsghdr (16 bytes) and ifinfomsg (16 bytes) precede the attributes.
+    let mut offset = 32;
+    while offset + 4 <= length {
+        let size = usize::from(u16::from_ne_bytes(bytes[offset..offset + 2].try_into()?));
+        crate::ensure!(
+            size >= 4 && offset + size <= length,
+            "invalid netlink attribute"
+        );
+        if u16::from_ne_bytes(bytes[offset + 2..offset + 4].try_into()?) == kind {
+            crate::ensure!(size == 8, "unexpected netlink attribute size");
+            return Ok(Some(u32::from_ne_bytes(
+                bytes[offset + 4..offset + 8].try_into()?,
+            )));
+        }
+        offset += size.next_multiple_of(4);
+    }
+    Ok(None)
 }
 #[cfg(test)]
 mod tests {
@@ -82,6 +130,20 @@ mod tests {
         ack[16..20].copy_from_slice(&(-1i32).to_ne_bytes());
         let error = acknowledgement(&ack).unwrap_err();
         assert_eq!(error.errno.as_ref(), Some(&rustix::io::Errno::PERM));
+    }
+    #[test]
+    fn link_attribute_is_found_after_the_link_header() {
+        let mut reply = vec![0; 32];
+        reply[4..6].copy_from_slice(&(RTM_NEWLINK as u16).to_ne_bytes());
+        reply[8..12].copy_from_slice(&1u32.to_ne_bytes());
+        attribute(&mut reply, 3, b"eth1\0");
+        attribute(&mut reply, 51, &65266u32.to_ne_bytes());
+        let length = reply.len() as u32;
+        reply[..4].copy_from_slice(&length.to_ne_bytes());
+        assert_eq!(link_attribute(&reply, 51).unwrap(), Some(65266));
+        assert_eq!(link_attribute(&reply, 4).unwrap(), None);
+        reply[32..34].copy_from_slice(&200u16.to_ne_bytes());
+        assert!(link_attribute(&reply, 51).is_err());
     }
     #[test]
     fn attributes_are_padded_but_report_the_unpadded_length() {

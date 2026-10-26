@@ -1,6 +1,6 @@
 use super::{
     io as fs,
-    rtnetlink::{attribute, request},
+    rtnetlink::{attribute, link_u32, request},
 };
 use crate::error::{Context, Result};
 use alloc::vec::Vec;
@@ -8,9 +8,10 @@ use core::net::IpAddr;
 use linux_raw_sys::netlink::{self as nl, NLM_F_CREATE, NLM_F_REPLACE};
 use ya_vm_agent_protocol::Network;
 const REPLACE: u16 = (NLM_F_CREATE | NLM_F_REPLACE) as u16;
-// Values from the C init. Its INET MTU of 65521 is not restored: OpenVMM
-// advertises VIRTIO_NET_F_MTU 1500, which is the guest's maximum MTU.
-const MTU_VPN: u32 = 1220;
+// ETH_MIN_MTU, which is also the IPv4 minimum (RFC 791).
+const MIN_MTU: u32 = 68;
+const MIN_MTU_IPV6: u32 = 1280;
+// Values from the C init.
 const NET_MEM_DEFAULT: &str = "1048576";
 const NET_MEM_MAX: &str = "2097152";
 fn index(name: &str) -> Result<u32> {
@@ -30,10 +31,35 @@ fn link(index: u32, flags: u32, change: u32) -> Vec<u8> {
 fn up(index: u32) -> Result<()> {
     request(nl::RTM_NEWLINK as u16, 0, &link(index, 1, 1))
 }
-fn mtu(index: u32, mtu: u32) -> Result<()> {
+fn set_mtu(name: &str, index: u32, mtu: u32) -> Result<()> {
+    crate::ensure!(
+        mtu >= MIN_MTU,
+        "MTU {mtu} for {name} is below the IPv4 minimum of {MIN_MTU}"
+    );
+    // The virtio device's advertised MTU is the interface's maximum.
+    if let Some(max) = link_u32(index, nl::IFLA_MAX_MTU as u16)?
+        && max != 0
+    {
+        crate::ensure!(
+            mtu <= max,
+            "MTU {mtu} for {name} exceeds the device maximum of {max}"
+        );
+    }
     let mut message = link(index, 0, 0);
     attribute(&mut message, nl::IFLA_MTU as u16, &mtu.to_ne_bytes());
     request(nl::RTM_NEWLINK as u16, 0, &message)
+        .with_context(|| format!("setting MTU {mtu} on {name}"))
+}
+// Linux disables IPv6 on links below its minimum MTU, so fail clearly instead.
+fn require_ipv6_mtu(name: &str) -> Result<()> {
+    let mtu: u32 = fs::read_to_string(format!("/sys/class/net/{name}/mtu"))?
+        .trim()
+        .parse()?;
+    crate::ensure!(
+        mtu >= MIN_MTU_IPV6,
+        "IPv6 needs an MTU of at least {MIN_MTU_IPV6}; {name} uses {mtu}"
+    );
+    Ok(())
 }
 fn sysctl(path: &str, value: &str) -> Result<()> {
     let file = rustix::fs::open(
@@ -82,11 +108,9 @@ pub fn loopback() -> Result<()> {
         rename(i, &format!("ya-net{role}"))?;
         interfaces.push((i, role));
     }
+    // The host sends each interface's MTU with its network configuration.
     for (i, role) in interfaces {
         rename(i, &format!("eth{role}"))?;
-        if role == 0 {
-            mtu(i, MTU_VPN)?;
-        }
     }
     for kind in ["rmem", "wmem"] {
         sysctl(
@@ -134,6 +158,9 @@ pub fn configure(config: Network) -> Result<()> {
         _ => crate::bail!("unknown guest network interface"),
     };
     let index = index(name).with_context(|| format!("looking up {name}"))?;
+    if let Some(mtu) = config.mtu {
+        set_mtu(name, index, mtu)?;
+    }
     up(index)?;
     if let Some(addr) = config.if_addr.filter(|s| !s.is_empty()) {
         let (addr, suffix) = addr
@@ -141,10 +168,9 @@ pub fn configure(config: Network) -> Result<()> {
             .map(|(a, p)| (a, Some(p)))
             .unwrap_or((&addr, None));
         let addr: IpAddr = addr.parse()?;
-        crate::ensure!(
-            config.iface != 0 || addr.is_ipv4(),
-            "IPv6 needs an MTU of at least 1280; the VPN interface uses {MTU_VPN}"
-        );
+        if addr.is_ipv6() {
+            require_ipv6_mtu(name)?;
+        }
         let prefix = match mask(suffix, config.mask.as_deref()) {
             Some(mask) => prefix(mask, addr.is_ipv4())?,
             None => {
@@ -166,10 +192,9 @@ pub fn configure(config: Network) -> Result<()> {
     }
     if let Some(gateway) = config.gateway.filter(|s| !s.is_empty()) {
         let gateway: IpAddr = gateway.parse()?;
-        crate::ensure!(
-            config.iface != 0 || gateway.is_ipv4(),
-            "IPv6 needs an MTU of at least 1280; the VPN interface uses {MTU_VPN}"
-        );
+        if gateway.is_ipv6() {
+            require_ipv6_mtu(name)?;
+        }
         let mut message = vec![
             family(gateway),
             0,

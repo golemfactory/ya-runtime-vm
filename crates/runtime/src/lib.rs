@@ -5,6 +5,7 @@ pub mod guest_agent_comm;
 mod host_platform;
 mod local_socket;
 mod net_socket;
+pub mod network_mtu;
 mod openvmm_adapter;
 mod self_test;
 mod shared_dir;
@@ -465,7 +466,9 @@ fn is_gpu_supported(self_test_result: &serde_json::Value) -> bool {
         .is_some()
 }
 
-async fn join_network(
+/// Configures guest addresses and routes for a runtime-API network, with the
+/// interface MTU from [`network_mtu::guest_mtu`].
+pub async fn join_network(
     runtime_data: Arc<Mutex<RuntimeData>>,
     join: server::CreateNetwork,
 ) -> Result<ContainerEndpoint, server::ErrorResponse> {
@@ -493,6 +496,7 @@ async fn join_network(
     let mut ga = mutex.lock().await;
     convert_result(ga.add_hosts(hosts.iter()).await, "Updating network hosts")?;
 
+    let mtu = Some(u32::from(network_mtu::guest_mtu(iface)));
     for net in networks {
         let (net_addr, net_mask) = match iface {
             server::NetworkInterface::Vpn => (net.addr, net.mask.clone()),
@@ -500,11 +504,12 @@ async fn join_network(
         };
 
         convert_result(
-            ga.add_address(&net.if_addr, &net.mask, iface as u16).await,
+            ga.add_address(&net.if_addr, &net.mask, iface as u16, mtu)
+                .await,
             &format!("Adding interface address {} {}", net.if_addr, net.gateway),
         )?;
         convert_result(
-            ga.create_network(&net_addr, &net_mask, &net.gateway, iface as u16)
+            ga.create_network(&net_addr, &net_mask, &net.gateway, iface as u16, mtu)
                 .await,
             &format!(
                 "Creating route via {} for {} ({:?})",

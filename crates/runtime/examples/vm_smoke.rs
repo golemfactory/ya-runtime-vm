@@ -12,6 +12,7 @@ use ya_runtime_sdk::{
 use ya_runtime_vm::{
     deploy::Deployment,
     guest_agent_comm::RedirectFdType,
+    network_mtu,
     vmrt::{self, RuntimeData},
 };
 
@@ -85,53 +86,69 @@ async fn commands(
         String::from_utf8_lossy(&err)
     );
     println!("VOLUMES_OK: explicit /tmp, /tmp/cache and /dev/shm/cache mounts remain visible");
-    for role in 0..=1 {
+    for role in 0..=1u8 {
         if (mode == "inet-only" && role == 0) || (mode == "vpn-only" && role == 1) {
             continue;
         }
-        let mut agent = ga.lock().await;
-        // IPv6 is unavailable on the VPN interface: its MTU is below 1280.
-        for (address, mask, network, gateway) in [
-            (
-                format!("10.{}.0.2", 71 + role),
-                "24",
-                if role == 0 { "198.18.1.0" } else { "" },
-                format!("10.{}.0.1", 71 + role),
-            ),
-            (
-                format!("fd00:{}::2", 71 + role),
-                "64",
-                if role == 0 { "fdff:71::" } else { "" },
-                format!("fd00:{}::1", 71 + role),
-            ),
-        ]
-        .into_iter()
-        .take(if role == 0 { 1 } else { 2 })
-        {
+        let (interface, route) = if role == 0 {
+            (server::NetworkInterface::Vpn, "198.18.1.0")
+        } else {
+            // The runtime adds a default route for INET.
+            (server::NetworkInterface::Inet, "")
+        };
+        let network = |address: String, mask: &str, gateway: String| server::Network {
+            addr: route.into(),
+            gateway,
+            mask: mask.into(),
+            if_addr: address,
+        };
+        let ipv4 = network(
+            format!("10.{}.0.2", 71 + role),
+            "24",
+            format!("10.{}.0.1", 71 + role),
+        );
+        let ipv6 = network(
+            format!("fd00:{}::2", 71 + role),
+            "64",
+            format!("fd00:{}::1", 71 + role),
+        );
+        let join = |networks| {
+            ya_runtime_vm::join_network(
+                data.clone(),
+                server::CreateNetwork {
+                    networks,
+                    hosts: Default::default(),
+                    interface: interface as i32,
+                },
+            )
+        };
+        join(vec![ipv4])
+            .await
+            .map_err(|e| anyhow::anyhow!("{interface:?} IPv4 network: {e:?}"))?;
+        if role == 0 {
+            // The guest rejects IPv6 below its 1280-byte minimum MTU.
             ensure!(
-                agent.add_address(&address, mask, role).await?.is_ok(),
-                "guest address update failed"
+                join(vec![ipv6]).await.is_err(),
+                "IPv6 was accepted on the {}-byte VPN MTU",
+                network_mtu::VPN_MTU
             );
-            ensure!(
-                agent
-                    .create_network(
-                        network,
-                        if network.is_empty() { "" } else { mask },
-                        &gateway,
-                        role
-                    )
-                    .await?
-                    .is_ok(),
-                "guest route update failed"
-            );
+        } else {
+            join(vec![ipv6])
+                .await
+                .map_err(|e| anyhow::anyhow!("{interface:?} IPv6 network: {e:?}"))?;
         }
     }
+    let mtus = [
+        server::NetworkInterface::Vpn,
+        server::NetworkInterface::Inet,
+    ]
+    .map(|iface| network_mtu::guest_mtu(iface).to_string());
     let pid = ga
         .lock()
         .await
         .run_process(
             "/mnt/out/probe",
-            &["probe", "network", mode],
+            &["probe", "network", mode, &mtus[0], &mtus[1]],
             None,
             0,
             0,
@@ -150,7 +167,10 @@ async fn commands(
     if !err.is_empty() {
         log::info!("network probe: {}", String::from_utf8_lossy(&err).trim());
     }
-    println!("NETWORK_OK {mode}: IPv4 and INET IPv6 packets crossed the expected Ethernet peers");
+    println!(
+        "NETWORK_OK {mode}: host MTUs {}/{} applied; IPv4 and INET IPv6 packets up to the MTU crossed the expected Ethernet peers",
+        mtus[0], mtus[1]
+    );
     for (role, uid) in [("root", 0), ("user", 1000)] {
         let pid = ga
             .lock()

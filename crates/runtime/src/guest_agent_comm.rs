@@ -265,12 +265,14 @@ impl GuestAgent {
         })
         .await
     }
+    /// Adds a route; `mtu` is applied to the interface first when present.
     pub async fn create_network(
         &mut self,
         addr: &str,
         mask: &str,
         gateway: &str,
         iface: u16,
+        mtu: Option<u32>,
     ) -> io::Result<RemoteCommandResult<()>> {
         self.ok(Command::Network(Network {
             iface,
@@ -278,14 +280,17 @@ impl GuestAgent {
             mask: Some(mask.into()),
             gateway: Some(gateway.into()),
             if_addr: None,
+            mtu,
         }))
         .await
     }
+    /// Adds an address; `mtu` is applied to the interface first when present.
     pub async fn add_address(
         &mut self,
         addr: &str,
         mask: &str,
         iface: u16,
+        mtu: Option<u32>,
     ) -> io::Result<RemoteCommandResult<()>> {
         self.ok(Command::Network(Network {
             iface,
@@ -293,6 +298,7 @@ impl GuestAgent {
             mask: Some(mask.into()),
             gateway: None,
             if_addr: Some(addr.into()),
+            mtu,
         }))
         .await
     }

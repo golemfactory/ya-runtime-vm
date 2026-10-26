@@ -7,7 +7,9 @@ use alloc::{string::String, vec::Vec};
 pub use postcard::Error as CodecError;
 use serde::{Deserialize, Serialize};
 
-pub const VERSION: u16 = 2;
+// Version 3 adds `Network::mtu`. Postcard fields are positional, so older
+// peers cannot decode it; READY rejects the mismatch.
+pub const VERSION: u16 = 3;
 pub const VSOCK_PORT: u32 = 1024;
 pub const MAX_FRAME: usize = 1024 * 1024;
 pub const OUTPUT_CHUNK: usize = 64 * 1024;
@@ -81,6 +83,8 @@ pub struct Network {
     pub mask: Option<String>,
     pub gateway: Option<String>,
     pub if_addr: Option<String>,
+    /// Interface MTU chosen by the host; `None` keeps the current value.
+    pub mtu: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -161,6 +165,23 @@ mod tests {
         ));
         frame[1] ^= 1;
         assert!(decode(&frame).is_err());
+    }
+    #[test]
+    fn network_mtu_round_trips_when_present_or_absent() {
+        for mtu in [None, Some(1220), Some(65266)] {
+            let message = Message::Request {
+                id: 7,
+                command: Command::Network(Network {
+                    iface: 1,
+                    addr: None,
+                    mask: Some("24".into()),
+                    gateway: None,
+                    if_addr: Some("10.0.0.2".into()),
+                    mtu,
+                }),
+            };
+            assert_eq!(decode(&encode(&message).unwrap()).unwrap(), message);
+        }
     }
     #[test]
     fn frame_limit_rejects_length_before_allocation() {

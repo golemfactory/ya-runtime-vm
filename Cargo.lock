@@ -8059,6 +8059,7 @@ dependencies = [
  "uuid",
  "vfio_assigned_device_resources",
  "virtio",
+ "virtio_net",
  "virtio_resources",
  "virtiofs",
  "vm_manifest_builder",

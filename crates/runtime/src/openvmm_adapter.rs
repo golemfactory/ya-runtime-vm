@@ -13,10 +13,15 @@ use openvmm_defs::config::{
 };
 #[cfg(target_os = "linux")]
 use openvmm_defs::config::{PcieMmioRangeConfig, PciePortConfig};
+use virtio::resolve::{ResolvedVirtioDevice, VirtioResolveInput};
 use vm_manifest_builder::{BaseChipsetType, MachineArch, VmManifestBuilder};
 use vm_resource::kind::{DiskHandleKind, NetEndpointHandleKind, VirtioDeviceHandle};
-use vm_resource::{IntoResource, ResolveResource, ResourceId, declare_static_resolver};
+use vm_resource::{
+    AsyncResolveResource, IntoResource, ResolveResource, ResourceId, ResourceResolver,
+    declare_static_async_resolver, declare_static_resolver,
+};
 use ya_client_model::activity::exe_script_command::VolumeMount;
+use ya_runtime_sdk::runtime_api::server::NetworkInterface;
 
 use crate::deploy::Deployment;
 use crate::net_socket::{
@@ -115,20 +120,17 @@ pub(crate) fn build_config(
     let mut vpn_endpoint = None;
     let mut inet_endpoint = None;
     let mut socket_registrations = SocketRegistrationGuard::default();
-    for (network_index, (remote, target)) in [
-        (vpn_remote, &mut vpn_endpoint),
-        (inet_remote, &mut inet_endpoint),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    for (iface, remote, target) in [
+        (NetworkInterface::Vpn, vpn_remote, &mut vpn_endpoint),
+        (NetworkInterface::Inet, inet_remote, &mut inet_endpoint),
+    ] {
         let Some(remote) = remote else { continue };
         let (endpoint, exposed) = socket_resource(remote, &mut socket_registrations)?;
         virtio_devices.push((
             openvmm_defs::config::VirtioBus::Mmio,
-            virtio_resources::net::VirtioNetHandle {
-                max_queues: None,
-                mac_address: MacAddress::new([0x90, 0x13, 0, 0, 0, network_index as u8 + 1]),
+            NetDeviceHandle {
+                mac_address: MacAddress::new([0x90, 0x13, 0, 0, 0, iface as u8 + 1]),
+                mtu: crate::network_mtu::device_mtu(iface),
                 endpoint,
             }
             .into_resource(),
@@ -335,6 +337,51 @@ fn open_file_disk(
         OpenOptions::new().read(true).write(true).open(path)?
     };
     Ok(disk_backend_resources::FileDiskHandle(file).into_resource())
+}
+
+/// A virtio-net device with a per-device MTU. Upstream `VirtioNetHandle` has
+/// no MTU field; the vendored `virtio_net` crate provides the builder option.
+#[derive(MeshPayload)]
+pub struct NetDeviceHandle {
+    mac_address: MacAddress,
+    mtu: u16,
+    endpoint: vm_resource::Resource<NetEndpointHandleKind>,
+}
+
+impl ResourceId<VirtioDeviceHandle> for NetDeviceHandle {
+    const ID: &'static str = "ya-runtime-virtio-net";
+}
+
+pub struct NetDeviceResolver;
+declare_static_async_resolver!(NetDeviceResolver, (VirtioDeviceHandle, NetDeviceHandle));
+vm_resource::register_static_resolvers! { NetDeviceResolver }
+
+#[async_trait::async_trait]
+impl AsyncResolveResource<VirtioDeviceHandle, NetDeviceHandle> for NetDeviceResolver {
+    type Output = ResolvedVirtioDevice;
+    type Error = anyhow::Error;
+
+    async fn resolve(
+        &self,
+        resolver: &ResourceResolver,
+        resource: NetDeviceHandle,
+        input: VirtioResolveInput<'_>,
+    ) -> Result<Self::Output, Self::Error> {
+        let endpoint = resolver
+            .resolve(
+                resource.endpoint,
+                ResolveEndpointParams {
+                    mac_address: resource.mac_address,
+                },
+            )
+            .await?;
+        let device = virtio_net::Device::builder().mtu(resource.mtu).build(
+            input.driver_source,
+            endpoint.0,
+            resource.mac_address,
+        )?;
+        Ok(device.into())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, MeshPayload)]

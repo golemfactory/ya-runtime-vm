@@ -247,6 +247,20 @@ reader. This fixes the reproduced excessive-allocation request without changing
 the remaining OpenVMM crates. The parser/session and malformed-request tests run
 in both native CI jobs. These protections do not constitute a full VMM audit.
 
+The host chooses each interface's MTU in
+[`network_mtu.rs`](crates/runtime/src/network_mtu.rs) and sends it with the
+network configuration; the runtime API has no MTU field. The VPN interface keeps
+the C init's 1220 bytes, below IPv6's minimum, so it carries IPv4 only. INET uses
+65266 bytes: the exe-unit's INET stack accepts Ethernet frames of up to 65280
+(0xff00) bytes including the 14-byte header, so the C init's 65521 would exceed
+it. Upstream OpenVMM advertises a fixed 1500-byte virtio-net MTU, which Linux
+treats as the interface maximum, so the runtime uses a
+[vendored virtio-net](third_party/virtio_net/README.md) with a per-device MTU.
+The INET device advertises 65266, and Linux then posts receive buffers large
+enough for a whole frame; the VPN device keeps 1500. The guest agent rejects an
+MTU above the device maximum or below 68, and an IPv6 address or route on an
+interface below 1280.
+
 Per share, cached nodes, open handles and directory snapshots are bounded.
 The backend supports ordinary reads, writes, rename, truncate, timestamps and
 fsync; it does not provide full POSIX metadata semantics or writeback caching.
@@ -306,9 +320,12 @@ stdout/stderr before both normal and entrypoint termination. Explicit RAM/storag
 mounts under `/tmp` and `/dev/shm` must remain visible, with the configured `/tmp`
 size limit enforced. Network cases cover both interfaces over UDP,
 INET-only over TCP connect, and VPN-only over TCP listen. A local Ethernet peer
-answers ARP/NDP and exchanges labelled UDP payloads over IPv4 and, on INET, IPv6 (the
-VPN interface keeps the C init's 1220-byte MTU, below IPv6's minimum), including
-routing through the configured gateways and partial TCP framing. No external
+answers ARP/NDP and exchanges labelled UDP payloads over IPv4 and, on INET, IPv6,
+including routing through the configured gateways and partial TCP framing.
+Networks are configured through the runtime's `join_network`; the probe checks
+that each interface has the MTU sent by the host, that IPv6 is refused on the
+VPN, and that patterned datagrams filling one MTU-sized frame (about 64 KiB on
+INET) return intact and unfragmented. No external
 network, TAP interface or network administrator privileges are required. IPv6
 startup waits only for an address confirmed tentative by the guest kernel, with
 a finite 10-second DAD deadline; missing or duplicate addresses fail immediately.

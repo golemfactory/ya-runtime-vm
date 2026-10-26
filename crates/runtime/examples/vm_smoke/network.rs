@@ -209,7 +209,11 @@ fn response(
             reply[56..58].copy_from_slice(&sum);
             Ok(Some(reply))
         }
-        0x0800 if frame.len() >= 42 && frame[23] == 17 => echo(frame, role, &mac, false, packets),
+        // Large test datagrams must arrive whole, so reject IPv4 fragments.
+        0x0800 if frame.len() >= 42 && frame[23] == 17 => {
+            ensure!(word(frame, 20) & 0x3fff == 0, "IPv4 packet was fragmented");
+            echo(frame, role, &mac, false, packets)
+        }
         0x86dd if frame.len() >= 62 && frame[20] == 17 => echo(frame, role, &mac, true, packets),
         _ => Ok(None),
     }

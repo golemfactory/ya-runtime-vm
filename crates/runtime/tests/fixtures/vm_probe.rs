@@ -68,7 +68,7 @@ fn files(role: &str) {
     println!("FILES_OK {role}");
 }
 
-fn network(mode: &str) {
+fn network(mode: &str, mtus: [usize; 2]) {
     for role in 0..=1 {
         let enabled = !((mode == "inet-only" && role == 0) || (mode == "vpn-only" && role == 1));
         assert_eq!(
@@ -84,7 +84,7 @@ fn network(mode: &str) {
             .trim()
             .parse()
             .unwrap();
-        assert_eq!(mtu, if role == 0 { 1220 } else { 1500 }, "eth{role} MTU");
+        assert_eq!(mtu, mtus[role], "eth{role} MTU sent by the host");
         // IPv6 needs an MTU of at least 1280, so the VPN interface has none.
         for v6 in [false, true]
             .into_iter()
@@ -160,15 +160,16 @@ fn network(mode: &str) {
                 .unwrap();
             socket.connect(&remote).unwrap();
             // The largest payload fits one frame: IP and UDP headers are 28/48 bytes.
+            // The peer rejects IP fragments, so it must arrive unfragmented.
             for size in [32, 257, mtu - if v6 { 48 } else { 28 }] {
                 let tag = format!("REQ-{label}-{}-{size}", if v6 { 6 } else { 4 });
-                let mut packet = vec![b'X'; size];
+                let mut packet: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
                 packet[..tag.len()].copy_from_slice(tag.as_bytes());
                 assert_eq!(socket.send(&packet).unwrap(), packet.len());
-                let mut reply = vec![0; 2048];
+                let mut reply = vec![0; 65536];
                 let received = socket.recv(&mut reply).unwrap();
                 packet[..3].copy_from_slice(b"ACK");
-                assert_eq!(&reply[..received], packet);
+                assert!(reply[..received] == packet, "{tag} reply differs");
             }
         }
     }
@@ -210,7 +211,7 @@ fn main() {
             fs::remove_file("/tmp/size-check").unwrap();
             println!("VOLUMES_OK");
         }
-        Some("network") => network(&args[2]),
+        Some("network") => network(&args[2], [3, 4].map(|i| args[i].parse().unwrap())),
         Some("files") => files(&args[2]),
         Some("burst") => {
             io::stdout().write_all(&vec![b'A'; 262144]).unwrap();
