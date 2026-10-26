@@ -533,8 +533,13 @@ mod tests {
     use super::*;
     use std::os::unix::net::UnixStream;
 
+    // Tests that spawn children or expect pipe EOF must not overlap: `reap()`
+    // waits for any child, and a fork briefly holds every open pipe end.
+    pub(super) static CHILDREN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn full_closed_pipe_is_paused_then_resumed_after_output_query() {
+        let _children = CHILDREN.lock().unwrap_or_else(|e| e.into_inner());
         // Cyclic pipes must not drop the oldest bytes; both kinds pause.
         for cyclic in [false, true] {
             let (stream, _peer) = UnixStream::pair().unwrap();
@@ -610,6 +615,9 @@ mod process_tests {
     use std::{os::unix::process::CommandExt, process::Command as ProcessCommand};
     #[test]
     fn reaps_children_in_their_own_process_group() {
+        let _children = super::tests::CHILDREN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let (stream, _peer) = UnixStream::pair().unwrap();
         let mut reactor = Reactor::new(OwnedFd::from(stream).into(), Vec::new()).unwrap();
         let child = ProcessCommand::new("/bin/sh")
@@ -653,6 +661,9 @@ mod exit_order_tests {
     use std::{os::unix::process::CommandExt, process::Command as ProcessCommand};
     #[test]
     fn exit_is_reported_after_draining_output_left_by_the_process() {
+        let _children = super::tests::CHILDREN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let (socket, _peer) = UnixStream::pair().unwrap();
         let mut reactor = Reactor::new(OwnedFd::from(socket).into(), Vec::new()).unwrap();
         let (out_read, out_write) =
