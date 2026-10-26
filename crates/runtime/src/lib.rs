@@ -341,7 +341,8 @@ pub(crate) async fn run_command(
     run: server::RunProcess,
 ) -> Result<ProcessId, server::ErrorResponse> {
     let data = runtime_data.lock().await;
-    let deployment = data.deployment().expect("Runtime not started");
+    let deployment = data.deployment().map_err(runtime_error)?;
+    let ga = data.ga().map_err(runtime_error)?;
 
     let (uid, gid) = deployment.user;
     let env = deployment.env();
@@ -356,9 +357,7 @@ pub(crate) async fn run_command(
     log::debug!("got run process: {:?}", run);
     log::debug!("work dir: {:?}", deployment.config.working_dir);
 
-    let result = data
-        .ga()
-        .unwrap()
+    let result = ga
         .lock()
         .await
         .run_process(
@@ -389,8 +388,7 @@ async fn kill_command(
 ) -> Result<(), server::ErrorResponse> {
     log::debug!("got kill: {:?}", kill);
     // TODO: send signal
-    let data = runtime_data.lock().await;
-    let mutex = data.ga().unwrap();
+    let mutex = runtime_data.lock().await.ga().map_err(runtime_error)?;
     let result = mutex.lock().await.kill(kill.pid).await;
     convert_result(result, &format!("Killing process {}", kill.pid))?;
     Ok(())
@@ -408,7 +406,7 @@ pub(crate) async fn stop(
             let mut ga = mutex.lock().await;
             convert_result(ga.quit().await, "Sending quit")
         }
-        Err(error) => Err(server::ErrorResponse::msg(error.to_string())),
+        Err(error) => Err(runtime_error(error)),
     };
 
     if let Some(mut runtime) = runtime.take() {
@@ -489,9 +487,9 @@ async fn join_network(
         server::NetworkInterface::Inet => data.inet.as_ref(),
     }
     .cloned()
-    .expect("No network endpoint");
+    .ok_or_else(|| server::ErrorResponse::msg(format!("No {iface:?} network endpoint")))?;
 
-    let mutex = data.ga().unwrap();
+    let mutex = data.ga().map_err(runtime_error)?;
     let mut ga = mutex.lock().await;
     convert_result(ga.add_hosts(hosts.iter()).await, "Updating network hosts")?;
 
@@ -524,6 +522,10 @@ async fn normalize_path<P: AsRef<Path>>(path: P) -> anyhow::Result<PathBuf> {
         .components()
         .filter(|c| !matches!(c, Component::Prefix(_)))
         .collect::<PathBuf>())
+}
+
+fn runtime_error(error: anyhow::Error) -> server::ErrorResponse {
+    server::ErrorResponse::msg(error.to_string())
 }
 
 fn convert_result<T>(
@@ -589,4 +591,55 @@ async fn run_entrypoint(
             "entrypoint": json!({ "pid": json!(pid), "command": json!(entrypoint)}),
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn commands_after_stop_fail_without_panicking() {
+        let data = Arc::new(Mutex::new(RuntimeData {
+            deployment: Some(Deployment::default()),
+            vpn: Some(ContainerEndpoint::UdpDatagram(
+                "127.0.0.1:1".parse().unwrap(),
+            )),
+            ..Default::default()
+        }));
+        // stop() leaves no worker or guest agent behind.
+        assert!(stop(data.clone()).await.is_err());
+        assert!(
+            run_command(
+                data.clone(),
+                server::RunProcess {
+                    bin: "/bin/true".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            kill_command(data.clone(), server::KillProcess::default())
+                .await
+                .is_err()
+        );
+        assert!(
+            join_network(
+                data.clone(),
+                server::CreateNetwork {
+                    interface: server::NetworkInterface::Vpn as i32,
+                    ..Default::default()
+                },
+            )
+            .await
+            .is_err()
+        );
+        data.lock().await.deployment = None;
+        assert!(
+            run_command(data, server::RunProcess::default())
+                .await
+                .is_err()
+        );
+    }
 }
