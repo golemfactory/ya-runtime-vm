@@ -374,19 +374,21 @@ fn guest_cannot_create_links_special_files_or_access_host_xattrs() {
     }
     assert!(fs.set_xattr(&r, name("user.test"), b"data", 0).is_err());
     assert!(fs.get_xattr(&r, name("security.selinux"), 4096).is_err());
-    let mut bad = vec![".", "..", "", "../outside", "/outside", "dir/file"];
-    if cfg!(windows) {
-        bad.extend([
-            "dir\\file",
-            "file:stream",
-            "NUL",
-            "con.txt",
-            "COM1",
-            "x.",
-            "x ",
-        ]);
-    }
-    for bad in bad {
+    for bad in [
+        ".",
+        "..",
+        "",
+        "../outside",
+        "/outside",
+        "dir/file",
+        "dir\\file",
+        "file:stream",
+        "NUL",
+        "con.txt",
+        "COM1",
+        "x.",
+        "x ",
+    ] {
         assert!(fs.lookup(&r, name(bad)).is_err(), "accepted {bad:?}");
         assert!(
             fs.create(&r, name(bad), &fuse_create_in::new_zeroed())
@@ -616,11 +618,13 @@ fn fuse_negotiates_page_requests_that_fit_the_virtqueue() {
 }
 
 #[test]
-fn windows_name_rules_apply_only_on_windows() {
-    for bad in ["", ".", "..", "a/b", "a\0b"] {
-        assert!(component(bad.as_bytes()).is_err(), "{bad:?}");
-    }
-    let windows_only = [
+fn name_rules_do_not_depend_on_host_platform() {
+    for bad in [
+        "",
+        ".",
+        "..",
+        "a/b",
+        "a\0b",
         "a:b",
         "a\\b",
         "trailing.",
@@ -628,16 +632,16 @@ fn windows_name_rules_apply_only_on_windows() {
         "CON",
         "aux.c",
         "lpt1",
-    ];
-    for name in windows_only {
-        assert_eq!(component(name.as_bytes()).is_ok(), cfg!(unix), "{name:?}");
+        "2026-10-26T01:00:00.log",
+    ] {
+        assert_eq!(
+            component(bad.as_bytes()).unwrap_err(),
+            lx::Error::EINVAL,
+            "{bad:?}"
+        );
     }
-    #[cfg(unix)]
-    {
-        let (_temp, fs) = setup();
-        let file = create(&fs, 1, "2026-10-26T01:00:00.log");
-        release(&fs, file.entry.nodeid, file.open.fh);
-        assert!(contains(&list(&fs, 1), b"2026-10-26T01:00:00.log"));
+    for valid in ["file.txt", "auxiliary.c", "2026-10-26T01-00-00.log"] {
+        assert!(component(valid.as_bytes()).is_ok(), "{valid:?}");
     }
 }
 

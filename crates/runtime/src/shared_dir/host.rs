@@ -134,36 +134,29 @@ pub(super) fn sync_directory(file: &File) -> lx::Result<()> {
     Ok(())
 }
 
-// Reject path syntax. On Windows also reject alternate streams, names the
-// Win32 layer would trim and DOS device aliases; these are legal Linux names.
+// Apply the same guest-visible rules on every host, including alternate
+// streams, names Win32 would trim, and DOS device aliases.
 pub(super) fn component(bytes: &[u8]) -> lx::Result<OsString> {
     if bytes.is_empty()
         || bytes.len() > 255
         || bytes == b"."
         || bytes == b".."
-        || bytes.iter().any(|b| matches!(b, 0 | b'/'))
+        || bytes.iter().any(|b| matches!(b, 0 | b'/' | b'\\' | b':'))
+        || matches!(bytes.last(), Some(b'.' | b' '))
     {
         return Err(lx::Error::EINVAL);
     }
-    #[cfg(windows)]
+    let base = bytes
+        .split(|b| *b == b'.')
+        .next()
+        .unwrap()
+        .to_ascii_uppercase();
+    if matches!(base.as_slice(), b"CON" | b"PRN" | b"AUX" | b"NUL")
+        || (base.len() == 4
+            && matches!(&base[..3], b"COM" | b"LPT")
+            && matches!(base[3], b'1'..=b'9'))
     {
-        if bytes.iter().any(|b| matches!(b, b'\\' | b':'))
-            || matches!(bytes.last(), Some(b'.' | b' '))
-        {
-            return Err(lx::Error::EINVAL);
-        }
-        let base = bytes
-            .split(|b| *b == b'.')
-            .next()
-            .unwrap()
-            .to_ascii_uppercase();
-        if matches!(base.as_slice(), b"CON" | b"PRN" | b"AUX" | b"NUL")
-            || (base.len() == 4
-                && matches!(&base[..3], b"COM" | b"LPT")
-                && matches!(base[3], b'1'..=b'9'))
-        {
-            return Err(lx::Error::EINVAL);
-        }
+        return Err(lx::Error::EINVAL);
     }
     #[cfg(unix)]
     {
