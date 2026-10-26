@@ -236,6 +236,14 @@ pub fn runtime_dir() -> io::Result<PathBuf> {
         .join(DIR_RUNTIME))
 }
 
+/// Forwards guest events to the client in order, on a single task.
+///
+/// The guest reports an exit only after the output the process wrote has been
+/// queried, so earlier events already carried it. The host still drains both
+/// streams before the terminal status, so no byte can follow it. ExitAck is
+/// sent last; for the entrypoint it lets the guest power off. Emitted statuses
+/// are queued in order in the SDK, which writes them to the client even after
+/// the VM has stopped.
 async fn deliver_notification(
     notification: Notification,
     ga: Arc<Mutex<GuestAgent>>,
@@ -245,6 +253,17 @@ async fn deliver_notification(
         Notification::ProcessDied { id, .. } => Some(*id),
         _ => None,
     };
+    if let Some(id) = exited {
+        for fd in [1, 2] {
+            loop {
+                let output = query_output(&ga, id, fd).await;
+                if output.is_empty() {
+                    break;
+                }
+                emitter.emit(output_status(id, fd, output)).await;
+            }
+        }
+    }
     if let Some(status) = notification_into_status(notification, ga.clone()).await {
         emitter.emit(status).await;
     }
@@ -255,6 +274,39 @@ async fn deliver_notification(
     }
 }
 
+async fn query_output(ga: &Arc<Mutex<GuestAgent>>, id: u64, fd: u32) -> Vec<u8> {
+    let result = ga
+        .lock()
+        .await
+        .query_output(id, fd as u8, 0, u64::MAX)
+        .await;
+    match result {
+        Ok(Ok(output)) => output,
+        Ok(Err(e)) => {
+            log::error!("Remote error while querying output: {:?}", e);
+            Vec::new()
+        }
+        Err(e) => {
+            log::error!("Error querying output: {:?}", e);
+            Vec::new()
+        }
+    }
+}
+
+fn output_status(id: u64, fd: u32, output: Vec<u8>) -> server::ProcessStatus {
+    let (stdout, stderr) = match fd {
+        1 => (output, Vec::new()),
+        _ => (Vec::new(), output),
+    };
+    server::ProcessStatus {
+        pid: id,
+        running: true,
+        return_code: 0,
+        stdout,
+        stderr,
+    }
+}
+
 async fn notification_into_status(
     notification: Notification,
     ga: Arc<Mutex<GuestAgent>>,
@@ -262,36 +314,7 @@ async fn notification_into_status(
     match notification {
         Notification::OutputAvailable { id, fd } => {
             log::debug!("Process {} has output available on fd {}", id, fd);
-
-            let output = {
-                let result = {
-                    let mut guard = ga.lock().await;
-                    guard.query_output(id, fd as u8, 0, u64::MAX).await
-                };
-                match result {
-                    Ok(Ok(vec)) => vec,
-                    Ok(Err(e)) => {
-                        log::error!("Remote error while querying output: {:?}", e);
-                        Vec::new()
-                    }
-                    Err(e) => {
-                        log::error!("Error querying output: {:?}", e);
-                        Vec::new()
-                    }
-                }
-            };
-            let (stdout, stderr) = match fd {
-                1 => (output, Vec::new()),
-                _ => (Vec::new(), output),
-            };
-
-            Some(server::ProcessStatus {
-                pid: id,
-                running: true,
-                return_code: 0,
-                stdout,
-                stderr,
-            })
+            Some(output_status(id, fd, query_output(&ga, id, fd).await))
         }
         Notification::ProcessDied { id, reason } => {
             log::debug!("Process {} died with {:?}", id, reason);
@@ -391,7 +414,17 @@ mod tests {
                 .await
                 .unwrap();
                 let responder = tokio::spawn(async move {
-                    for expected in [1, 2, 1, 2] {
+                    // Four notified chunks, then the host's drain after the
+                    // exit: a late stdout tail, then empty stdout and stderr.
+                    for (expected, len) in [
+                        (1, OUTPUT_CHUNK),
+                        (2, OUTPUT_CHUNK),
+                        (1, OUTPUT_CHUNK),
+                        (2, OUTPUT_CHUNK),
+                        (1, 7),
+                        (1, 0),
+                        (2, 0),
+                    ] {
                         let Message::Request {
                             id,
                             command: Command::QueryOutput { fd, .. },
@@ -405,7 +438,7 @@ mod tests {
                             &mut guest,
                             &Message::Response {
                                 id,
-                                result: Ok(Value::Bytes(vec![fd; OUTPUT_CHUNK])),
+                                result: Ok(Value::Bytes(vec![fd; len])),
                             },
                         )
                         .await
@@ -418,21 +451,21 @@ mod tests {
                 });
                 let mut stdout = Vec::new();
                 let mut stderr = Vec::new();
-                for index in 0..5 {
+                for index in 0..6 {
                     let status =
                         tokio::time::timeout(std::time::Duration::from_secs(3), statuses.recv())
                             .await
                             .unwrap()
                             .unwrap();
                     assert_eq!(status.pid, 9);
-                    assert_eq!(status.running, index < 4);
+                    assert_eq!(status.running, index < 5);
                     stdout.extend(status.stdout);
                     stderr.extend(status.stderr);
                     if !status.running {
                         assert_eq!(status.return_code, 37);
                     }
                 }
-                assert_eq!(stdout, vec![1; 2 * OUTPUT_CHUNK]);
+                assert_eq!(stdout, vec![1; 2 * OUTPUT_CHUNK + 7]);
                 assert_eq!(stderr, vec![2; 2 * OUTPUT_CHUNK]);
                 responder.await.unwrap();
             })
