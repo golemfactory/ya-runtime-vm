@@ -1,2 +1,0 @@
-runtime/image/* filter=lfs diff=lfs merge=lfs -text
-runtime/poc/runtime/* filter=lfs diff=lfs merge=lfs -text

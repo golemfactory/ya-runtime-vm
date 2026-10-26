@@ -1,108 +1,105 @@
 # ya-runtime-vm
 
-`ya-runtime-vm` is an implementation of a Docker-like runtime environment for Linux systems. 
+[![Build](https://github.com/golemfactory/ya-runtime-vm/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/golemfactory/ya-runtime-vm/actions/workflows/build.yml)
+[![Release](https://img.shields.io/github/v/release/golemfactory/ya-runtime-vm?include_prereleases&sort=semver)](https://github.com/golemfactory/ya-runtime-vm/releases)
+[![License](https://img.shields.io/github/license/golemfactory/ya-runtime-vm)](LICENSE)
 
-This repository consists of 2 crates:
+A virtual machine runtime that lets [Golem Network](https://www.golem.network/)
+providers run Linux task images in isolated VMs.
 
-- `ya-runtime-vm`
+- **One self-contained executable:** [OpenVMM](https://github.com/microsoft/openvmm)
+  is embedded, so no QEMU, firmware or separate VMM is installed.
+- **Linux and Windows hosts:** KVM on Linux, Windows Hypervisor Platform (WHP)
+  on Windows, running x86_64 Linux guests.
+- **Golem tasks:** GVMI images, stdout/stderr streaming, host directory shares,
+  storage and RAM volumes, Yagna VPN and INET networking.
 
-   An application for running Virtual Machine images pre-built for yagna.
+## Supported platforms
 
-- `gvmkit`
+| Host | Hypervisor | VM tests in CI | PCI passthrough |
+| --- | --- | --- | --- |
+| Linux x86_64 | KVM | Yes | Yes (VFIO) |
+| Windows x86_64 | WHP | Manual ([procedure](docs/windows-whp-test.md)) | No |
 
-   A tool for converting Docker images into yagna Virtual Machine images and uploading them to a public repository.
-   Requires for [Docker](https://docs.docker.com/engine/install/ubuntu/) to be installed on your system.
+## Install
 
-## Building
+Download a package from [GitHub Releases](https://github.com/golemfactory/ya-runtime-vm/releases).
 
-Prerequisites:
+On Debian or Ubuntu, install the `.deb`; it places the runtime under
+`/usr/lib/yagna/plugins/`:
 
-- `rustc`
-  
-    Recommendation: use the Rust toolchain installer from [https://rustup.rs/](https://rustup.rs/)
-
-- `musl-gcc` and `gperf`
-
-    On a Ubuntu system, execute in terminal:
-
-    ```bash
-       sudo apt install musl musl-tools gperf
-    ```
-
-Git checkout:
-
-Init `runtime/init-container/liburing` submodule.
-
-```bash
-git submodule init
-git submodule update
+```sh
+sudo apt install ./ya-runtime-vm_*_amd64.deb
 ```
 
-Building:
+Otherwise, extract the Linux `.tar.gz` or Windows `.zip` and copy
+`ya-runtime-vm.json` and the `ya-runtime-vm/` directory into the provider's
+plugin directory. The provider uses the first of `plugins/` beside its
+executable, `~/.local/lib/yagna/plugins/` (a `golemsp` installation) and
+`/usr/lib/yagna/plugins/`; `EXE_UNIT_PATH` overrides this. Keep the executable
+and its `runtime/` directory together.
 
-```bash
-cd runtime
-cargo build
+The host needs hardware virtualization:
+
+- **Linux:** read/write access to `/dev/kvm`, usually through the `kvm` group.
+- **Windows:** the Windows Hypervisor Platform feature, then a reboot:
+  `Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform`.
+
+Check the installation with the self-test, which boots a VM, runs a bundled
+task and prints its JSON result:
+
+```sh
+./ya-runtime-vm test
 ```
 
-## Installing
+## How it works
 
-Prerequisites:
+The exe-unit drives the runtime through the Yagna runtime API. The runtime boots
+the Linux kernel directly and controls a Rust guest agent, running as PID 1,
+over virtio-vsock. See [Architecture](docs/architecture.md) for details.
 
-- `cargo-deb`
-
-    Cargo helper command which automatically creates binary Debian packages. With Rust already installed, execute in terminal:
-
-    ```bash
-    cargo install cargo-deb
-    ```
-
-Installation:
-
-In terminal, change the working directory to `runtime` and install a freshly minted Debian package.
-
-```bash
-cd runtime
-sudo dpkg -i $(cargo deb | tail -n1)
+```mermaid
+flowchart LR
+  exe[Yagna exe-unit] -- runtime API --> rt[ya-runtime-vm + OpenVMM]
+  rt -- virtio-vsock --> agent[Guest agent, PID 1]
+  rt -- virtio-blk / virtio-fs / virtio-net --> guest[Linux guest]
+  agent --> tasks[Task processes]
 ```
 
-This will install the binary at `/usr/lib/yagna/plugins/ya-runtime-vm/ya-runtime-vm`.
+## Build from source
 
+Install [mise](https://mise.jdx.dev/) for the pinned toolchain. On a Linux host
+with Docker and `build-essential perl musl-tools`:
 
-## Command line
-
-Follow the installation section before executing.
-
-```
-ya-runtime-vm 0.2.5
-
-USAGE:
-    ya-runtime-vm [OPTIONS] <SUBCOMMAND>
-
-FLAGS:
-    -h, --help       Prints help information
-    -V, --version    Prints version information
-
-OPTIONS:
-    -w, --workdir <workdir>              
-    -t, --task-package <task-package>    
-        --cpu-cores <cpu-cores>           [default: 1]
-        --mem-gib <mem-gib>               [default: 0.25]
-        --storage-gib <storage-gib>       [default: 0.25]
-
-SUBCOMMANDS:
-    test              Perform a self-test
-    offer-template    Print the market offer template (JSON)
-    deploy            Deploy an image
-    start             Start a deployed image
-    help              Prints this message or the help of the given subcommand(s)
+```sh
+mise trust && mise install
+mise run build-release
+mise run guest-image
+mise run fetch-self-test
+mise run package
 ```
 
-## Caveats
+Packages are written to `releases/`. Windows builds, Debian packages and
+requirements are covered in [Building and packaging](docs/building.md).
 
-- Docker `VOLUME` command
+## Documentation
 
-    Directories specified in the `VOLUME` command are a mountpoint for directories on the host filesystem. Contents
-    of those directories will appear as empty during execution.
-    
-    If you need to place static assets inside the image, try not to use the `VOLUME` command for that directory.
+- [Building and packaging](docs/building.md)
+- [Architecture](docs/architecture.md): guest agent, process lifecycle, repository layout
+- [Volumes and host directories](docs/host-directories.md): share policy and limits
+- [Networking](docs/networking.md): VPN and INET interfaces and their MTUs
+- [Testing and troubleshooting](docs/testing.md)
+- [Windows/WHP test procedure](docs/windows-whp-test.md)
+- [virtio-fs security review](docs/virtiofs-security-review.md)
+
+## Security
+
+Report vulnerabilities privately through
+[GitHub security advisories](https://github.com/golemfactory/ya-runtime-vm/security/advisories/new),
+not in public issues.
+
+## License
+
+ya-runtime-vm is licensed under [GPL-3.0](LICENSE). Packages include
+`THIRD-PARTY-NOTICES.txt` with the licenses of bundled components and links to
+their sources, including the guest Linux kernel and BusyBox.

@@ -2,94 +2,113 @@ name: Build
 
 on:
   push:
-    branches:
-      - master
-      - release/*
+    branches: [master, 'release/*']
   pull_request:
-    branches:
-      - master
-      - release/*
+    branches: [master, 'release/*']
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
-  build:
-    name: Build
-    env:
-      RUSTFLAGS: "-D warnings -C opt-level=z -C debuginfo=1"
-      X86_64_PC_WINDOWS_MSVC_OPENSSL_DIR: c:/vcpkg/installed/x64-windows
-      rust_stable: 1.80.0
+  audit:
+    name: RustSec dependency audit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: audit
+          cache-on-failure: true
+      - run: mise run audit
+
+  guest:
+    name: Linux guest image
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: guest
+          cache-on-failure: true
+      - run: mise run lint-workflows
+      - run: mise run guest-lint
+      - run: mise run guest-image
+      - run: mise run vm-probe-build
+      - run: mise run fetch-self-test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-guest
+          path: |
+            build/guest/vmlinuz-virt
+            build/guest/initramfs.cpio.gz
+            build/guest/self-test.gvmi
+            build/guest/vm-test-probe
+            build/guest/THIRD-PARTY-NOTICES.txt
+          if-no-files-found: error
+
+  native:
+    name: Runtime on ${{ matrix.os }}
+    needs: guest
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
-
+        os: [ubuntu-24.04, windows-2022]
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust ${{ env.rust_stable }}
-        uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          toolchain: ${{ env.rust_stable }}
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+          name: linux-guest
+          path: build/guest
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - uses: jdx/mise-action@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-
-
-      - name: Cache cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-index-
-
-      - name: Cache cargo build
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-build-target1-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: cargo fmt
-        uses: actions-rs/cargo@v1
-        if: matrix.os == 'ubuntu-latest'
-        with:
-          command: fmt
-          args: --all -- --check
-
-      - name: Check clippy lints
-        uses: actions-rs/cargo@v1
-        with:
-          command: clippy
-          args: --all-targets --all-features --workspace -- -D warnings
-
-      - name: Cache vcpkg's artifacts
-        uses: actions/cache@v4
-        if: matrix.os == 'windows-latest'
-        with:
-          path: c:/vcpkg/installed
-          key: vcpkg-${{ runner.os }}-v0
-          restore-keys: |
-            vcpkg-${{ runner.os }}-
-
-      - name: Install openssl
-        if: matrix.os == 'windows-latest'
+          cache-on-failure: true
+      - name: Configure musl C toolchain
+        if: runner.os == 'Linux'
+        run: mise run ci-setup-linux
+      - run: mise run ci
+      - name: Enable KVM for the Linux VM tests
+        if: runner.os == 'Linux'
         run: |
-          vcpkg install openssl:x64-windows openssl:x64-windows-static
-          vcpkg list
-          vcpkg integrate install
-
-      - name: cargo test
-        uses: actions-rs/cargo@v1
+          sudo chgrp "$(id -gn)" /dev/kvm
+          sudo chmod 660 /dev/kvm
+      - name: OpenVMM integration tests
+        if: runner.os == 'Linux'
+        run: mise run vm-test
+      - name: VM boot and runtime logs
+        if: runner.os == 'Linux' && always()
+        uses: actions/upload-artifact@v4
         with:
-          command: test
-          args: --workspace
-
-      - name: cargo build
-        uses: actions-rs/cargo@v1
+          name: vm-test-linux-logs
+          path: target/vm-test/*.stderr.log
+          if-no-files-found: ignore
+      - run: mise run package
+      - name: Debian package
+        if: runner.os == 'Linux'
+        run: |
+          mise run package-deb
+          cp target/x86_64-unknown-linux-musl/debian/*.deb releases/
+          cd releases
+          # GitHub replaces '~' in uploaded asset names; normalize before hashing.
+          for package in ./*.deb; do
+            normalized="${package//\~/.}"
+            if [[ "$package" != "$normalized" ]]; then
+              mv "$package" "$normalized"
+            fi
+          done
+          sha256sum ./*.deb > debian.sha256
+      - uses: actions/upload-artifact@v4
         with:
-          command: build
-          args: --workspace
+          name: runtime-${{ runner.os }}
+          path: |
+            releases/*.tar.gz
+            releases/*.zip
+            releases/*.sha256
+            releases/*.deb
+          if-no-files-found: error
