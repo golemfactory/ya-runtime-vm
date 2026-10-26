@@ -81,16 +81,32 @@ fn release(fs: &SharedDir, node: u64, fh: u64) {
 }
 fn list(fs: &SharedDir, node: u64) -> Vec<u8> {
     let fh = fs.open_dir(&request(node), 0).unwrap().fh;
-    let data = fs
-        .read_dir(
-            &request(node),
-            &fuse_read_in {
-                fh,
-                size: 4096,
-                ..FromZeros::new_zeroed()
-            },
-        )
-        .unwrap();
+    let mut data = Vec::new();
+    let mut offset = 0;
+    loop {
+        let chunk = fs
+            .read_dir(
+                &request(node),
+                &fuse_read_in {
+                    fh,
+                    offset,
+                    size: 4096,
+                    ..FromZeros::new_zeroed()
+                },
+            )
+            .unwrap();
+        if chunk.is_empty() {
+            break;
+        }
+        // Resume after the last entry; host directory order is unspecified.
+        let mut rest = chunk.as_slice();
+        while let Ok((entry, _)) = fuse_dirent::read_from_prefix(rest) {
+            offset = entry.off;
+            let len = (size_of::<fuse_dirent>() + entry.namelen as usize).next_multiple_of(8);
+            rest = rest.get(len..).unwrap_or_default();
+        }
+        data.extend_from_slice(&chunk);
+    }
     fs.release_dir(
         &request(node),
         &fuse_release_in {
