@@ -236,6 +236,29 @@ async fn commands(
     let (out, _, status) = collect(&mut events, pid).await?;
     ensure!(status == 0 && out == b"BACKGROUND_STARTED\n");
     println!("BACKGROUND_EXIT_OK");
+    // A relative working directory resolves inside the container root.
+    let pid = ga
+        .lock()
+        .await
+        .run_process(
+            "/mnt/out/probe",
+            &["probe", "cwd"],
+            None,
+            1000,
+            1000,
+            &redirects,
+            Some("mnt/out"),
+        )
+        .await?
+        .map_err(|e| anyhow::anyhow!("relative cwd exec: {e}"))?;
+    let (out, err, status) = collect(&mut events, pid).await?;
+    ensure!(
+        status == 0 && out == b"/mnt/out\n",
+        "relative cwd: status={status}, stdout={:?}, stderr={:?}",
+        String::from_utf8_lossy(&out),
+        String::from_utf8_lossy(&err)
+    );
+    println!("RELATIVE_CWD_OK");
     // The public runtime API uses cyclic output by default. Like the C init, a
     // full cyclic buffer applies backpressure; even a tiny one loses nothing.
     let cyclic = [

@@ -90,6 +90,8 @@ impl Prepared {
                     }
                     if self.chroot {
                         rustix::process::chroot(c"/mnt/newroot")?;
+                        // chroot keeps the old cwd; resolve relative cwds in the new root.
+                        rustix::process::chdir(c"/")?;
                     }
                     rustix::process::chdir(self.cwd.as_c_str())?;
                     if let Some((uid, gid)) = self.credentials {

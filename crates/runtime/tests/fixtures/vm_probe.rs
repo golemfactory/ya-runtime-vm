@@ -228,6 +228,7 @@ fn main() {
             println!("BACKGROUND_STARTED");
         }
         Some("exit") => (),
+        Some("cwd") => println!("{}", std::env::current_dir().unwrap().display()),
         _ => panic!("unknown probe mode"),
     }
 }
