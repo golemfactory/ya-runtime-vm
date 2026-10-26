@@ -21,12 +21,6 @@ pub fn mount(source: &str, target: &str, kind: &str, flags: Flags, data: &str) -
 }
 const MODULES: &[&str] = &[
     "failover",
-    "virtio",
-    "virtio_ring",
-    "virtio_mmio",
-    "virtio_pci_modern_dev",
-    "virtio_pci_legacy_dev",
-    "virtio_pci",
     "net_failover",
     "virtio_net",
     "rng-core",
@@ -40,7 +34,6 @@ const MODULES: &[&str] = &[
     "squashfs",
     "overlay",
     "af_packet",
-    "ipv6",
     "tun",
     "fuse",
     "virtiofs",

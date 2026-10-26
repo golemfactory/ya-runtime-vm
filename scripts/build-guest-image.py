@@ -15,15 +15,16 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 TARGET = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")).resolve()
 DEST = ROOT / "build/guest"
-KERNEL_URL = "https://ya-runtime.s3-eu-west-1.amazonaws.com/vm/kernel/linux-virt-5.10.29-r0.apk"
-KERNEL_SHA256 = "f3f7ca3421c5232e260b2a8a741bbf72c21881006afcf790aa3bc938e2262719"
+KERNEL_RELEASE = "6.18.58-0-virt"
+KERNEL_URL = "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/linux-virt-6.18.58-r0.apk"
+KERNEL_SHA256 = "1eec55004cf7167c914c8839f46691d2bc82767e20466bff51eb45d06f8e90cc"
+# virtio, virtio_pci, virtio_mmio and ipv6 are built into this kernel.
 MODULES = [
-    "net/core/failover", "drivers/virtio/virtio", "drivers/virtio/virtio_ring",
-    "drivers/virtio/virtio_mmio", "drivers/virtio/virtio_pci", "drivers/net/net_failover",
+    "net/core/failover", "drivers/net/net_failover",
     "drivers/net/virtio_net", "drivers/char/hw_random/rng-core", "drivers/char/hw_random/virtio-rng",
     "drivers/block/virtio_blk", "net/vmw_vsock/vsock", "net/vmw_vsock/vmw_vsock_virtio_transport_common",
     "net/vmw_vsock/vmw_vsock_virtio_transport", "fs/mbcache", "fs/ext2/ext2", "fs/squashfs/squashfs",
-    "fs/overlayfs/overlay", "net/packet/af_packet", "net/ipv6/ipv6", "drivers/net/tun", "fs/fuse/fuse",
+    "fs/overlayfs/overlay", "net/packet/af_packet", "drivers/net/tun", "fs/fuse/fuse",
     "fs/fuse/virtiofs",
 ]
 
@@ -54,7 +55,7 @@ def main():
     DEST.mkdir(parents=True, exist_ok=True)
     cache = TARGET / "guest-image"
     cache.mkdir(parents=True, exist_ok=True)
-    apk = cache / "kernel.apk"
+    apk = cache / Path(KERNEL_URL).name
     if not apk.exists():
         with urllib.request.urlopen(KERNEL_URL, timeout=60) as response:
             apk.write_bytes(response.read())
@@ -77,14 +78,11 @@ def main():
     with tarfile.open(apk, "r:gz") as package:
         members = {member.name.removeprefix("./"): member for member in package.getmembers()}
         (DEST / "vmlinuz-virt").write_bytes(package.extractfile(members["boot/vmlinuz-virt"]).read())
-        prefix = "lib/modules/5.10.29-0-virt/kernel/"
+        prefix = f"lib/modules/{KERNEL_RELEASE}/kernel/"
+        # The kernel has no in-kernel module decompression; ship plain .ko files.
         for module in MODULES:
-            name = module + ".ko"
-            entries.append((Path(name).name, package.extractfile(members[prefix + name]).read(), stat.S_IFREG | 0o644))
-        for optional in ("virtio_pci_modern_dev", "virtio_pci_legacy_dev"):
-            key = prefix + f"drivers/virtio/{optional}.ko"
-            if key in members:
-                entries.append((optional + ".ko", package.extractfile(members[key]).read(), stat.S_IFREG | 0o644))
+            data = gzip.decompress(package.extractfile(members[prefix + module + ".ko.gz"]).read())
+            entries.append((Path(module).name + ".ko", data, stat.S_IFREG | 0o644))
     archive = io.BytesIO()
     for inode, (name, data, mode) in enumerate(entries, 1):
         add_entry(archive, name, data, mode, inode)
