@@ -8043,7 +8043,7 @@ dependencies = [
 
 [[package]]
 name = "ya-runtime-vm"
-version = "0.6.0-rc2"
+version = "0.6.0-rc3"
 dependencies = [
  "anyhow",
  "async-trait",
