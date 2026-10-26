@@ -42,6 +42,8 @@ pub unsafe fn run(envp: *mut *mut u8) -> crate::error::Result<()> {
         SocketFlags::CLOEXEC,
         None,
     )?;
+    set_vsock_buffer_size(&fd, VSOCK_BUFFER)
+        .context("limiting the manager vsock receive buffer")?;
     // rustix exposes AF_VSOCK but does not yet provide a typed sockaddr_vm.
     // Linux's 16-byte layout below has no padding and is fully initialized.
     #[repr(C)]
@@ -72,6 +74,32 @@ pub unsafe fn run(envp: *mut *mut u8) -> crate::error::Result<()> {
         ya_vm_agent_protocol::VSOCK_PORT
     );
     service::serve(File::from(fd), environment)
+}
+
+// Linux 5.10 never answers OpenVMM's CREDIT_REQUEST, and OpenVMM reads the
+// guest's credit only from CREDIT_UPDATE packets, not from RW headers. Below
+// 64 KiB the guest sends CREDIT_UPDATE after every read; at the default
+// 256 KiB it sends none, so host-to-guest traffic stalled after 256 KiB.
+const VSOCK_BUFFER: u64 = 32 * 1024;
+
+fn set_vsock_buffer_size(fd: &impl rustix::fd::AsRawFd, size: u64) -> rustix::io::Result<()> {
+    // AF_VSOCK level, SO_VM_SOCKETS_BUFFER_SIZE; rustix has no typed setter.
+    const AF_VSOCK: usize = 40;
+    const SO_VM_SOCKETS_BUFFER_SIZE: usize = 0;
+    // SAFETY: fd is an open socket and size is a live, initialized u64.
+    unsafe {
+        signals::syscall5(
+            linux_raw_sys::general::__NR_setsockopt,
+            [
+                fd.as_raw_fd() as usize,
+                AF_VSOCK,
+                SO_VM_SOCKETS_BUFFER_SIZE,
+                &size as *const u64 as usize,
+                core::mem::size_of::<u64>(),
+            ],
+        )
+    }
+    .map(|_| ())
 }
 
 pub fn shutdown() -> ! {

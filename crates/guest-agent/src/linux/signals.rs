@@ -18,6 +18,13 @@ pub struct ChildSignals {
 // SAFETY: callers must provide valid arguments for the selected Linux syscall.
 #[cfg(target_arch = "x86_64")]
 unsafe fn syscall4(number: u32, args: [usize; 4]) -> io::Result<usize> {
+    // SAFETY: forwarded from the caller; the unused fifth argument is zero.
+    unsafe { syscall5(number, [args[0], args[1], args[2], args[3], 0]) }
+}
+
+// SAFETY: callers must provide valid arguments for the selected Linux syscall.
+#[cfg(target_arch = "x86_64")]
+pub(super) unsafe fn syscall5(number: u32, args: [usize; 5]) -> io::Result<usize> {
     let result: isize;
     // SAFETY: the x86-64 syscall ABI preserves the stack and clobbers rcx/r11.
     // Memory effects are deliberately not marked nomem: the kernel reads and
@@ -27,7 +34,7 @@ unsafe fn syscall4(number: u32, args: [usize; 4]) -> io::Result<usize> {
             "syscall",
             inlateout("rax") number as usize => result,
             in("rdi") args[0], in("rsi") args[1], in("rdx") args[2], in("r10") args[3],
-            lateout("rcx") _, lateout("r11") _, options(nostack),
+            in("r8") args[4], lateout("rcx") _, lateout("r11") _, options(nostack),
         );
     }
     if (-4095..0).contains(&result) {
