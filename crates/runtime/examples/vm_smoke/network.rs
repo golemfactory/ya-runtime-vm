@@ -93,8 +93,10 @@ impl Peer {
     }
     pub fn verify(&self) -> anyhow::Result<()> {
         for (family, count) in self.packets.iter().enumerate() {
+            // The VPN MTU of 1220 is below IPv6's minimum of 1280.
+            let expected = if self.role == 0 && family == 1 { 0 } else { 3 };
             ensure!(
-                count.load(Ordering::Relaxed) == 3,
+                count.load(Ordering::Relaxed) == expected,
                 "role {} IPv{} did not carry all test datagrams",
                 self.role,
                 if family == 0 { 4 } else { 6 }

@@ -306,7 +306,8 @@ stdout/stderr before both normal and entrypoint termination. Explicit RAM/storag
 mounts under `/tmp` and `/dev/shm` must remain visible, with the configured `/tmp`
 size limit enforced. Network cases cover both interfaces over UDP,
 INET-only over TCP connect, and VPN-only over TCP listen. A local Ethernet peer
-answers ARP/NDP and exchanges labelled UDP payloads over IPv4 and IPv6, including
+answers ARP/NDP and exchanges labelled UDP payloads over IPv4 and, on INET, IPv6 (the
+VPN interface keeps the C init's 1220-byte MTU, below IPv6's minimum), including
 routing through the configured gateways and partial TCP framing. No external
 network, TAP interface or network administrator privileges are required. IPv6
 startup waits only for an address confirmed tentative by the guest kernel, with

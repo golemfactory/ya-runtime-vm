@@ -8,6 +8,11 @@ use core::net::IpAddr;
 use linux_raw_sys::netlink::{self as nl, NLM_F_CREATE, NLM_F_REPLACE};
 use ya_vm_agent_protocol::Network;
 const REPLACE: u16 = (NLM_F_CREATE | NLM_F_REPLACE) as u16;
+// Values from the C init. Its INET MTU of 65521 is not restored: OpenVMM
+// advertises VIRTIO_NET_F_MTU 1500, which is the guest's maximum MTU.
+const MTU_VPN: u32 = 1220;
+const NET_MEM_DEFAULT: &str = "1048576";
+const NET_MEM_MAX: &str = "2097152";
 fn index(name: &str) -> Result<u32> {
     Ok(
         fs::read_to_string(format!("/sys/class/net/{name}/ifindex"))?
@@ -24,6 +29,21 @@ fn link(index: u32, flags: u32, change: u32) -> Vec<u8> {
 }
 fn up(index: u32) -> Result<()> {
     request(nl::RTM_NEWLINK as u16, 0, &link(index, 1, 1))
+}
+fn mtu(index: u32, mtu: u32) -> Result<()> {
+    let mut message = link(index, 0, 0);
+    attribute(&mut message, nl::IFLA_MTU as u16, &mtu.to_ne_bytes());
+    request(nl::RTM_NEWLINK as u16, 0, &message)
+}
+fn sysctl(path: &str, value: &str) -> Result<()> {
+    let file = rustix::fs::open(
+        path,
+        rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .with_context(|| format!("opening {path}"))?;
+    fs::File::from(file).write_all(value.as_bytes())?;
+    Ok(())
 }
 fn rename(index: u32, name: &str) -> Result<()> {
     let mut message = link(index, 0, 0);
@@ -64,6 +84,16 @@ pub fn loopback() -> Result<()> {
     }
     for (i, role) in interfaces {
         rename(i, &format!("eth{role}"))?;
+        if role == 0 {
+            mtu(i, MTU_VPN)?;
+        }
+    }
+    for kind in ["rmem", "wmem"] {
+        sysctl(
+            &format!("/proc/sys/net/core/{kind}_default"),
+            NET_MEM_DEFAULT,
+        )?;
+        sysctl(&format!("/proc/sys/net/core/{kind}_max"), NET_MEM_MAX)?;
     }
     let index = index("lo")?;
     up(index)?;
@@ -107,6 +137,10 @@ pub fn configure(config: Network) -> Result<()> {
             .map(|(a, p)| (a, Some(p)))
             .unwrap_or((&addr, None));
         let addr: IpAddr = addr.parse()?;
+        crate::ensure!(
+            config.iface != 0 || addr.is_ipv4(),
+            "IPv6 needs an MTU of at least 1280; the VPN interface uses {MTU_VPN}"
+        );
         let prefix = match suffix.or(config.mask.as_deref()).filter(|m| !m.is_empty()) {
             Some(mask) => prefix(mask, addr.is_ipv4())?,
             None => {
@@ -128,6 +162,10 @@ pub fn configure(config: Network) -> Result<()> {
     }
     if let Some(gateway) = config.gateway.filter(|s| !s.is_empty()) {
         let gateway: IpAddr = gateway.parse()?;
+        crate::ensure!(
+            config.iface != 0 || gateway.is_ipv4(),
+            "IPv6 needs an MTU of at least 1280; the VPN interface uses {MTU_VPN}"
+        );
         let mut message = vec![
             family(gateway),
             0,

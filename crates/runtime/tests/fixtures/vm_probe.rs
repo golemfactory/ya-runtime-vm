@@ -64,7 +64,17 @@ fn network(mode: &str) {
             continue;
         }
         let label = if role == 0 { "vpn" } else { "inet" };
-        for v6 in [false, true] {
+        let mtu: usize = fs::read_to_string(format!("/sys/class/net/eth{role}/mtu"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(mtu, if role == 0 { 1220 } else { 1500 }, "eth{role} MTU");
+        // IPv6 needs an MTU of at least 1280, so the VPN interface has none.
+        for v6 in [false, true]
+            .into_iter()
+            .take(if role == 0 { 1 } else { 2 })
+        {
             let source = if v6 {
                 format!("[fd00:{}::2]:0", 71 + role)
             } else {
@@ -134,7 +144,8 @@ fn network(mode: &str) {
                 .set_read_timeout(Some(std::time::Duration::from_secs(3)))
                 .unwrap();
             socket.connect(&remote).unwrap();
-            for size in [32, 257, 1400] {
+            // The largest payload fits one frame: IP and UDP headers are 28/48 bytes.
+            for size in [32, 257, mtu - if v6 { 48 } else { 28 }] {
                 let tag = format!("REQ-{label}-{}-{size}", if v6 { 6 } else { 4 });
                 let mut packet = vec![b'X'; size];
                 packet[..tag.len()].copy_from_slice(tag.as_bytes());
@@ -145,6 +156,15 @@ fn network(mode: &str) {
                 assert_eq!(&reply[..received], packet);
             }
         }
+    }
+    for (name, value) in [
+        ("rmem_default", "1048576"),
+        ("rmem_max", "2097152"),
+        ("wmem_default", "1048576"),
+        ("wmem_max", "2097152"),
+    ] {
+        let path = format!("/proc/sys/net/core/{name}");
+        assert_eq!(fs::read_to_string(&path).unwrap().trim(), value, "{path}");
     }
     println!("NETWORK_OK {mode}");
 }

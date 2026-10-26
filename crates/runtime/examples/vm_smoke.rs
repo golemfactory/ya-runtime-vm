@@ -90,6 +90,7 @@ async fn commands(
             continue;
         }
         let mut agent = ga.lock().await;
+        // IPv6 is unavailable on the VPN interface: its MTU is below 1280.
         for (address, mask, network, gateway) in [
             (
                 format!("10.{}.0.2", 71 + role),
@@ -103,7 +104,10 @@ async fn commands(
                 if role == 0 { "fdff:71::" } else { "" },
                 format!("fd00:{}::1", 71 + role),
             ),
-        ] {
+        ]
+        .into_iter()
+        .take(if role == 0 { 1 } else { 2 })
+        {
             ensure!(
                 agent.add_address(&address, mask, role).await?.is_ok(),
                 "guest address update failed"
@@ -146,7 +150,7 @@ async fn commands(
     if !err.is_empty() {
         log::info!("network probe: {}", String::from_utf8_lossy(&err).trim());
     }
-    println!("NETWORK_OK {mode}: IPv4/IPv6 packets crossed the expected Ethernet peers");
+    println!("NETWORK_OK {mode}: IPv4 and INET IPv6 packets crossed the expected Ethernet peers");
     for (role, uid) in [("root", 0), ("user", 1000)] {
         let pid = ga
             .lock()
