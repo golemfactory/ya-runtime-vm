@@ -395,19 +395,41 @@ async fn kill_command(
     Ok(())
 }
 
-pub(crate) async fn stop(
-    runtime_data: Arc<Mutex<RuntimeData>>,
-) -> Result<(), server::ErrorResponse> {
+/// Stops the VM. This also succeeds when the guest has already halted on its
+/// own, for example after the entrypoint exited.
+pub async fn stop(runtime_data: Arc<Mutex<RuntimeData>>) -> Result<(), server::ErrorResponse> {
     log::debug!("got shutdown");
     let mut data = runtime_data.lock().await;
     let mut runtime = data.runtime().ok();
 
-    let quit_result = match data.ga() {
-        Ok(mutex) => {
-            let mut ga = mutex.lock().await;
-            convert_result(ga.quit().await, "Sending quit")
+    let quit_result = match (data.halted(), data.ga(), data.halt.clone()) {
+        (Some(reason), ..) => {
+            log::info!("Guest already halted ({reason})");
+            Ok(())
         }
-        Err(error) => Err(runtime_error(error)),
+        (None, Ok(mutex), halt) => {
+            let quit = async {
+                let mut ga = mutex.lock().await;
+                convert_result(ga.quit().await, "Sending quit")
+            };
+            // The guest may power off on its own while the quit is pending.
+            let halted = async {
+                let Some(mut halt) = halt else {
+                    return futures::future::pending().await;
+                };
+                while halt.borrow().is_none() {
+                    if halt.changed().await.is_err() {
+                        // Stopped without a halt: the quit result decides.
+                        return futures::future::pending().await;
+                    }
+                }
+            };
+            tokio::select! {
+                result = quit => result,
+                () = halted => Ok(()),
+            }
+        }
+        (None, Err(error), _) => Err(runtime_error(error)),
     };
 
     if let Some(mut runtime) = runtime.take() {
@@ -646,5 +668,81 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    fn halted_data(
+        ga: Option<Arc<Mutex<guest_agent_comm::GuestAgent>>>,
+    ) -> (
+        Arc<Mutex<RuntimeData>>,
+        tokio::sync::watch::Sender<Option<String>>,
+    ) {
+        let (halt_tx, halt) = tokio::sync::watch::channel(None);
+        let data = Arc::new(Mutex::new(RuntimeData {
+            deployment: Some(Deployment::default()),
+            vpn: Some(ContainerEndpoint::UdpDatagram(
+                "127.0.0.1:1".parse().unwrap(),
+            )),
+            ga,
+            halt: Some(halt),
+            ..Default::default()
+        }));
+        (data, halt_tx)
+    }
+
+    #[tokio::test]
+    async fn commands_after_guest_halt_fail_and_stop_succeeds() {
+        let (data, halt) = halted_data(None);
+        halt.send_replace(Some("PowerOff".into()));
+        let error = run_command(data.clone(), server::RunProcess::default())
+            .await
+            .unwrap_err();
+        assert!(format!("{error:?}").contains("guest halted (PowerOff)"));
+        assert!(
+            kill_command(data.clone(), server::KillProcess::default())
+                .await
+                .is_err()
+        );
+        assert!(
+            join_network(
+                data.clone(),
+                server::CreateNetwork {
+                    interface: server::NetworkInterface::Vpn as i32,
+                    ..Default::default()
+                },
+            )
+            .await
+            .is_err()
+        );
+        stop(data.clone()).await.unwrap();
+        stop(data).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_returns_when_the_guest_halts_during_quit() {
+        use crate::guest_agent_comm::{GuestAgent, read_message, write_message};
+        use ya_vm_agent_protocol::{Command, Message, VERSION};
+        let (host, mut guest) = local_socket::LocalStream::pair().unwrap();
+        write_message(&mut guest, &Message::Ready { version: VERSION })
+            .await
+            .unwrap();
+        let ga = GuestAgent::from_stream(host, 2, |_, _| async {}.boxed())
+            .await
+            .unwrap();
+        let (data, halt) = halted_data(Some(ga));
+        let stopping = tokio::spawn(stop(data));
+        // The guest receives the quit but powers off instead of answering.
+        assert!(matches!(
+            read_message(&mut guest).await.unwrap(),
+            Message::Request {
+                command: Command::Quit,
+                ..
+            }
+        ));
+        halt.send_replace(Some("PowerOff".into()));
+        tokio::time::timeout(Duration::from_secs(5), stopping)
+            .await
+            .expect("stop waited for the quit response")
+            .unwrap()
+            .unwrap();
     }
 }

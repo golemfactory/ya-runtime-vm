@@ -46,6 +46,9 @@ pub struct RuntimeData {
     pub deployment: Option<Deployment>,
     pub ga: Option<Arc<Mutex<GuestAgent>>>,
     pub pci_device_id: Option<Vec<String>>,
+    /// Set to the halt reason when the guest stops on its own, for example
+    /// after its entrypoint exits. Readable without locking `RuntimeData`.
+    pub halt: Option<tokio::sync::watch::Receiver<Option<String>>>,
 }
 
 impl RuntimeData {
@@ -62,9 +65,17 @@ impl RuntimeData {
     }
 
     pub fn ga(&self) -> anyhow::Result<Arc<Mutex<GuestAgent>>> {
+        if let Some(reason) = self.halted() {
+            anyhow::bail!("VM is not running: the guest halted ({reason})");
+        }
         self.ga
             .clone()
             .ok_or_else(|| anyhow::anyhow!("Runtime not started"))
+    }
+
+    /// The reason the guest halted on its own, if it did.
+    pub fn halted(&self) -> Option<String> {
+        self.halt.as_ref().and_then(|halt| halt.borrow().clone())
     }
 }
 
@@ -187,7 +198,12 @@ pub async fn start_vmrt(
     data.runtime.replace(runtime);
     data.vm_rpc.replace(vm_rpc);
     data.ga.replace(ga);
+    let (halt_tx, halt_rx) = tokio::sync::watch::channel(None);
+    data.halt.replace(halt_rx);
 
+    // The guest powers off by itself after its entrypoint's exit is
+    // acknowledged, or halts on a fatal error. A host stop() closes the
+    // channel instead.
     let runtime_data_for_halt = runtime_data.clone();
     spawn(async move {
         match notify_recv.recv().await {
@@ -198,8 +214,15 @@ pub async fn start_vmrt(
                     }
                     _ => log::error!("{}", guest_halt_error(&reason)),
                 }
-                let mut worker = runtime_data_for_halt.lock().await.runtime.take();
-                if let Some(mut worker) = worker.take() {
+                // Publish first: stop() may hold the data lock while it waits.
+                halt_tx.send_replace(Some(format!("{reason:?}")));
+                let worker = {
+                    let mut data = runtime_data_for_halt.lock().await;
+                    data.ga.take();
+                    data.vm_rpc.take();
+                    data.runtime.take()
+                };
+                if let Some(mut worker) = worker {
                     worker.stop();
                     if let Err(error) = worker.join().await {
                         log::error!("OpenVMM worker failed while stopping: {error:#}");
