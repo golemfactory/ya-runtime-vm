@@ -25,7 +25,11 @@ fn setup() -> (tempdir::TempDir, SharedDir) {
         .try_init();
     let temp = tempdir::TempDir::new("shared-dir-test").unwrap();
     std::fs::create_dir(temp.path().join("share")).unwrap();
-    let fs = SharedDir::new(open_root(temp.path(), "share").unwrap()).unwrap();
+    let fs = SharedDir::new(
+        open_root(temp.path(), "share").unwrap(),
+        ShareLimits::default(),
+    )
+    .unwrap();
     (temp, fs)
 }
 fn lookup(fs: &SharedDir, parent: u64, s: &str) -> fuse_entry_out {
@@ -633,6 +637,19 @@ fn name_rules_do_not_depend_on_host_platform() {
         "aux.c",
         "lpt1",
         "2026-10-26T01:00:00.log",
+        "wild*card",
+        "wild?card",
+        "a<b",
+        "a>b",
+        "a|b",
+        "a\"b",
+        "line\nbreak",
+        "conin$",
+        "CONOUT$.txt",
+        "con .txt",
+        "com¹",
+        "LPT².txt",
+        "COM³",
     ] {
         assert_eq!(
             component(bad.as_bytes()).unwrap_err(),
@@ -640,9 +657,570 @@ fn name_rules_do_not_depend_on_host_platform() {
             "{bad:?}"
         );
     }
-    for valid in ["file.txt", "auxiliary.c", "2026-10-26T01-00-00.log"] {
+    for bad in [
+        b"invalid\xff".as_slice(),
+        &[0xc0, 0xaf],
+        &[0xed, 0xa0, 0x80],
+    ] {
+        assert_eq!(component(bad).unwrap_err(), lx::Error::EINVAL);
+    }
+    for valid in [
+        "file.txt",
+        "auxiliary.c",
+        "2026-10-26T01-00-00.log",
+        "zażółć.txt",
+        "COM10",
+    ] {
         assert!(component(valid.as_bytes()).is_ok(), "{valid:?}");
     }
+}
+
+#[test]
+fn rejected_names_cannot_mutate_the_export() {
+    let (temp, fs) = setup();
+    let file = create(&fs, 1, "safe");
+    release(&fs, file.entry.nodeid, file.open.fh);
+    for bad in [
+        "../outside",
+        "file:stream",
+        "CONIN$",
+        "COM¹.txt",
+        "con .txt",
+        "wild*card",
+        "line\nbreak",
+    ] {
+        assert_eq!(
+            fs.lookup(&request(1), name(bad)).unwrap_err(),
+            lx::Error::EINVAL
+        );
+        assert!(matches!(
+            fs.create(&request(1), name(bad), &fuse_create_in::new_zeroed()),
+            Err(lx::Error::EINVAL)
+        ));
+        assert_eq!(
+            fs.mkdir(&request(1), name(bad), &fuse_mkdir_in::new_zeroed())
+                .unwrap_err(),
+            lx::Error::EINVAL
+        );
+        assert_eq!(
+            fs.rename(&request(1), name("safe"), 1, name(bad), 0)
+                .unwrap_err(),
+            lx::Error::EINVAL
+        );
+        assert_eq!(
+            fs.rename(&request(1), name(bad), 1, name("safe"), 0)
+                .unwrap_err(),
+            lx::Error::EINVAL
+        );
+        assert_eq!(
+            fs.unlink(&request(1), name(bad)).unwrap_err(),
+            lx::Error::EINVAL
+        );
+        assert_eq!(
+            fs.rmdir(&request(1), name(bad)).unwrap_err(),
+            lx::Error::EINVAL
+        );
+    }
+    assert!(temp.path().join("share/safe").is_file());
+    assert_eq!(
+        std::fs::read_dir(temp.path().join("share"))
+            .unwrap()
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn adding_a_host_hardlink_revokes_io_on_existing_guest_handles() {
+    let (temp, fs) = setup();
+    let file = create(&fs, 1, "file");
+    let id = file.entry.nodeid;
+    let fh = file.open.fh;
+    write(&fs, id, fh, b"original");
+    let outside = temp.path().join("outside");
+    std::fs::hard_link(temp.path().join("share/file"), &outside).unwrap();
+    assert_eq!(
+        fs.open(&request(id), (lx::O_RDWR | lx::O_TRUNC) as u32)
+            .unwrap_err(),
+        lx::Error::EPERM
+    );
+    assert_eq!(
+        fs.read(
+            &request(id),
+            &fuse_read_in {
+                fh,
+                size: 8,
+                ..FromZeros::new_zeroed()
+            }
+        )
+        .unwrap_err(),
+        lx::Error::EPERM
+    );
+    assert_eq!(
+        fs.write(
+            &request(id),
+            &fuse_write_in {
+                fh,
+                size: 1,
+                ..FromZeros::new_zeroed()
+            },
+            b"x"
+        )
+        .unwrap_err(),
+        lx::Error::EPERM
+    );
+    assert_eq!(
+        fs.set_attr(
+            &request(id),
+            &fuse_setattr_in {
+                valid: FATTR_SIZE | FATTR_FH,
+                fh,
+                size: 0,
+                ..FromZeros::new_zeroed()
+            }
+        )
+        .unwrap_err(),
+        lx::Error::EPERM
+    );
+    assert_eq!(std::fs::read(&outside).unwrap(), b"original");
+    std::fs::remove_file(&outside).unwrap();
+    assert_eq!(read(&fs, id, fh), b"original");
+    release(&fs, id, fh);
+}
+
+fn setup_limited(bytes: u64, entries: u64) -> (tempdir::TempDir, SharedDir) {
+    let temp = tempdir::TempDir::new("shared-dir-quota").unwrap();
+    std::fs::create_dir(temp.path().join("share")).unwrap();
+    let fs = SharedDir::new(
+        open_root(temp.path(), "share").unwrap(),
+        ShareLimits {
+            max_bytes: bytes,
+            max_entries: entries,
+        },
+    )
+    .unwrap();
+    (temp, fs)
+}
+fn resize(fs: &SharedDir, node: u64, fh: u64, size: u64) -> lx::Result<fuse_attr_out> {
+    fs.set_attr(
+        &request(node),
+        &fuse_setattr_in {
+            valid: FATTR_SIZE | FATTR_FH,
+            fh,
+            size,
+            ..FromZeros::new_zeroed()
+        },
+    )
+}
+fn write_at(fs: &SharedDir, node: u64, fh: u64, offset: u64, data: &[u8]) -> lx::Result<usize> {
+    fs.write(
+        &request(node),
+        &fuse_write_in {
+            fh,
+            offset,
+            size: data.len() as u32,
+            ..FromZeros::new_zeroed()
+        },
+        data,
+    )
+}
+
+#[test]
+fn quota_covers_aggregate_sizes_append_sparse_writes_and_truncate() {
+    let (_temp, fs) = setup_limited(8, 8);
+    let a = create(&fs, 1, "a");
+    let b = create(&fs, 1, "b");
+    write(&fs, a.entry.nodeid, a.open.fh, b"12345");
+    assert_eq!(
+        write_at(&fs, b.entry.nodeid, b.open.fh, 0, b"1234").unwrap_err(),
+        lx::Error::ENOSPC
+    );
+    assert_eq!(
+        write_at(&fs, a.entry.nodeid, a.open.fh, 8, b"x").unwrap_err(),
+        lx::Error::ENOSPC
+    );
+    assert_eq!(
+        resize(&fs, b.entry.nodeid, b.open.fh, u64::MAX).unwrap_err(),
+        lx::Error::ENOSPC
+    );
+    assert!(read(&fs, b.entry.nodeid, b.open.fh).is_empty());
+    let append = fs
+        .open(
+            &request(a.entry.nodeid),
+            (lx::O_WRONLY | lx::O_APPEND) as u32,
+        )
+        .unwrap()
+        .fh;
+    assert_eq!(
+        write_at(&fs, a.entry.nodeid, append, 0, b"more").unwrap_err(),
+        lx::Error::ENOSPC
+    );
+    assert_eq!(read(&fs, a.entry.nodeid, a.open.fh), b"12345");
+    resize(&fs, a.entry.nodeid, a.open.fh, 2).unwrap();
+    write(&fs, b.entry.nodeid, b.open.fh, b"123456");
+    assert_eq!(
+        write_at(&fs, a.entry.nodeid, append, 0, b"x").unwrap_err(),
+        lx::Error::ENOSPC
+    );
+    fs.open(
+        &request(b.entry.nodeid),
+        (lx::O_WRONLY | lx::O_TRUNC) as u32,
+    )
+    .unwrap();
+    write_at(&fs, a.entry.nodeid, append, 0, b"x").unwrap();
+}
+
+#[test]
+fn quota_is_not_refunded_by_forged_handles_forget_or_open_unlink() {
+    let (_temp, fs) = setup_limited(8, 8);
+    let a = create(&fs, 1, "a");
+    let b = create(&fs, 1, "b");
+    write(&fs, a.entry.nodeid, a.open.fh, b"12345678");
+    assert_eq!(
+        resize(&fs, a.entry.nodeid, b.open.fh, 0).unwrap_err(),
+        lx::Error::EBADF
+    );
+    assert_eq!(
+        write_at(&fs, b.entry.nodeid, b.open.fh, 0, b"x").unwrap_err(),
+        lx::Error::ENOSPC
+    );
+    fs.forget(a.entry.nodeid, u64::MAX);
+    assert_eq!(
+        write_at(&fs, b.entry.nodeid, b.open.fh, 0, b"x").unwrap_err(),
+        lx::Error::ENOSPC
+    );
+    fs.unlink(&request(1), name("a")).unwrap();
+    assert_eq!(
+        write_at(&fs, b.entry.nodeid, b.open.fh, 0, b"x").unwrap_err(),
+        lx::Error::ENOSPC
+    );
+    assert_eq!(read(&fs, a.entry.nodeid, a.open.fh), b"12345678");
+    release(&fs, a.entry.nodeid, a.open.fh);
+    write(&fs, b.entry.nodeid, b.open.fh, b"12345678");
+    // Forget/release of a still-linked file must not refund its on-disk usage.
+    fs.forget(b.entry.nodeid, u64::MAX);
+    release(&fs, b.entry.nodeid, b.open.fh);
+    let c = create(&fs, 1, "c");
+    assert_eq!(
+        write_at(&fs, c.entry.nodeid, c.open.fh, 0, b"x").unwrap_err(),
+        lx::Error::ENOSPC
+    );
+}
+
+#[test]
+fn quota_tracks_rename_replacement_until_the_old_inode_is_released() {
+    let (_temp, fs) = setup_limited(8, 8);
+    let src = create(&fs, 1, "src");
+    let dest = create(&fs, 1, "dest");
+    write(&fs, src.entry.nodeid, src.open.fh, b"1234");
+    write(&fs, dest.entry.nodeid, dest.open.fh, b"5678");
+    fs.rename(&request(1), name("src"), 1, name("dest"), 0)
+        .unwrap();
+    let c = create(&fs, 1, "c");
+    assert_eq!(
+        write_at(&fs, c.entry.nodeid, c.open.fh, 0, b"x").unwrap_err(),
+        lx::Error::ENOSPC
+    );
+    release(&fs, dest.entry.nodeid, dest.open.fh);
+    fs.forget(dest.entry.nodeid, 1);
+    write(&fs, c.entry.nodeid, c.open.fh, b"abcd");
+    assert_eq!(read(&fs, src.entry.nodeid, src.open.fh), b"1234");
+}
+
+#[test]
+fn entry_quota_covers_empty_files_and_directories_after_forget() {
+    let (_temp, fs) = setup_limited(1024, 3);
+    let file = create(&fs, 1, "file");
+    fs.forget(file.entry.nodeid, 1);
+    release(&fs, file.entry.nodeid, file.open.fh);
+    let dir = fs
+        .mkdir(&request(1), name("dir"), &fuse_mkdir_in::new_zeroed())
+        .unwrap();
+    assert!(matches!(
+        fs.create(&request(1), name("extra"), &fuse_create_in::new_zeroed()),
+        Err(lx::Error::ENOSPC)
+    ));
+    assert_eq!(
+        fs.mkdir(&request(1), name("extra"), &fuse_mkdir_in::new_zeroed())
+            .unwrap_err(),
+        lx::Error::ENOSPC
+    );
+    fs.rmdir(&request(1), name("dir")).unwrap();
+    // Its pinned inode is retained until FORGET, even without an open directory.
+    assert!(matches!(
+        fs.create(&request(1), name("extra"), &fuse_create_in::new_zeroed()),
+        Err(lx::Error::ENOSPC)
+    ));
+    fs.forget(dir.nodeid, 1);
+    create(&fs, 1, "extra");
+}
+
+#[test]
+fn quota_allows_existing_files_at_capacity_and_refunds_failed_creation() {
+    let (_temp, fs) = setup_limited(8, 3);
+    let file = create(&fs, 1, "file");
+    assert!(
+        fs.mkdir(&request(1), name("file"), &fuse_mkdir_in::new_zeroed())
+            .is_err()
+    );
+    create(&fs, 1, "other");
+    // No new directory entry is allocated by CREATE without O_EXCL on an
+    // existing name, even when the entry budget is full.
+    let reopened = fs
+        .create(
+            &request(1),
+            name("file"),
+            &fuse_create_in {
+                flags: lx::O_RDWR as u32,
+                ..FromZeros::new_zeroed()
+            },
+        )
+        .unwrap();
+    assert_eq!(reopened.entry.nodeid, file.entry.nodeid);
+}
+
+#[test]
+fn case_only_rename_does_not_refund_a_linked_files_charge() {
+    let (_temp, fs) = setup_limited(8, 4);
+    let file = create(&fs, 1, "file");
+    write(&fs, file.entry.nodeid, file.open.fh, b"12345678");
+    fs.rename(&request(1), name("file"), 1, name("FILE"), 0)
+        .unwrap();
+    fs.forget(file.entry.nodeid, 1);
+    release(&fs, file.entry.nodeid, file.open.fh);
+    let other = create(&fs, 1, "other");
+    assert_eq!(
+        write_at(&fs, other.entry.nodeid, other.open.fh, 0, b"x").unwrap_err(),
+        lx::Error::ENOSPC
+    );
+}
+
+#[test]
+fn startup_quota_counts_existing_nested_contents() {
+    let temp = tempdir::TempDir::new("shared-dir-existing-quota").unwrap();
+    std::fs::create_dir_all(temp.path().join("share/sub")).unwrap();
+    std::fs::write(temp.path().join("share/sub/file"), b"12345").unwrap();
+    let new = |bytes, entries| {
+        SharedDir::new(
+            open_root(temp.path(), "share").unwrap(),
+            ShareLimits {
+                max_bytes: bytes,
+                max_entries: entries,
+            },
+        )
+    };
+    assert!(new(4, 10).is_err());
+    assert!(new(10, 2).is_err());
+    let fs = new(5, 4).unwrap();
+    let file = create(&fs, 1, "new");
+    assert_eq!(
+        write_at(&fs, file.entry.nodeid, file.open.fh, 0, b"x").unwrap_err(),
+        lx::Error::ENOSPC
+    );
+}
+
+#[test]
+fn statfs_reports_only_the_share_budget_including_unlinked_pins() {
+    let (_temp, fs) = setup_limited(8192, 3);
+    let before = fs.statfs(&request(1)).unwrap();
+    assert_eq!(
+        (
+            before.blocks,
+            before.bfree,
+            before.files,
+            before.ffree,
+            before.bsize
+        ),
+        (2, 2, 3, 2, 4096)
+    );
+    let file = create(&fs, 1, "file");
+    resize(&fs, file.entry.nodeid, file.open.fh, 4096).unwrap();
+    fs.unlink(&request(1), name("file")).unwrap();
+    let pinned = fs.statfs(&request(1)).unwrap();
+    assert_eq!((pinned.bfree, pinned.bavail, pinned.ffree), (1, 1, 1));
+    fs.forget(file.entry.nodeid, 1);
+    release(&fs, file.entry.nodeid, file.open.fh);
+    let after = fs.statfs(&request(1)).unwrap();
+    assert_eq!((after.bfree, after.ffree), (2, 2));
+}
+
+#[test]
+fn hostile_wire_requests_are_rejected_without_mutating_host_files() {
+    struct Reply(Vec<u8>);
+    impl fuse::ReplySender for Reply {
+        fn send(&mut self, buffers: &[io::IoSlice<'_>]) -> io::Result<()> {
+            assert!(buffers.iter().map(|b| b.len()).sum::<usize>() <= MAX_IO + 512);
+            self.0 = buffers.iter().flat_map(|b| b.iter().copied()).collect();
+            Ok(())
+        }
+    }
+    fn dispatch(session: &fuse::Session, opcode: u32, node: u64, payload: &[u8]) -> i32 {
+        let header = fuse_in_header {
+            len: (size_of::<fuse_in_header>() + payload.len()) as u32,
+            opcode,
+            nodeid: node,
+            unique: 37,
+            uid: 0,
+            gid: 0,
+            ..FromZeros::new_zeroed()
+        };
+        let wire = [header.as_bytes(), payload].concat();
+        let mut reply = Reply(Vec::new());
+        session.dispatch(Request::new(wire.as_slice()).unwrap(), &mut reply, None);
+        let (out, _) = fuse_out_header::read_from_prefix(&reply.0).unwrap();
+        assert_eq!(out.unique, 37);
+        assert_eq!(out.len as usize, reply.0.len());
+        out.error
+    }
+    let (temp, fs) = setup_limited(1024, 8);
+    let file = create(&fs, 1, "safe");
+    write(&fs, file.entry.nodeid, file.open.fh, b"inside");
+    std::fs::write(temp.path().join("outside"), b"secret").unwrap();
+    let session = fuse::Session::new(fs);
+    assert_eq!(
+        dispatch(
+            &session,
+            FUSE_INIT,
+            0,
+            fuse_init_in {
+                major: 7,
+                minor: 31,
+                ..FromZeros::new_zeroed()
+            }
+            .as_bytes()
+        ),
+        0
+    );
+    let mut cases = vec![
+        (FUSE_LOOKUP, 1, b"../outside\0".to_vec()),
+        (FUSE_LOOKUP, 1, b"CONIN$\0".to_vec()),
+        (FUSE_SYMLINK, 1, b"link\0../outside\0".to_vec()),
+        (
+            FUSE_READ,
+            file.entry.nodeid,
+            fuse_read_in {
+                fh: file.open.fh,
+                size: u32::MAX,
+                ..FromZeros::new_zeroed()
+            }
+            .as_bytes()
+            .to_vec(),
+        ),
+        (
+            FUSE_READ,
+            1,
+            fuse_read_in {
+                fh: file.open.fh,
+                size: 6,
+                ..FromZeros::new_zeroed()
+            }
+            .as_bytes()
+            .to_vec(),
+        ),
+        (
+            FUSE_WRITE,
+            file.entry.nodeid,
+            [
+                fuse_write_in {
+                    fh: file.open.fh,
+                    size: u32::MAX,
+                    ..FromZeros::new_zeroed()
+                }
+                .as_bytes(),
+                b"x",
+            ]
+            .concat(),
+        ),
+        (
+            FUSE_WRITE,
+            file.entry.nodeid,
+            [
+                fuse_write_in {
+                    fh: file.open.fh,
+                    offset: u64::MAX,
+                    size: 1,
+                    ..FromZeros::new_zeroed()
+                }
+                .as_bytes(),
+                b"x",
+            ]
+            .concat(),
+        ),
+        (
+            FUSE_SETATTR,
+            file.entry.nodeid,
+            fuse_setattr_in {
+                valid: FATTR_SIZE | FATTR_FH,
+                fh: u64::MAX,
+                size: 0,
+                ..FromZeros::new_zeroed()
+            }
+            .as_bytes()
+            .to_vec(),
+        ),
+        (
+            FUSE_READDIR,
+            1,
+            fuse_read_in {
+                fh: u64::MAX,
+                size: u32::MAX,
+                ..FromZeros::new_zeroed()
+            }
+            .as_bytes()
+            .to_vec(),
+        ),
+        (
+            FUSE_RENAME,
+            1,
+            [
+                fuse_rename_in { newdir: u64::MAX }.as_bytes(),
+                b"safe\0outside\0",
+            ]
+            .concat(),
+        ),
+        (
+            FUSE_IOCTL,
+            file.entry.nodeid,
+            fuse_ioctl_in {
+                out_size: u32::MAX,
+                ..FromZeros::new_zeroed()
+            }
+            .as_bytes()
+            .to_vec(),
+        ),
+        (
+            FUSE_SETUPMAPPING,
+            file.entry.nodeid,
+            fuse_setupmapping_in::new_zeroed().as_bytes().to_vec(),
+        ),
+    ];
+    // Corrupt/truncate every fixed-layout operation without giving the backend
+    // an opportunity to interpret guest lengths as allocation sizes.
+    for opcode in [FUSE_READ, FUSE_WRITE, FUSE_SETATTR, FUSE_IOCTL, FUSE_RENAME] {
+        for length in [0, 1, 7, 15] {
+            cases.push((opcode, file.entry.nodeid, vec![0xff; length]));
+        }
+    }
+    for (opcode, node, payload) in cases {
+        assert!(
+            dispatch(&session, opcode, node, &payload) < 0,
+            "accepted opcode {opcode}"
+        );
+    }
+    assert_eq!(
+        std::fs::read(temp.path().join("share/safe")).unwrap(),
+        b"inside"
+    );
+    assert_eq!(
+        std::fs::read(temp.path().join("outside")).unwrap(),
+        b"secret"
+    );
+    assert_eq!(
+        std::fs::read_dir(temp.path().join("share"))
+            .unwrap()
+            .count(),
+        1
+    );
 }
 
 #[test]

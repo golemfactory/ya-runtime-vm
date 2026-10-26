@@ -8,7 +8,6 @@ use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 #[cfg(windows)]
 use cap_std::fs::OpenOptions;
 use cap_std::fs::{Dir, Metadata};
-use fuse::protocol::fuse_kstatfs;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io;
@@ -141,34 +140,39 @@ pub(super) fn component(bytes: &[u8]) -> lx::Result<OsString> {
         || bytes.len() > 255
         || bytes == b"."
         || bytes == b".."
-        || bytes.iter().any(|b| matches!(b, 0 | b'/' | b'\\' | b':'))
+        || bytes.iter().any(|b| {
+            matches!(
+                b,
+                0..=31 | b'/' | b'\\' | b':' | b'<' | b'>' | b'"' | b'|' | b'?' | b'*'
+            )
+        })
         || matches!(bytes.last(), Some(b'.' | b' '))
     {
         return Err(lx::Error::EINVAL);
     }
-    let base = bytes
-        .split(|b| *b == b'.')
+    // Require the same encoding even on hosts that permit arbitrary bytes.
+    let name = std::str::from_utf8(bytes).map_err(|_| lx::Error::EINVAL)?;
+    let base = name
+        .split('.')
         .next()
         .unwrap()
+        .trim_end_matches(' ')
         .to_ascii_uppercase();
-    if matches!(base.as_slice(), b"CON" | b"PRN" | b"AUX" | b"NUL")
-        || (base.len() == 4
-            && matches!(&base[..3], b"COM" | b"LPT")
-            && matches!(base[3], b'1'..=b'9'))
-    {
+    let port = base
+        .strip_prefix("COM")
+        .or_else(|| base.strip_prefix("LPT"));
+    if matches!(
+        base.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || port.is_some_and(|port| {
+        matches!(
+            port,
+            "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+        )
+    }) {
         return Err(lx::Error::EINVAL);
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        Ok(OsStr::from_bytes(bytes).to_os_string())
-    }
-    #[cfg(windows)]
-    {
-        Ok(OsString::from(
-            std::str::from_utf8(bytes).map_err(|_| lx::Error::EINVAL)?,
-        ))
-    }
+    Ok(OsString::from(name))
 }
 pub(super) fn name_bytes(name: &OsStr) -> Option<&[u8]> {
     #[cfg(unix)]
@@ -430,74 +434,4 @@ fn set_information(
         );
     }
     Ok(())
-}
-
-pub(super) fn filesystem_stats(root: &Dir) -> lx::Result<fuse_kstatfs> {
-    #[cfg(target_os = "linux")]
-    let (blocks, bfree, bavail, files, ffree, bsize) = {
-        use std::os::fd::AsRawFd;
-        let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-        // SAFETY: root is a valid descriptor and stats points to writable storage.
-        if unsafe { libc::fstatvfs(root.as_raw_fd(), stats.as_mut_ptr()) } != 0 {
-            return Err(io::Error::last_os_error().into());
-        }
-        // SAFETY: fstatvfs initialized stats on success.
-        let stats = unsafe { stats.assume_init() };
-        (
-            stats.f_blocks,
-            stats.f_bfree,
-            stats.f_bavail,
-            stats.f_files,
-            stats.f_ffree,
-            stats.f_frsize as u32,
-        )
-    };
-    #[cfg(windows)]
-    let (blocks, bfree, bavail, files, ffree, bsize) = {
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Wdk::Storage::FileSystem::{
-            FileFsFullSizeInformation, NtQueryVolumeInformationFile,
-        };
-        use windows_sys::Wdk::System::SystemServices::FILE_FS_FULL_SIZE_INFORMATION;
-        use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
-        let mut stats = std::mem::MaybeUninit::<FILE_FS_FULL_SIZE_INFORMATION>::uninit();
-        let mut iosb = std::mem::MaybeUninit::<IO_STATUS_BLOCK>::uninit();
-        // SAFETY: valid synchronous directory handle and correctly sized output buffers.
-        let status = unsafe {
-            NtQueryVolumeInformationFile(
-                root.as_raw_handle(),
-                iosb.as_mut_ptr(),
-                stats.as_mut_ptr().cast(),
-                size_of::<FILE_FS_FULL_SIZE_INFORMATION>() as u32,
-                FileFsFullSizeInformation,
-            )
-        };
-        if status != 0 {
-            return Err(lx::Error::EIO);
-        }
-        // SAFETY: successful query filled the requested structure.
-        let stats = unsafe { stats.assume_init() };
-        (
-            stats.TotalAllocationUnits as u64,
-            stats.ActualAvailableAllocationUnits as u64,
-            stats.CallerAvailableAllocationUnits as u64,
-            0,
-            0,
-            stats
-                .SectorsPerAllocationUnit
-                .saturating_mul(stats.BytesPerSector),
-        )
-    };
-    Ok(fuse_kstatfs {
-        blocks,
-        bfree,
-        bavail,
-        files,
-        ffree,
-        bsize,
-        namelen: 255,
-        frsize: bsize,
-        padding: 0,
-        spare: [0; 6],
-    })
 }

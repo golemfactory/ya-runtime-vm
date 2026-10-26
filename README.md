@@ -237,7 +237,9 @@ Symlink creation and traversal are blocked. Existing symlinks, Windows reparse
 points, special files and files with multiple hard links are not exported.
 Hard-link creation and extended attributes (including host ACLs) are unsupported.
 Names must be single components; Windows device names, alternate streams,
-trailing dots/spaces and path separators are rejected on both hosts.
+trailing dots/spaces, control characters and Windows-reserved punctuation are
+rejected on both hosts. Names must be valid UTF-8. Console aliases and the
+superscript-digit COM/LPT aliases are rejected before host filesystem operations.
 
 The backend pins directory and file handles, so replacing a cached name with a
 symlink cannot redirect file I/O. Open handles continue to refer to the original
@@ -274,6 +276,34 @@ Frame sockets request 2 MiB buffers, as the exe-unit does. Linux caps this at
 Per share, cached nodes, open handles and directory snapshots are bounded.
 The backend supports ordinary reads, writes, rename, truncate, timestamps and
 fsync; it does not provide full POSIX metadata semantics or writeback caching.
+
+Each share also defaults to a 10 GiB sum of logical file lengths and 100,000
+exported filesystem objects, including the root directory. Configure these
+host-side limits before starting the runtime:
+
+```bash
+export YA_RUNTIME_VM_SHARE_MAX_BYTES=10737418240
+export YA_RUNTIME_VM_SHARE_MAX_ENTRIES=100000
+```
+
+The same settings apply independently to every share in that runtime. The byte
+limit accepts 1 through `i64::MAX`; the entry limit accepts 1 through 1,000,000.
+Exceeding a limit returns `ENOSPC`. Startup counts existing exportable contents
+and fails if they exceed either limit; traversal depth is limited to 128
+directories. Sparse lengths count in full. Unlink and rename replacement retain
+the old object's charge until its cached inode and open handles are released;
+`FORGET` alone does not refund a still-linked file. Guest `statfs` reports this
+budget with 4096-byte blocks instead of the host filesystem's statistics.
+
+These limits account for guest mutations, not direct writes by host processes.
+Avoid concurrent host mutations of an active export; restart the VM after
+external changes to rebuild accounting. Logical sizes exclude filesystem
+metadata and allocation rounding. Provision enough host capacity for the sum of
+all share budgets, entry overhead, and other host workloads: runtime quotas do
+not reserve physical disk space or limit IOPS. Strong resource isolation also
+requires host filesystem quotas/reservations and process CPU/memory limits.
+See the [virtio-fs security review](docs/virtiofs-security-review.md) for the
+review scope, assumptions, tests, and remaining risks.
 
 ## Known issues
 

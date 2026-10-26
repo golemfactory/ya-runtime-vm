@@ -110,6 +110,7 @@ pub(crate) fn build_config(
             openvmm_defs::config::VirtioBus::Mmio,
             crate::shared_dir::SharedDirHandle {
                 tag: format!("mnt{index}"),
+                limits: crate::shared_dir::ShareLimits::from_env()?,
                 root: crate::shared_dir::open_root(work_dir, &volume.name)
                     .with_context(|| format!("opening shared volume {}", volume.name))?,
             }

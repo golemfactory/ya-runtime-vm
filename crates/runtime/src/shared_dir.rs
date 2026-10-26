@@ -21,11 +21,14 @@ use vm_resource::kind::VirtioDeviceHandle;
 use vm_resource::{ResolveResource, ResourceId, declare_static_resolver};
 
 mod host;
+mod quota;
 pub(crate) use host::open_root;
 use host::{
-    check_metadata, component, filesystem_stats, lock_directory, name_bytes, pin, remove_entry,
-    rename_entry, reopen, reopen_for_times, sync_directory,
+    check_metadata, component, lock_directory, name_bytes, pin, remove_entry, rename_entry, reopen,
+    reopen_for_times, sync_directory,
 };
+pub(crate) use quota::ShareLimits;
+use quota::{Identity, Quota, identity};
 
 const MAX_NODES: usize = 8192;
 const MAX_HANDLES: usize = 1024;
@@ -43,6 +46,7 @@ const UNKNOWN_INO: u64 = 0xffff_ffff;
 pub(crate) struct SharedDirHandle {
     pub tag: String,
     pub root: File,
+    pub limits: ShareLimits,
 }
 impl ResourceId<VirtioDeviceHandle> for SharedDirHandle {
     const ID: &'static str = "ya-runtime-shared-dir";
@@ -58,7 +62,7 @@ impl ResolveResource<VirtioDeviceHandle, SharedDirHandle> for SharedDirResolver 
         resource: SharedDirHandle,
         input: VirtioResolveInput<'_>,
     ) -> anyhow::Result<Self::Output> {
-        let fs = SharedDir::new(resource.root)?;
+        let fs = SharedDir::new(resource.root, resource.limits)?;
         Ok(
             virtiofs::virtio::VirtioFsDevice::new(input.driver_source, &resource.tag, fs, 0, None)
                 .into(),
@@ -89,6 +93,7 @@ impl Object {
 }
 struct Node {
     object: Object,
+    identity: Identity,
     lookups: u64,
     // Namespace cache only. All I/O uses object handles, never this name.
     location: Option<(u64, OsString)>,
@@ -113,6 +118,7 @@ struct State {
     files: HashMap<u64, OpenFile>,
     directories: HashMap<u64, OpenDirectory>,
     directory_bytes: usize,
+    quota: Quota,
 }
 impl State {
     fn id(&mut self) -> lx::Result<u64> {
@@ -144,16 +150,27 @@ impl State {
         {
             return;
         }
-        if let Some(Node {
-            location: Some(location),
-            ..
-        }) = self.nodes.remove(&id)
-        {
-            self.names.remove(&location);
+        if let Some(node) = self.nodes.remove(&id) {
+            let key = node.identity;
+            if let Some(location) = node.location {
+                self.names.remove(&location);
+            }
+            drop(node.object);
+            self.collect_quota(key);
         }
+    }
+    fn collect_quota(&mut self, key: Identity) {
+        if !self.nodes.values().any(|node| node.identity == key) {
+            self.quota.collect(key);
+        }
+    }
+    fn unlinked(&mut self, key: Identity) {
+        self.quota.unlink(key);
+        self.collect_quota(key);
     }
     fn entry(&mut self, parent: u64, name: OsString, object: Object) -> lx::Result<fuse_entry_out> {
         let metadata = object.metadata()?;
+        self.quota.observe(&metadata)?;
         let key = (parent, name);
         if let Some(&id) = self.names.get(&key) {
             let old = self.object(id)?.metadata();
@@ -172,6 +189,7 @@ impl State {
             id,
             Node {
                 object,
+                identity: identity(&metadata),
                 lookups: 1,
                 location: Some(key.clone()),
             },
@@ -188,7 +206,7 @@ impl State {
 
 pub(crate) struct SharedDir(Mutex<State>);
 impl SharedDir {
-    fn new(root: File) -> io::Result<Self> {
+    fn new(root: File, limits: ShareLimits) -> io::Result<Self> {
         let metadata = Metadata::from_file(&root)?;
         check_metadata(&metadata).map_err(io::Error::other)?;
         if !metadata.is_dir() {
@@ -196,12 +214,14 @@ impl SharedDir {
         }
         let mut state = State {
             next: FUSE_ROOT_ID,
+            quota: Quota::scan(&root, limits).map_err(io::Error::other)?,
             ..State::default()
         };
         state.nodes.insert(
             FUSE_ROOT_ID,
             Node {
                 object: Object::Directory(Arc::new(root)),
+                identity: identity(&metadata),
                 lookups: 1,
                 location: None,
             },
@@ -266,6 +286,7 @@ fn open_file(state: &mut State, node: u64, flags: u32) -> lx::Result<fuse_open_o
             return Err(lx::Error::EACCES);
         }
         file.set_len(0)?;
+        state.quota.reconcile(state.nodes[&node].identity, 0);
     }
     let fh = state.id()?;
     state.files.insert(
@@ -343,21 +364,31 @@ impl Fuse for SharedDir {
             arg.valid
         );
         {
-            let state = self.0.lock();
+            let mut state = self.0.lock();
             let object = state.object(request.node_id())?;
             object.metadata()?;
             if arg.valid & FATTR_SIZE != 0 {
                 if let Object::File(file) = object {
-                    if arg.valid & FATTR_FH != 0 {
-                        let open = state
+                    let key = state.nodes[&request.node_id()].identity;
+                    let open = if arg.valid & FATTR_FH != 0 {
+                        state
                             .files
                             .get(&arg.fh)
                             .filter(|f| f.node == request.node_id() && f.write)
-                            .ok_or(lx::Error::EBADF)?;
-                        open.file.set_len(arg.size)?;
+                            .ok_or(lx::Error::EBADF)?
+                            .file
+                            .try_clone()?
                     } else {
-                        reopen(&file, false, true)?.set_len(arg.size)?;
+                        reopen(&file, false, true)?
+                    };
+                    state
+                        .quota
+                        .reserve(key, open.metadata()?.len().max(arg.size))?;
+                    let result = open.set_len(arg.size);
+                    if let Ok(metadata) = open.metadata() {
+                        state.quota.reconcile(key, metadata.len());
                     }
+                    result?;
                 } else {
                     return Err(lx::Error::EISDIR);
                 }
@@ -417,6 +448,7 @@ impl Fuse for SharedDir {
             return Err(lx::Error::ENFILE);
         }
         let parent = state.directory(request.node_id())?;
+        state.quota.reserve_entry()?;
         #[allow(unused_mut)]
         let mut options = cap_std::fs::DirBuilder::new();
         #[cfg(unix)]
@@ -424,8 +456,15 @@ impl Fuse for SharedDir {
             use cap_std::fs::DirBuilderExt;
             options.mode(0o700);
         }
-        parent.create_dir_with(&name, &options)?;
-        state.entry(request.node_id(), name.clone(), pin(&parent, &name)?)
+        if let Err(error) = parent.create_dir_with(&name, &options) {
+            state.quota.cancel_entry();
+            return Err(error.into());
+        }
+        // Keep the reservation if pinning fails after creation: the host
+        // object already exists even if it cannot be returned to the guest.
+        let object = pin(&parent, &name)?;
+        state.quota.observe_reserved(&object.metadata()?)?;
+        state.entry(request.node_id(), name, object)
     }
     fn create(
         &self,
@@ -440,6 +479,14 @@ impl Fuse for SharedDir {
             return Err(lx::Error::ENFILE);
         }
         let parent = state.directory(request.node_id())?;
+        let mut reserved = match parent.symlink_metadata(&name) {
+            Ok(_) => false,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                state.quota.reserve_entry()?;
+                true
+            }
+            Err(error) => return Err(error.into()),
+        };
         let mut options = OpenOptions::new();
         options
             .read(true)
@@ -452,7 +499,12 @@ impl Fuse for SharedDir {
             // Guest execute bits are synthetic; never copy them to host files.
             options.mode(0o600);
         }
-        let object = match parent.open_with(&name, &options) {
+        let opened = parent.open_with(&name, &options);
+        if opened.is_err() && reserved {
+            state.quota.cancel_entry();
+            reserved = false;
+        }
+        let object = match opened {
             Ok(file) => Object::File(Arc::new(file.into_std())),
             Err(error)
                 if error.kind() == io::ErrorKind::AlreadyExists
@@ -465,6 +517,9 @@ impl Fuse for SharedDir {
                 return Err(error.into());
             }
         };
+        if reserved {
+            state.quota.observe_reserved(&object.metadata()?)?;
+        }
         let entry = state.entry(request.node_id(), name, object)?;
         match open_file(&mut state, entry.nodeid, arg.flags) {
             Ok(open) => Ok(fuse::CreateOut { entry, open }),
@@ -514,6 +569,29 @@ impl Fuse for SharedDir {
             return Err(lx::Error::EINVAL);
         }
         let mut state = self.0.lock();
+        let open = state
+            .files
+            .get(&arg.fh)
+            .filter(|f| f.node == request.node_id() && f.write)
+            .ok_or(lx::Error::EBADF)?;
+        let metadata = Metadata::from_file(&open.file)?;
+        check_metadata(&metadata)?;
+        let size = if data.is_empty() {
+            metadata.len()
+        } else {
+            let offset = if open.append {
+                metadata.len()
+            } else {
+                arg.offset
+            };
+            metadata.len().max(
+                offset
+                    .checked_add(data.len() as u64)
+                    .ok_or(lx::Error::ENOSPC)?,
+            )
+        };
+        let key = state.nodes[&request.node_id()].identity;
+        state.quota.reserve(key, size)?;
         let file = state
             .files
             .get_mut(&arg.fh)
@@ -525,7 +603,11 @@ impl Fuse for SharedDir {
         } else {
             SeekFrom::Start(arg.offset)
         })?;
-        Ok(file.file.write(data)?)
+        let result = file.file.write(data);
+        if let Ok(metadata) = file.file.metadata() {
+            state.quota.reconcile(key, metadata.len());
+        }
+        Ok(result?)
     }
     fn release(&self, request: &Request, arg: &fuse_release_in) -> lx::Result<()> {
         let mut state = self.0.lock();
@@ -574,15 +656,21 @@ impl Fuse for SharedDir {
     fn unlink(&self, request: &Request, name: &lx::LxStr) -> lx::Result<()> {
         let name = component(name.as_bytes())?;
         let mut state = self.0.lock();
-        remove_entry(&state.directory(request.node_id())?, &name, false)?;
+        let parent = state.directory(request.node_id())?;
+        let key = identity(&parent.symlink_metadata(&name)?);
+        remove_entry(&parent, &name, false)?;
         state.detach(&(request.node_id(), name));
+        state.unlinked(key);
         Ok(())
     }
     fn rmdir(&self, request: &Request, name: &lx::LxStr) -> lx::Result<()> {
         let name = component(name.as_bytes())?;
         let mut state = self.0.lock();
-        remove_entry(&state.directory(request.node_id())?, &name, true)?;
+        let parent = state.directory(request.node_id())?;
+        let key = identity(&parent.symlink_metadata(&name)?);
+        remove_entry(&parent, &name, true)?;
         state.detach(&(request.node_id(), name));
+        state.unlinked(key);
         Ok(())
     }
     fn rename(
@@ -606,9 +694,14 @@ impl Fuse for SharedDir {
         }
         let parent = state.directory(from.0)?;
         // Validate the source too; rename itself never follows the final component.
-        pin(&parent, &from.1)?;
-        rename_entry(&parent, &from.1, &state.directory(to.0)?, &to.1)?;
+        let source = identity(&pin(&parent, &from.1)?.metadata()?);
+        let target = state.directory(to.0)?;
+        let replaced = target.symlink_metadata(&to.1).ok().map(|m| identity(&m));
+        rename_entry(&parent, &from.1, &target, &to.1)?;
         state.detach(&to);
+        if let Some(key) = replaced.filter(|key| *key != source) {
+            state.unlinked(key);
+        }
         if let Some(id) = state.detach(&from) {
             state.nodes.get_mut(&id).unwrap().location = Some(to.clone());
             state.names.insert(to, id);
@@ -704,8 +797,7 @@ impl Fuse for SharedDir {
         Ok(data)
     }
     fn statfs(&self, _: &Request) -> lx::Result<fuse_kstatfs> {
-        let root = self.0.lock().directory(FUSE_ROOT_ID)?;
-        filesystem_stats(&root)
+        Ok(self.0.lock().quota.stats())
     }
     fn fsync_dir(&self, request: &Request, fh: u64, _: u32) -> lx::Result<()> {
         let state = self.0.lock();
