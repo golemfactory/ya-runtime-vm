@@ -13,6 +13,21 @@ fn files(role: &str) {
         (0, 0, 0o777)
     );
     assert_eq!(fs::read(input).unwrap(), b"host data");
+    // DNS and host lookups must work for non-root workloads too.
+    for path in ["/etc/resolv.conf", "/etc/hosts"] {
+        let mode = fs::metadata(path).unwrap().mode();
+        assert_eq!(mode & 0o044, 0o044, "{path} mode {mode:o}");
+    }
+    assert!(
+        fs::read_to_string("/etc/resolv.conf")
+            .unwrap()
+            .contains("nameserver 1.1.1.1")
+    );
+    assert!(
+        fs::read_to_string("/etc/hosts")
+            .unwrap()
+            .contains("127.0.0.1\tlocalhost")
+    );
     // glibc < 2.37 readdir() drops d_ino == 0; musl does not, so check it here.
     let listed: Vec<_> = fs::read_dir(share)
         .unwrap()

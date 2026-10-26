@@ -45,6 +45,13 @@ const MODULES: &[&str] = &[
     "fuse",
     "virtiofs",
 ];
+const HOSTS: &[u8] = b"127.0.0.1\tlocalhost
+::1\tip6-localhost ip6-loopback
+fe00::0\tip6-localnet
+ff00::0\tip6-mcastprefix
+ff02::1\tip6-allnodes
+ff02::2\tip6-allrouters
+";
 pub fn prepare(environment: &[CString]) -> Result<()> {
     mount("devtmpfs", "/dev", "devtmpfs", Flags::NOSUID, "mode=0755")?;
     mount(
@@ -202,11 +209,21 @@ pub fn prepare(environment: &[CString]) -> Result<()> {
         rustix::fs::symlink("/proc/self/fd", &dev_fd)?;
     }
     let _etc = super::service::directory_in_root(b"/etc")?;
-    let flags = rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::CREATE | rustix::fs::OFlags::TRUNC;
-    super::service::root_file(b"/etc/hosts", flags)?
-        .write_all(b"127.0.0.1 localhost\n::1 localhost ip6-localhost\n")?;
-    super::service::root_file(b"/etc/resolv.conf", flags)?
-        .write_all(b"nameserver 1.1.1.1\nnameserver 8.8.8.8\n")?;
+    // Like the C init: keep the image's hosts entries, replace resolv.conf,
+    // and leave both readable for non-root workloads.
+    use rustix::fs::OFlags;
+    super::service::root_file_with_mode(
+        b"/etc/hosts",
+        OFlags::WRONLY | OFlags::CREATE | OFlags::APPEND,
+        0o644,
+    )?
+    .write_all(HOSTS)?;
+    super::service::root_file_with_mode(
+        b"/etc/resolv.conf",
+        OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC,
+        0o644,
+    )?
+    .write_all(b"nameserver 1.1.1.1\nnameserver 8.8.8.8\n")?;
     if let Some(hostname) = env.get("hostname") {
         rustix::system::sethostname(hostname.as_bytes())?;
     }

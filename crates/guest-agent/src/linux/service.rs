@@ -254,9 +254,10 @@ impl Reactor {
                 Ok(Value::Ok)
             }
             Command::Hosts { entries } => {
-                let mut file = root_file(
+                let mut file = root_file_with_mode(
                     b"/etc/hosts",
                     OFlags::WRONLY | OFlags::APPEND | OFlags::CREATE,
+                    0o644,
                 )?;
                 for (host, ip) in entries {
                     crate::ensure!(
@@ -483,14 +484,19 @@ impl Reactor {
 pub fn serve(stream: File, environment: Vec<CString>) -> Result<()> {
     Reactor::new(stream, environment)?.run()
 }
+/// Opens a path in the container root; created files are private (0600).
 pub fn root_file(path: &[u8], flags: OFlags) -> Result<File> {
+    root_file_with_mode(path, flags, 0o600)
+}
+/// Like [`root_file`], for world-readable system files such as /etc/hosts.
+pub fn root_file_with_mode(path: &[u8], flags: OFlags, mode: u32) -> Result<File> {
     let root = File::open(ROOT)?;
     Ok(rustix::fs::openat2(
         &root,
         path,
         flags | OFlags::CLOEXEC,
         if flags.contains(OFlags::CREATE) {
-            Mode::from_raw_mode(0o600)
+            Mode::from_raw_mode(mode)
         } else {
             Mode::empty()
         },
