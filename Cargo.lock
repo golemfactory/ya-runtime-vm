@@ -8025,6 +8025,7 @@ dependencies = [
  "env_logger",
  "fuse",
  "futures",
+ "guestmem",
  "hypervisor_resources",
  "inspect",
  "libc",

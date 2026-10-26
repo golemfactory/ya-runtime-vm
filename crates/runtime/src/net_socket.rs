@@ -222,6 +222,7 @@ struct SocketQueue {
     tx: VecDeque<Vec<u8>>,
     tx_offset: usize,
     buffer: Box<[u8]>,
+    oversized: u64,
 }
 
 impl InspectMut for SocketQueue {
@@ -267,7 +268,25 @@ impl SocketQueue {
             tx: VecDeque::new(),
             tx_offset: 0,
             buffer: vec![0; 65535].into_boxed_slice(),
+            oversized: 0,
         })
+    }
+
+    /// Drops a frame that does not fit the guest's receive buffer, which
+    /// virtio-net would otherwise treat as a fatal device error.
+    fn fits(&mut self, pool: &dyn BufferAccess, id: RxId, len: usize) -> bool {
+        let capacity = pool.capacity(id) as usize;
+        if len <= capacity {
+            return true;
+        }
+        self.oversized += 1;
+        if self.oversized.is_power_of_two() {
+            log::warn!(
+                "dropping {len}-byte network frame larger than the {capacity}-byte guest buffer ({} so far)",
+                self.oversized
+            );
+        }
+        false
     }
 
     fn enqueue_rx(&mut self, pool: &mut dyn BufferAccess) {
@@ -285,6 +304,9 @@ impl SocketQueue {
             }
             let frame = self.tcp_rx[4..4 + frame_len].to_vec();
             self.tcp_rx.drain(..4 + frame_len);
+            if !self.fits(pool, id, frame.len()) {
+                continue;
+            }
             pool.write_packet(
                 id,
                 &RxMetadata {
@@ -421,7 +443,11 @@ impl Queue for SocketQueue {
                 }
                 Poll::Ready(Ok(len)) => match &mut self.connection {
                     Connection::Udp(_) => {
-                        let id = self.rx_free.pop_front().unwrap();
+                        let id = *self.rx_free.front().unwrap();
+                        if !self.fits(pool, id, len) {
+                            continue;
+                        }
+                        self.rx_free.pop_front();
                         pool.write_packet(
                             id,
                             &RxMetadata {
@@ -505,5 +531,66 @@ impl Queue for SocketQueue {
         _done: &mut [TxId],
     ) -> Result<usize, TxError> {
         Ok(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pal_async::{DefaultDriver, async_test};
+
+    struct Buffers {
+        mem: guestmem::GuestMemory,
+        written: Vec<(u32, usize)>,
+    }
+    const CAPACITY: u32 = 1514;
+    impl BufferAccess for Buffers {
+        fn guest_memory(&self) -> &guestmem::GuestMemory {
+            &self.mem
+        }
+        fn write_data(&mut self, id: RxId, data: &[u8]) {
+            self.written.push((id.0, data.len()));
+        }
+        fn push_guest_addresses(&self, _: RxId, _: &mut Vec<net_backend::RxBufferSegment>) {}
+        fn capacity(&self, _: RxId) -> u32 {
+            CAPACITY
+        }
+        fn write_header(&mut self, _: RxId, metadata: &RxMetadata) {
+            // virtio-net asserts this; a violation is a fatal device error.
+            assert!(metadata.len <= CAPACITY as usize);
+        }
+    }
+
+    #[async_test]
+    async fn frames_larger_than_the_guest_buffer_are_dropped(driver: DefaultDriver) {
+        let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let endpoint = SocketEndpoint::new(
+            SocketMode::Udp,
+            "127.0.0.1:0".parse().unwrap(),
+            Some(peer.local_addr().unwrap()),
+        )
+        .unwrap();
+        peer.connect(endpoint.local_addr()).unwrap();
+        let mut queue = SocketQueue::new(&endpoint, Box::new(driver)).await.unwrap();
+        let mut pool = Buffers {
+            mem: guestmem::GuestMemory::empty(),
+            written: Vec::new(),
+        };
+        queue.rx_avail(&mut pool, &[RxId(0), RxId(1)]);
+        peer.send(&[1; 2000]).unwrap();
+        peer.send(&[2; 100]).unwrap();
+        std::future::poll_fn(|cx| queue.poll_ready(cx, &mut pool)).await;
+        let mut ready = [RxId(9); 2];
+        assert_eq!(queue.rx_poll(&mut pool, &mut ready).unwrap(), 1);
+        assert_eq!(pool.written, [(0, 100)]);
+        // Length-prefixed TCP frames are skipped the same way.
+        for len in [2000u32, 60] {
+            queue.tcp_rx.extend_from_slice(&len.to_be_bytes());
+            queue.tcp_rx.extend(std::iter::repeat_n(3, len as usize));
+        }
+        queue.enqueue_rx(&mut pool);
+        assert_eq!(pool.written, [(0, 100), (1, 60)]);
+        assert!(queue.tcp_rx.is_empty());
+        assert_eq!(queue.oversized, 2);
     }
 }

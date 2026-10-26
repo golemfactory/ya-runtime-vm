@@ -111,6 +111,7 @@ ya-client-model.workspace = true
 
 [dev-dependencies]
 env_logger = "0.10"
+guestmem = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
 zerocopy = "0.8"
 tempdir = "0.3.7"
 
