@@ -120,12 +120,19 @@ impl GuestAgent {
         self.last_msg_id += 1;
         let id = self.last_msg_id;
         write_message(&mut self.stream, &Message::Request { id, command }).await?;
-        let response =
-            tokio::time::timeout(std::time::Duration::from_secs(30), self.responses.next())
-                .await
-                .map_err(|_| {
-                    io::Error::new(io::ErrorKind::TimedOut, "guest agent response timed out")
-                })?;
+        let response = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                match self.responses.next().await {
+                    // A late answer to an earlier request that timed out.
+                    Some((response_id, _)) if response_id < id => {
+                        log::warn!("Discarding late guest response {response_id}");
+                    }
+                    response => break response,
+                }
+            }
+        })
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "guest agent response timed out"))?;
         match response {
             Some((response_id, response)) if response_id == id => Ok(response.map_err(|e| {
                 log::error!(
@@ -373,6 +380,43 @@ mod tests {
         .await
         .unwrap();
         assert!(mount.await.unwrap().unwrap().is_ok());
+        agent
+            .lock()
+            .await
+            .responses_reader_handle
+            .take()
+            .unwrap()
+            .abort();
+    }
+    #[tokio::test]
+    async fn late_response_to_an_abandoned_request_is_discarded() {
+        let (host, mut guest) = LocalStream::pair().unwrap();
+        write_message(&mut guest, &Message::Ready { version: VERSION })
+            .await
+            .unwrap();
+        let agent = GuestAgent::from_stream(host, 2, |_, _| async {}.boxed())
+            .await
+            .unwrap();
+        // Request 1 was abandoned after a timeout; its answer arrives first.
+        agent.lock().await.last_msg_id = 1;
+        let copy = agent.clone();
+        let kill = tokio::spawn(async move { copy.lock().await.kill(7).await });
+        let Message::Request { id, .. } = read_message(&mut guest).await.unwrap() else {
+            panic!("expected request")
+        };
+        assert_eq!(id, 2);
+        for id in [1, 2] {
+            write_message(
+                &mut guest,
+                &Message::Response {
+                    id,
+                    result: Ok(Value::Ok),
+                },
+            )
+            .await
+            .unwrap();
+        }
+        assert!(kill.await.unwrap().unwrap().is_ok());
         agent
             .lock()
             .await
