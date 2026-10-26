@@ -184,6 +184,14 @@ fn main() {
             std::process::exit(37);
         }
         Some("sleep") => std::thread::sleep(std::time::Duration::from_secs(60)),
+        Some("background") => {
+            // Like `sh -c 'server &'`: the descendant inherits stdout/stderr.
+            std::process::Command::new(&args[0])
+                .arg("sleep")
+                .spawn()
+                .unwrap();
+            println!("BACKGROUND_STARTED");
+        }
         Some("exit") => (),
         _ => panic!("unknown probe mode"),
     }

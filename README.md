@@ -300,7 +300,8 @@ mise run vm-test
 This builds a static Linux test workload and the native test harness. It runs
 the runtime's standard self-test, then boots three VMs to check virtio-fs
 reads/writes as root and UID 1000, link rejection, host permissions, rename,
-truncate, process kill, rapid exits, cyclic output backpressure, and complete
+truncate, process kill, rapid exits, exit while a background child holds the
+output pipes, cyclic output backpressure, and complete
 stdout/stderr before both normal and entrypoint termination. Explicit RAM/storage
 mounts under `/tmp` and `/dev/shm` must remain visible, with the configured `/tmp`
 size limit enforced. Network cases cover both interfaces over UDP,

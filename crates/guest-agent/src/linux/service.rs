@@ -35,6 +35,9 @@ struct Output {
     data: VecDeque<u8>,
     capacity: usize,
     notified: bool,
+    // Bytes left in the pipe when the process exited. Descendants may keep
+    // the write end open, so the pipe is closed after these, not at EOF.
+    remaining: Option<usize>,
 }
 impl Output {
     fn new(redirect: &Option<Redirect>, pipe: Option<File>) -> Self {
@@ -52,6 +55,7 @@ impl Output {
             data: VecDeque::new(),
             capacity,
             notified: false,
+            remaining: None,
         }
     }
     fn readable(&self) -> bool {
@@ -60,6 +64,15 @@ impl Output {
     fn append(&mut self, bytes: &[u8]) {
         debug_assert!(self.data.len() + bytes.len() <= self.capacity);
         self.data.extend(bytes);
+    }
+    fn close(&mut self, poll: &OwnedFd) -> Result<()> {
+        if let Some(pipe) = self.pipe.take()
+            && self.registered
+        {
+            epoll::delete(poll, &pipe)?;
+            self.registered = false;
+        }
+        Ok(())
     }
 }
 
@@ -209,12 +222,7 @@ impl Reactor {
             // guest reboot could discard the queued response in the backend.
             for process in self.processes.values_mut() {
                 for output in &mut process.output {
-                    if let Some(pipe) = output.pipe.take()
-                        && output.registered
-                    {
-                        epoll::delete(&self.poll, &pipe)?;
-                        output.registered = false;
-                    }
+                    output.close(&self.poll)?;
                 }
             }
         }
@@ -345,17 +353,25 @@ impl Reactor {
             if !output.readable() {
                 break;
             }
-            let amount = chunk.len().min(output.capacity - output.data.len());
+            let amount = chunk
+                .len()
+                .min(output.capacity - output.data.len())
+                .min(output.remaining.unwrap_or(usize::MAX));
             match output.pipe.as_mut().unwrap().read(&mut chunk[..amount]) {
                 Ok(0) => {
-                    if output.registered {
-                        epoll::delete(&self.poll, output.pipe.as_ref().unwrap())?;
-                        output.registered = false;
-                    }
-                    output.pipe.take();
+                    output.close(&self.poll)?;
                     break;
                 }
-                Ok(n) => output.append(&chunk[..n]),
+                Ok(n) => {
+                    output.append(&chunk[..n]);
+                    if let Some(remaining) = &mut output.remaining {
+                        *remaining -= n;
+                        if *remaining == 0 {
+                            output.close(&self.poll)?;
+                            break;
+                        }
+                    }
+                }
                 Err(e) if e == rustix::io::Errno::AGAIN => break,
                 Err(e) if e == rustix::io::Errno::INTR => continue,
                 Err(e) => return Err(e.into()),
@@ -382,6 +398,17 @@ impl Reactor {
                                 ExitType::Killed
                             },
                         });
+                        // Report the exit after draining what the process
+                        // wrote, as the C init did, even if `cmd &` keeps
+                        // the pipe open. Later descendant output is dropped.
+                        for output in &mut process.output {
+                            if let Some(pipe) = &output.pipe {
+                                match rustix::io::ioctl_fionread(pipe)? {
+                                    0 => output.close(&self.poll)?,
+                                    n => output.remaining = Some(n as usize),
+                                }
+                            }
+                        }
                     }
                     // Also reap adopted/orphaned descendants, which have no
                     // protocol process ID and therefore produce no event.
@@ -617,35 +644,49 @@ mod process_tests {
 mod exit_order_tests {
     use super::*;
     use std::os::unix::net::UnixStream;
+    use std::{os::unix::process::CommandExt, process::Command as ProcessCommand};
     #[test]
-    fn exit_waits_for_both_streams_to_reach_eof_and_be_drained() {
+    fn exit_is_reported_after_draining_output_left_by_the_process() {
         let (socket, _peer) = UnixStream::pair().unwrap();
         let mut reactor = Reactor::new(OwnedFd::from(socket).into(), Vec::new()).unwrap();
         let (out_read, out_write) =
             rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).unwrap();
         let (err_read, err_write) =
             rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).unwrap();
+        // The test keeps both write ends open, like a background descendant
+        // (`sh -c 'server &'`) that inherited them.
         let mut out_write = File::from(out_write);
-        let mut err_write = File::from(err_write);
+        let _err_write = File::from(err_write);
         out_write.write_all(b"stdout tail").unwrap();
-        err_write.write_all(b"stderr tail").unwrap();
-        drop(err_write);
         let out = File::from(out_read);
         let err = File::from(err_read);
         super::super::transport::nonblocking(&out).unwrap();
         super::super::transport::nonblocking(&err).unwrap();
+        let child = ProcessCommand::new("/bin/sh")
+            .args(["-c", "exit 3"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = Pid::from_raw(child.id() as i32).unwrap();
+        let pidfd = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()).unwrap();
+        let mut fds = [rustix::event::PollFd::new(
+            &pidfd,
+            rustix::event::PollFlags::IN,
+        )];
+        let timeout = rustix::event::Timespec {
+            tv_sec: 3,
+            tv_nsec: 0,
+        };
+        assert_eq!(rustix::event::poll(&mut fds, Some(&timeout)).unwrap(), 1);
         let redirect = Some(Redirect::Pipe {
-            capacity: 1024,
-            cyclic: false,
+            capacity: 4,
+            cyclic: true,
         });
         reactor.processes.insert(
             1,
             Process {
-                pid: None,
-                exit: Some(ExitReason {
-                    status: 0,
-                    type_: ExitType::Exited,
-                }),
+                pid: Some(pid),
+                exit: None,
                 notified_exit: false,
                 acknowledged_exit: false,
                 entrypoint: true,
@@ -657,50 +698,30 @@ mod exit_order_tests {
         );
         reactor.output_interest(1, 0).unwrap();
         reactor.output_interest(1, 1).unwrap();
-        reactor.read_output(1, 0).unwrap();
-        reactor.read_output(1, 1).unwrap();
-        reactor.completed().unwrap();
-        assert!(!reactor.processes[&1].notified_exit);
-        let query = |fd| Command::QueryOutput {
+        reactor.reap().unwrap();
+        assert!(reactor.processes[&1].output[1].pipe.is_none());
+        let query = || Command::QueryOutput {
             id: 1,
-            fd,
+            fd: 1,
             offset: 0,
             len: u64::MAX,
         };
-        assert_eq!(
-            reactor.handle(query(1)).unwrap(),
-            Value::Bytes(b"stdout tail".to_vec())
-        );
-        reactor.completed().unwrap();
-        assert!(!reactor.processes[&1].notified_exit);
-        assert_eq!(
-            reactor.handle(query(2)).unwrap(),
-            Value::Bytes(b"stderr tail".to_vec())
-        );
-        reactor.completed().unwrap();
-        assert!(
-            !reactor.processes[&1].notified_exit,
-            "empty buffer alone is insufficient until EOF"
-        );
-        drop(out_write);
-        // A concurrently spawned test child may briefly inherit the writers
-        // until exec closes their CLOEXEC descriptors. Follow actual pipe
-        // readiness, as the reactor does, instead of assuming immediate EOF.
-        for index in 0..2 {
-            if let Some(pipe) = reactor.processes[&1].output[index].pipe.as_ref() {
-                let mut fds = [rustix::event::PollFd::new(
-                    pipe,
-                    rustix::event::PollFlags::IN,
-                )];
-                let timeout = rustix::event::Timespec {
-                    tv_sec: 3,
-                    tv_nsec: 0,
-                };
-                assert_eq!(rustix::event::poll(&mut fds, Some(&timeout)).unwrap(), 1);
-                assert!(fds[0].revents().contains(rustix::event::PollFlags::HUP));
-                reactor.read_output(1, index).unwrap();
-            }
+        let mut output = Vec::new();
+        for _ in 0..3 {
+            reactor.read_output(1, 0).unwrap();
+            reactor.completed().unwrap();
+            assert!(
+                !reactor.processes[&1].notified_exit,
+                "exit must follow buffered output"
+            );
+            let Value::Bytes(bytes) = reactor.handle(query()).unwrap() else {
+                panic!("expected output bytes");
+            };
+            output.extend(bytes);
         }
+        assert_eq!(output, b"stdout tail");
+        // The writers are still open; later output is not waited for.
+        assert!(reactor.processes[&1].output[0].pipe.is_none());
         reactor.completed().unwrap();
         assert!(reactor.processes[&1].notified_exit);
         assert!(
@@ -709,5 +730,6 @@ mod exit_order_tests {
         );
         reactor.request(Message::ExitAck { id: 1 }).unwrap();
         assert!(reactor.shutdown);
+        drop(child);
     }
 }

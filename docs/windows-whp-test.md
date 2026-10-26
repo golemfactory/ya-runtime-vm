@@ -105,7 +105,7 @@ A successful `mise run vm-test` exits with code zero and reports all three cases
 | `vpn-only` | Peer connects to the runtime's TCP listener | `NETWORK_OK vpn-only` |
 
 Each case must also report `VOLUMES_OK`, `FILES_OK root`, `FILES_OK user`, `KILL_OK`,
-`RAPID_EXITS_OK`, `CYCLIC_OUTPUT_OK`, both `OUTPUT_OK` results, `ENTRYPOINT_SHUTDOWN_OK` and
+`RAPID_EXITS_OK`, `BACKGROUND_EXIT_OK`, `CYCLIC_OUTPUT_OK`, both `OUTPUT_OK` results, `ENTRYPOINT_SHUTDOWN_OK` and
 `OPENVMM_INTEGRATION_OK`. Expected output lengths are 262147 stdout bytes and
 196608 stderr bytes. The file checks exercise a 3 MiB transfer, rename, truncate,
 link rejection and synthetic guest permissions. Linux host mode-bit checks are

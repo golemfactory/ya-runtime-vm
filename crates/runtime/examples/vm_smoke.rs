@@ -215,6 +215,23 @@ async fn commands(
         ensure!(collect(&mut events, pid).await?.2 == 0);
     }
     println!("RAPID_EXITS_OK");
+    let pid = ga
+        .lock()
+        .await
+        .run_process(
+            "/mnt/out/probe",
+            &["/mnt/out/probe", "background"],
+            None,
+            0,
+            0,
+            &redirects,
+            Some("/"),
+        )
+        .await?
+        .map_err(|e| anyhow::anyhow!("background exec: {e}"))?;
+    let (out, _, status) = collect(&mut events, pid).await?;
+    ensure!(status == 0 && out == b"BACKGROUND_STARTED\n");
+    println!("BACKGROUND_EXIT_OK");
     // The public runtime API uses cyclic output by default. Like the C init, a
     // full cyclic buffer applies backpressure; even a tiny one loses nothing.
     let cyclic = [
