@@ -91,7 +91,7 @@ impl SocketEndpoint {
         let mut local = local;
         let prepared_socket = match &mode {
             SocketMode::Udp => {
-                let socket = Socket::new(domain(local), Type::DGRAM, Some(Protocol::UDP))?;
+                let socket = frame_socket(local, Type::DGRAM, Protocol::UDP)?;
                 socket.bind(&local.into())?;
                 socket.connect(
                     &remote
@@ -104,7 +104,7 @@ impl SocketEndpoint {
                 Some(socket)
             }
             SocketMode::TcpListen => {
-                let socket = Socket::new(domain(local), Type::STREAM, Some(Protocol::TCP))?;
+                let socket = frame_socket(local, Type::STREAM, Protocol::TCP)?;
                 socket.set_reuse_address(true)?;
                 socket.bind(&local.into())?;
                 socket.listen(1)?;
@@ -133,7 +133,7 @@ impl SocketEndpoint {
 
         match &self.mode {
             SocketMode::Udp => {
-                let socket = Socket::new(domain(self.local), Type::DGRAM, Some(Protocol::UDP))?;
+                let socket = frame_socket(self.local, Type::DGRAM, Protocol::UDP)?;
                 socket.bind(&self.local.into())?;
                 socket.connect(
                     &self
@@ -146,7 +146,7 @@ impl SocketEndpoint {
                 Ok(socket)
             }
             SocketMode::TcpListen => {
-                let socket = Socket::new(domain(self.local), Type::STREAM, Some(Protocol::TCP))?;
+                let socket = frame_socket(self.local, Type::STREAM, Protocol::TCP)?;
                 socket.set_reuse_address(true)?;
                 socket.bind(&self.local.into())?;
                 socket.listen(1)?;
@@ -155,6 +155,19 @@ impl SocketEndpoint {
             SocketMode::TcpConnect => anyhow::bail!("TCP client socket is not pre-bound"),
         }
     }
+}
+
+/// Buffer size that the exe-unit requests for its frame endpoints. Default
+/// UDP buffers of about 200 KiB hold only a few 64 KiB INET frames, so a burst
+/// from the exe-unit would be dropped. The OS may cap the request, on Linux at
+/// `net.core.rmem_max`/`wmem_max`.
+const SOCKET_BUFFER_SIZE: usize = 2 * 1024 * 1024;
+
+fn frame_socket(address: SocketAddr, kind: Type, protocol: Protocol) -> io::Result<Socket> {
+    let socket = Socket::new(domain(address), kind, Some(protocol))?;
+    socket.set_recv_buffer_size(SOCKET_BUFFER_SIZE)?;
+    socket.set_send_buffer_size(SOCKET_BUFFER_SIZE)?;
+    Ok(socket)
 }
 
 fn socket_local_addr(socket: &Socket) -> io::Result<SocketAddr> {
@@ -242,7 +255,7 @@ impl SocketQueue {
                 let remote = endpoint.remote.ok_or_else(|| {
                     anyhow::anyhow!("TCP client endpoint requires a remote address")
                 })?;
-                let socket = Socket::new(domain(remote), Type::STREAM, Some(Protocol::TCP))?;
+                let socket = frame_socket(remote, Type::STREAM, Protocol::TCP)?;
                 let mut socket = PolledSocket::new(driver.as_ref(), socket)?;
                 socket.connect(&remote.into()).await?;
                 Connection::Tcp {

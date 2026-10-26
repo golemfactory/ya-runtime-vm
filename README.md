@@ -260,6 +260,9 @@ The INET device advertises 65266, and Linux then posts receive buffers large
 enough for a whole frame; the VPN device keeps 1500. The guest agent rejects an
 MTU above the device maximum or below 68, and an IPv6 address or route on an
 interface below 1280.
+Frame sockets request 2 MiB buffers, as the exe-unit does. Linux caps this at
+`net.core.rmem_max`/`wmem_max` (about 208 KiB by default), which holds only a few
+64 KiB INET frames; raise those limits on hosts with heavy INET traffic.
 
 Per share, cached nodes, open handles and directory snapshots are bounded.
 The backend supports ordinary reads, writes, rename, truncate, timestamps and
