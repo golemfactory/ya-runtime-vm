@@ -624,3 +624,28 @@ fn windows_name_rules_apply_only_on_windows() {
         assert!(contains(&list(&fs, 1), b"2026-10-26T01:00:00.log"));
     }
 }
+
+#[test]
+fn large_directories_fit_the_snapshot_budget() {
+    let (temp, fs) = setup();
+    let names = 20_000;
+    for i in 0..names {
+        std::fs::write(temp.path().join(format!("share/file-{i:08}")), b"").unwrap();
+    }
+    let entries = list(&fs, 1);
+    assert!(contains(&entries, b"file-00019999"));
+    let fh = fs.open_dir(&request(1), 0).unwrap().fh;
+    let bytes = fs.0.lock().directory_bytes;
+    assert_eq!(bytes, 2 * ENTRY_BYTES + 3 + names * (13 + ENTRY_BYTES));
+    // Several concurrent listings of a 100k-entry directory stay in budget.
+    const { assert!(8 * 100_000 * (24 + ENTRY_BYTES) < MAX_DIRECTORY_BYTES) };
+    fs.release_dir(
+        &request(1),
+        &fuse_release_in {
+            fh,
+            ..FromZeros::new_zeroed()
+        },
+    )
+    .unwrap();
+    assert_eq!(fs.0.lock().directory_bytes, 0);
+}

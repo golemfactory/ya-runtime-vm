@@ -31,8 +31,11 @@ const MAX_NODES: usize = 8192;
 const MAX_HANDLES: usize = 1024;
 const MAX_IO: usize = 1024 * 1024;
 const MAX_REQUEST: u32 = 128 * 1024;
-// Total bytes of directory snapshots per share, including approximate entry overhead.
-const MAX_DIRECTORY_BYTES: usize = 8 * 1024 * 1024;
+// Bounds host memory held by the name snapshots of all open directory
+// handles of a share: about 1.2M entries with 24-byte names in total.
+const MAX_DIRECTORY_BYTES: usize = 64 * 1024 * 1024;
+// Snapshot cost of one entry besides its name bytes.
+const ENTRY_BYTES: usize = size_of::<(OsString, u32)>();
 // libfuse's FUSE_UNKNOWN_INO. Never 0: glibc < 2.37 readdir() skips d_ino == 0.
 const UNKNOWN_INO: u64 = 0xffff_ffff;
 
@@ -620,7 +623,7 @@ impl Fuse for SharedDir {
             (OsString::from("."), lx::S_IFDIR),
             (OsString::from(".."), lx::S_IFDIR),
         ];
-        let mut bytes = 128;
+        let mut bytes = 2 * ENTRY_BYTES + 3;
         for item in dir.entries()? {
             let item = item?;
             let name = item.file_name();
@@ -634,7 +637,7 @@ impl Fuse for SharedDir {
                 Ok(object) => object,
                 Err(_) => continue, // inaccessible/special/link entries are not exported
             };
-            bytes += raw.len() + 64;
+            bytes += raw.len() + ENTRY_BYTES;
             if state.directory_bytes + bytes > MAX_DIRECTORY_BYTES {
                 return Err(lx::Error::ENOMEM);
             }
