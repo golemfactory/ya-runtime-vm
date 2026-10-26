@@ -47,6 +47,7 @@ The generated files are:
 | `build/guest/vmlinuz-virt` | Linux guest kernel |
 | `build/guest/initramfs.cpio.gz` | Rust `/init`, kernel modules and `mkfs.ext2` |
 | `build/guest/self-test.gvmi` | Pinned task image for the runtime self-test |
+| `build/guest/THIRD-PARTY-NOTICES.txt` | Third-party licenses and source links, shipped in every package |
 | `releases/` | Linux `.tar.gz` archive and `.sha256` checksum |
 
 Linux release builds explicitly target `x86_64-unknown-linux-musl`; packaging and
@@ -85,8 +86,9 @@ mise run build-release
 ```
 
 Build the shared guest assets on Linux using `guest-image` and `fetch-self-test`,
-then copy `vmlinuz-virt`, `initramfs.cpio.gz` and `self-test.gvmi` into
-`build/guest/` in the Windows checkout. Package them with the native executable:
+then copy `vmlinuz-virt`, `initramfs.cpio.gz`, `self-test.gvmi` and
+`THIRD-PARTY-NOTICES.txt` into `build/guest/` in the Windows checkout. Package
+them with the native executable:
 
 ```powershell
 mise run package

@@ -100,5 +100,6 @@ not in public issues.
 
 ## License
 
-See [LICENSE](LICENSE). Release packages also include the MIT license of the
-embedded OpenVMM code.
+ya-runtime-vm is licensed under [GPL-3.0](LICENSE). Packages include
+`THIRD-PARTY-NOTICES.txt` with the licenses of bundled components and links to
+their sources, including the guest Linux kernel and BusyBox.

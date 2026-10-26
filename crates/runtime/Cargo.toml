@@ -8,7 +8,7 @@ license = "GPL-3.0"
 
 [package.metadata.deb]
 assets = [
-    ["../../third_party/fuse/LICENSE", "usr/share/doc/ya-runtime-vm/OpenVMM-MIT.txt", "644"],
+    ["../../build/guest/THIRD-PARTY-NOTICES.txt", "usr/share/doc/ya-runtime-vm/", "644"],
     [
         "target/release/ya-runtime-vm",
         "usr/lib/yagna/plugins/ya-runtime-vm/",

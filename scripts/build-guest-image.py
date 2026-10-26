@@ -12,6 +12,8 @@ import subprocess
 import tarfile
 import urllib.request
 
+import third_party_notices
+
 ROOT = Path(__file__).resolve().parents[1]
 TARGET = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")).resolve()
 DEST = ROOT / "build/guest"
@@ -77,6 +79,7 @@ def main():
                ("mkfs.ext2", formatter(cache), stat.S_IFREG | 0o755)]
     with tarfile.open(apk, "r:gz") as package:
         members = {member.name.removeprefix("./"): member for member in package.getmembers()}
+        pkginfo = package.extractfile(members[".PKGINFO"]).read().decode()
         (DEST / "vmlinuz-virt").write_bytes(package.extractfile(members["boot/vmlinuz-virt"]).read())
         prefix = f"lib/modules/{KERNEL_RELEASE}/kernel/"
         # The kernel has no in-kernel module decompression; ship plain .ko files.
@@ -89,6 +92,7 @@ def main():
     add_entry(archive, "TRAILER!!!", b"", 0, len(entries) + 1)
     (DEST / "initramfs.cpio.gz").write_bytes(gzip.compress(archive.getvalue(), mtime=0))
     print(f"Guest image: {DEST / 'initramfs.cpio.gz'} ({len(entries)} files, Rust /init)")
+    third_party_notices.write(DEST / "THIRD-PARTY-NOTICES.txt", pkginfo)
 
 if __name__ == "__main__":
     main()

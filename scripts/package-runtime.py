@@ -36,7 +36,7 @@ shutil.copy2(root / "build/guest/self-test.gvmi", assets / "self-test.gvmi")
 licenses = dest / "licenses"
 licenses.mkdir(exist_ok=True)
 shutil.copy2(root / "LICENSE", licenses / "ya-runtime-vm-GPL-3.0.txt")
-shutil.copy2(root / "third_party/fuse/LICENSE", licenses / "OpenVMM-MIT.txt")
+shutil.copy2(root / "build/guest/THIRD-PARTY-NOTICES.txt", licenses / "THIRD-PARTY-NOTICES.txt")
 descriptors = json.loads((root / "packaging/ya-runtime-vm.json").read_text())
 for descriptor in descriptors:
     if descriptor["name"] == "vm":

@@ -46,6 +46,7 @@ jobs:
             build/guest/initramfs.cpio.gz
             build/guest/self-test.gvmi
             build/guest/vm-test-probe
+            build/guest/THIRD-PARTY-NOTICES.txt
           if-no-files-found: error
 
   native:
