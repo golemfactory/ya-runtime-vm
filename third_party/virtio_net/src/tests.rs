@@ -2092,3 +2092,27 @@ impl Endpoint for MockEndpointWithOffloads {
         pending().await
     }
 }
+
+/// ya-runtime-vm: the configured MTU is advertised in the device config.
+#[async_test]
+async fn configured_mtu_is_advertised(driver: DefaultDriver) {
+    let driver_source = VmTaskDriverSource::new(SingleDriverBackend::new(driver));
+    let mac = MacAddress::new([0x00, 0x15, 0x5d, 0x01, 0x02, 0x03]);
+    let endpoint = || MockEndpointWithOffloads {
+        offloads: TxOffloadSupport::default(),
+        link_speed: 10_000 * BITS_PER_MEGABIT,
+    };
+    let mut device = Device::builder()
+        .mtu(65266)
+        .build(&driver_source, Box::new(endpoint()), mac)
+        .unwrap();
+    let bank0 = NetworkFeaturesBank0::from(device.traits().device_features.bank(0));
+    assert!(bank0.mtu());
+    assert_eq!(device.read_registers_u32(8).await >> 16, 65266);
+    assert!(
+        Device::builder()
+            .mtu(67)
+            .build(&driver_source, Box::new(endpoint()), mac)
+            .is_err()
+    );
+}

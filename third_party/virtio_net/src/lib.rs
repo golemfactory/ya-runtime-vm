@@ -140,6 +140,8 @@ struct NetStatus {
 }
 
 const DEFAULT_MTU: u16 = 1500;
+// ya-runtime-vm: Linux ignores VIRTIO_NET_F_MTU below ETH_MIN_MTU.
+const MIN_MTU: u16 = 68;
 const BITS_PER_MEGABIT: u64 = 1_000_000;
 
 #[expect(dead_code)]
@@ -537,11 +539,20 @@ struct PendingTxPacket {
 
 pub struct NicBuilder {
     max_queue_pairs: u16,
+    // ya-runtime-vm: advertised through VIRTIO_NET_F_MTU.
+    mtu: u16,
 }
 
 impl NicBuilder {
     pub fn max_queues(mut self, max_queue_pairs: u16) -> Self {
         self.max_queue_pairs = max_queue_pairs;
+        self
+    }
+
+    /// ya-runtime-vm: sets the MTU offered to the guest, which Linux also uses
+    /// as the interface's maximum MTU. Defaults to 1500.
+    pub fn mtu(mut self, mtu: u16) -> Self {
+        self.mtu = mtu;
         self
     }
 
@@ -560,6 +571,10 @@ impl NicBuilder {
         endpoint: Box<dyn Endpoint>,
         mac_address: MacAddress,
     ) -> anyhow::Result<Device> {
+        // ya-runtime-vm: reject an MTU the guest would silently ignore.
+        if self.mtu < MIN_MTU {
+            anyhow::bail!("virtio-net MTU {} is below {MIN_MTU}", self.mtu);
+        }
         if !endpoint.is_ordered() {
             anyhow::bail!(
                 "network backend '{}' does not complete packets in order; \
@@ -596,7 +611,7 @@ impl NicBuilder {
             mac: mac_address.to_bytes(),
             status: NetStatus::new().with_link_up(true).into(),
             max_virtqueue_pairs: max_queue_pairs,
-            mtu: DEFAULT_MTU,
+            mtu: self.mtu,
             speed,
             duplex: 0xff,
             rss_max_key_size: 0,
@@ -620,6 +635,7 @@ impl Device {
     pub fn builder() -> NicBuilder {
         NicBuilder {
             max_queue_pairs: !0,
+            mtu: DEFAULT_MTU,
         }
     }
 }
