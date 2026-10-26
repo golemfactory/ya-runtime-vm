@@ -17,13 +17,16 @@ fn request(node: u64) -> Request {
 fn name(s: &str) -> &lx::LxStr {
     lx::LxStr::from_bytes(s.as_bytes())
 }
-fn setup() -> (tempdir::TempDir, SharedDir) {
+fn setup() -> (tempfile::TempDir, SharedDir) {
     #[cfg(windows)]
     let _ = env_logger::Builder::new()
         .is_test(true)
         .filter_level(log::LevelFilter::Trace)
         .try_init();
-    let temp = tempdir::TempDir::new("shared-dir-test").unwrap();
+    let temp = tempfile::Builder::new()
+        .prefix("shared-dir-test")
+        .tempdir()
+        .unwrap();
     std::fs::create_dir(temp.path().join("share")).unwrap();
     let fs = SharedDir::new(
         open_root(temp.path(), "share").unwrap(),
@@ -788,8 +791,11 @@ fn adding_a_host_hardlink_revokes_io_on_existing_guest_handles() {
     release(&fs, id, fh);
 }
 
-fn setup_limited(bytes: u64, entries: u64) -> (tempdir::TempDir, SharedDir) {
-    let temp = tempdir::TempDir::new("shared-dir-quota").unwrap();
+fn setup_limited(bytes: u64, entries: u64) -> (tempfile::TempDir, SharedDir) {
+    let temp = tempfile::Builder::new()
+        .prefix("shared-dir-quota")
+        .tempdir()
+        .unwrap();
     std::fs::create_dir(temp.path().join("share")).unwrap();
     let fs = SharedDir::new(
         open_root(temp.path(), "share").unwrap(),
@@ -997,7 +1003,10 @@ fn case_only_rename_does_not_refund_a_linked_files_charge() {
 
 #[test]
 fn startup_quota_counts_existing_nested_contents() {
-    let temp = tempdir::TempDir::new("shared-dir-existing-quota").unwrap();
+    let temp = tempfile::Builder::new()
+        .prefix("shared-dir-existing-quota")
+        .tempdir()
+        .unwrap();
     std::fs::create_dir_all(temp.path().join("share/sub")).unwrap();
     std::fs::write(temp.path().join("share/sub/file"), b"12345").unwrap();
     let new = |bytes, entries| {

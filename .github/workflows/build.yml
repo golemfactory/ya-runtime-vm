@@ -11,6 +11,18 @@ permissions:
   contents: read
 
 jobs:
+  audit:
+    name: RustSec dependency audit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: audit
+          cache-on-failure: true
+      - run: mise run audit
+
   guest:
     name: Linux guest image
     runs-on: ubuntu-24.04

@@ -36,6 +36,11 @@ description = "Run workspace tests"
 run = "cargo test --locked --workspace --target x86_64-unknown-linux-musl"
 run_windows = "cargo test --locked --workspace --target x86_64-pc-windows-msvc"
 
+[tasks.audit]
+description = "Check Cargo.lock against the current RustSec advisory database"
+tools = { "cargo:cargo-audit" = "0.22.2" }
+run = "cargo audit"
+
 [tasks.build]
 description = "Build native runtime"
 run = "cargo build --locked -p ya-runtime-vm --target x86_64-unknown-linux-musl"

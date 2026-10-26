@@ -329,6 +329,18 @@ mise run fmt
 mise run ci
 ```
 
+Check `Cargo.lock` against the current RustSec advisory database separately:
+
+```sh
+mise run audit
+```
+
+The task installs pinned `cargo-audit` through mise and fetches the current
+advisory database, so it requires network access. A separate Linux CI job runs
+the same check for pull requests, branch builds, and releases; reported
+vulnerabilities fail the job and block release publication. Advisory matching
+does not replace source review of local or vendored code.
+
 `ci` checks formatting, runs Clippy and workspace tests, and builds the native
 release executable. On Linux, also check the actual freestanding guest binary
 and rebuild its image:

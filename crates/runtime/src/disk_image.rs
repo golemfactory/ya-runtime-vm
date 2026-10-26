@@ -129,7 +129,10 @@ mod tests {
 
     #[tokio::test]
     async fn sparse_image_allocates_only_the_requested_initial_range() {
-        let temp = tempdir::TempDir::new("sparse-image-test").unwrap();
+        let temp = tempfile::Builder::new()
+            .prefix("sparse-image-test")
+            .tempdir()
+            .unwrap();
         let path = temp.path().join("disk.img");
         for reserve in [0, MIB] {
             create_sparse_raw_image(&path, 64 * MIB, reserve)

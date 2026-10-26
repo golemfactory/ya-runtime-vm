@@ -94,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
         .join("..")
         .canonicalize()
         .unwrap();
-    let temp_dir = tempdir::TempDir::new("ya-runtime-vm")?;
+    let temp_dir = tempfile::Builder::new().prefix("ya-runtime-vm").tempdir()?;
 
     let temp_dir_string = temp_dir.path().display().to_string();
     let drive_path_string = root_dir.join("squashfs_drive").display().to_string();

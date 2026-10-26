@@ -508,7 +508,9 @@ async fn check(
         }
         peers.push((role, network::Peer::new(role, transport).await?));
     }
-    let work = tempdir::TempDir::new("ya-runtime-vm-integration")?;
+    let work = tempfile::Builder::new()
+        .prefix("ya-runtime-vm-integration")
+        .tempdir()?;
     let image = image.canonicalize()?;
     let deployment = Deployment::try_from_input(
         tokio::fs::File::open(&image).await?,
