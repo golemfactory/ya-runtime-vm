@@ -17,9 +17,9 @@ import third_party_notices
 ROOT = Path(__file__).resolve().parents[1]
 TARGET = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")).resolve()
 DEST = ROOT / "build/guest"
-KERNEL_RELEASE = "6.18.58-0-virt"
-KERNEL_URL = "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/linux-virt-6.18.58-r0.apk"
-KERNEL_SHA256 = "1eec55004cf7167c914c8839f46691d2bc82767e20466bff51eb45d06f8e90cc"
+KERNEL_RELEASE = "6.18.60-0-virt"
+KERNEL_URL = "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/linux-virt-6.18.60-r0.apk"
+KERNEL_SHA256 = "3ff658cf5aada14687238527f48526cef7a75ac8c673fc597f3a65791c86a25e"
 # virtio, virtio_pci, virtio_mmio and ipv6 are built into this kernel.
 MODULES = [
     "net/core/failover", "drivers/net/net_failover",
