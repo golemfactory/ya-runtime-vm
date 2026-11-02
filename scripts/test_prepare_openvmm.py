@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import tomllib
 import unittest
+from unittest.mock import patch
 
 from prepare_openvmm import git, prepare, standalone_manifest
 
@@ -52,6 +53,11 @@ class PrepareOpenVmmTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        # Treat the fixture as its own runtime workspace. On Windows the real
+        # checkout and the system temp directory can live on different drives.
+        root_patch = patch("prepare_openvmm.ROOT", self.root)
+        root_patch.start()
+        self.addCleanup(root_patch.stop)
         source = self.root / "source"
         source.mkdir()
         git(source, "init", "--quiet")
