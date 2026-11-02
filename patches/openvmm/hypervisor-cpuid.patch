@@ -1,0 +1,107 @@
+--- a/vmm_core/virt_kvm/src/arch/x86_64/mod.rs
++++ b/vmm_core/virt_kvm/src/arch/x86_64/mod.rs
+@@ -145,6 +145,24 @@
+     })
+ }
+ 
++/// Build the base guest CPU identity independently of Hyper-V enlightenments.
++fn guest_cpuid_leaf(entry: kvm::kvm_cpuid_entry2) -> Option<CpuidLeaf> {
++    // KVM paravirtualization leaves are not exposed by this backend.
++    if entry.function & 0xf0000000 == 0x40000000 {
++        return None;
++    }
++    let mut leaf = CpuidLeaf::new(entry.function, [entry.eax, entry.ebx, entry.ecx, entry.edx]);
++    if entry.flags & KVM_CPUID_FLAG_SIGNIFCANT_INDEX != 0 {
++        leaf = leaf.indexed(entry.index);
++    }
++    if entry.function == CpuidFunction::VersionAndFeatures.0 {
++        // KVM_GET_SUPPORTED_CPUID does not necessarily set this bit. Without it,
++        // guests can attempt bare-metal initialization of unavailable CPU MSRs.
++        leaf.result[2] |= 1 << 31;
++    }
++    Some(leaf)
++}
++
+ impl virt::Hypervisor for Kvm {
+     type ProtoPartition<'a> = KvmProtoPartition<'a>;
+     type Partition = KvmPartition;
+@@ -197,19 +215,7 @@
+ 
+         let mut cpuid_entries = supported_cpuid
+             .into_iter()
+-            .filter_map(|entry| {
+-                // Filter out KVM CPUID entries.
+-                if entry.function & 0xf0000000 == 0x40000000 {
+-                    return None;
+-                }
+-                let mut leaf =
+-                    CpuidLeaf::new(entry.function, [entry.eax, entry.ebx, entry.ecx, entry.edx]);
+-                if entry.flags & KVM_CPUID_FLAG_SIGNIFCANT_INDEX != 0 {
+-                    leaf = leaf.indexed(entry.index);
+-                }
+-
+-                Some(leaf)
+-            })
++            .filter_map(guest_cpuid_leaf)
+             .collect::<Vec<_>>();
+ 
+         // When nested virt is disabled, strip the virtualization
+@@ -2067,11 +2073,58 @@
+ 
+ #[cfg(test)]
+ mod tests {
++    use super::guest_cpuid_leaf;
+     use super::kvm_recommends_hyperv_apic_msrs;
+     use hvdef::HV_CPUID_FUNCTION_MS_HV_ENLIGHTENMENT_INFORMATION;
+     use hvdef::HV_CPUID_FUNCTION_MS_HV_FEATURES;
+     use hvdef::HvEnlightenmentInformation;
+     use test_with_tracing::test;
++
++    #[test]
++    fn guest_cpuid_identifies_a_vm_without_hyperv_leaves() {
++        // No Hyper-V configuration or leaves are involved in the base policy.
++        for ecx in [0, 0x1234_5678, 0xffff_ffff] {
++            let leaf = guest_cpuid_leaf(kvm::kvm_cpuid_entry2 {
++                function: 1,
++                eax: 0x00a6_0f12, // AMD family/model/stepping stays unchanged.
++                ebx: 0x1234,
++                ecx,
++                edx: 0x5678,
++                ..Default::default()
++            })
++            .unwrap();
++            let leaves = virt::CpuidLeafSet::new(vec![leaf]);
++            assert_eq!(
++                leaves.result(1, 0, &[0; 4]),
++                [0x00a6_0f12, 0x1234, ecx | (1 << 31), 0x5678]
++            );
++            assert_eq!(leaves.result(0x4000_0000, 0, &[0; 4]), [0; 4]);
++        }
++    }
++
++    #[test]
++    fn guest_cpuid_preserves_other_leaves_and_filters_kvm_identity() {
++        let leaf = guest_cpuid_leaf(kvm::kvm_cpuid_entry2 {
++            function: 7,
++            index: 2,
++            flags: kvm::KVM_CPUID_FLAG_SIGNIFCANT_INDEX,
++            eax: 1,
++            ebx: 2,
++            ecx: 3,
++            edx: 4,
++            ..Default::default()
++        })
++        .unwrap();
++        assert_eq!(leaf.result, [1, 2, 3, 4]);
++        assert_eq!(leaf.index, Some(2));
++        assert!(
++            guest_cpuid_leaf(kvm::kvm_cpuid_entry2 {
++                function: 0x4000_0000,
++                ..Default::default()
++            })
++            .is_none()
++        );
++    }
+ 
+     #[test]
+     fn only_recommends_apic_msrs_when_kvm_does() {

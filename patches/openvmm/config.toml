@@ -1,0 +1,5 @@
+repository = "https://github.com/microsoft/openvmm.git"
+tag = "openvmm-v0.4.0"
+revision = "8a150698f4b8e39344f4c7099b53e20b5d54f72e"
+crate = "vmm_core/virt_kvm"
+patch = "hypervisor-cpuid.patch"

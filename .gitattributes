@@ -1,0 +1,2 @@
+# git apply must see the same patch bytes on Linux and Windows checkouts.
+/patches/openvmm/*.patch text eol=lf whitespace=-blank-at-eol

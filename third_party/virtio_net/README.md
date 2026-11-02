@@ -1,7 +1,7 @@
 # OpenVMM virtio-net patch
 
 Source: Microsoft OpenVMM, commit
-`88e78be49228ead4f324bf3e9252769f453059ad`, directory
+`8a150698f4b8e39344f4c7099b53e20b5d54f72e`, directory
 `vm/devices/virtio/virtio_net`. The MIT license and source copyright notices are
 preserved. This copy includes the upstream Rust sources and unit tests.
 

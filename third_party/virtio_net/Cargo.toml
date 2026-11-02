@@ -8,19 +8,19 @@ license = "MIT"
 publish = false
 
 [dependencies]
-vm_resource = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-inspect = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-inspect_counters = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-net_backend = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-net_backend_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-pal_async = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-task_control = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-virtio = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-virtio_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-guestmem = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-vmcore = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-open_enum = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-tracelimit = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
+vm_resource = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+inspect = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+inspect_counters = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+net_backend = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+net_backend_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+pal_async = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+task_control = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+virtio = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+virtio_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+guestmem = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+vmcore = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+open_enum = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+tracelimit = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
 
 anyhow = "1.0"
 async-trait = "0.1"
@@ -31,10 +31,10 @@ zerocopy = { version = "0.8.25", features = ["derive"] }
 
 [dev-dependencies]
 futures = "0.3.31"
-mesh = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-pal_event = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
+mesh = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+pal_event = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
 parking_lot = "0.12"
-test_with_tracing = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
+test_with_tracing = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
 
 # Upstream workspace setting, needed by the vendored tests.
 [lints.clippy]

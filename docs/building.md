@@ -14,6 +14,16 @@ supply an existing static Linux `mkfs.ext2` binary through `YA_VM_MKFS`. The ima
 builder executes the x86_64 guest agent's startup self-check on the build host.
 Kernel and self-test image downloads require network access.
 
+## OpenVMM source preparation
+
+The build uses OpenVMM 0.4.0 with a small KVM CPUID patch. Mise automatically runs
+`openvmm-prepare` before Cargo build and check tasks. This requires Git and network
+access on the first run and creates an ignored checkout in `build/openvmm/`.
+Subsequent runs reuse the verified checkout offline. When invoking Cargo directly,
+run `mise run openvmm-prepare` first. See the
+[override instructions](../patches/openvmm/README.md) for updating the patch and
+running its tests. The existing FUSE and virtio-net overrides remain local crates.
+
 ## Linux
 
 On Ubuntu, install the native build tools:

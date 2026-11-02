@@ -1,7 +1,7 @@
 [package]
 name = "ya-runtime-vm"
 description = "OpenVMM runtime for Linux task images"
-version = "0.6.0-rc3"
+version = "0.6.0-rc4"
 authors = ["Golem Factory <contact@golem.network>"]
 edition = "2024"
 license = "GPL-3.0"
@@ -56,33 +56,33 @@ log = "0.4.8"
 # Forward embedded OpenVMM events to the SDK logger when no tracing subscriber
 # is installed, including the underlying error behind a fatal VM debug break.
 tracing = { version = "0.1", features = ["log"] }
-fuse = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-lx = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-virtio = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-virtiofs = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
+fuse = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+lx = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+virtio = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+virtiofs = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
 # Patched to third_party/virtio_net for a per-device MTU.
-virtio_net = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-mesh = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-mesh_worker = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-net_backend = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-inspect = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-pal_async = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
+virtio_net = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+mesh = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+mesh_worker = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+net_backend = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+inspect = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+pal_async = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
 parking_lot = "0.12"
 # Enable source builds and static linking for OpenVMM's OpenSSL dependency.
 openssl = { version = "0.10", features = ["vendored"] }
-openvmm_core = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-openvmm_defs = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-vmm_core_defs = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-hypervisor_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-virtio_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-disk_backend_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-net_backend_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-serial_socket = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-serial_core = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-vm_resource = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-vm_manifest_builder = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-vmgs_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
-unix_socket = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
+openvmm_core = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+openvmm_defs = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+vmm_core_defs = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+hypervisor_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+virtio_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+disk_backend_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+net_backend_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+serial_socket = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+serial_core = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+vm_resource = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+vm_manifest_builder = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+vmgs_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+unix_socket = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
 # "crossbeam-channel" and "macos_fsevent" are default features. 
 # Remove `macos_fsevent` if `macos` build will get dropped.
 notify = { version = "6.0", features = ["crossbeam-channel", "macos_fsevent"] }
@@ -111,20 +111,20 @@ ya-client-model.workspace = true
 
 [dev-dependencies]
 env_logger = "0.10"
-guestmem = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
+guestmem = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
 zerocopy = "0.8"
 tempfile = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Embedded core does not select a crypto backend as the OpenVMM CLI does.
 # Force vendored OpenSSL instead of the musl default's shared SymCrypt backend.
-openvmm_crypto = { package = "crypto", git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad", features = ["openssl", "vendored"] }
-openvmm_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad", features = ["virt_kvm"] }
-vfio_assigned_device_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad" }
+openvmm_crypto = { package = "crypto", git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e", features = ["openssl", "vendored"] }
+openvmm_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e", features = ["virt_kvm"] }
+vfio_assigned_device_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
 
 [target.'cfg(windows)'.dependencies]
-openvmm_crypto = { package = "crypto", git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad", features = ["native"] }
-openvmm_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "88e78be49228ead4f324bf3e9252769f453059ad", features = ["virt_whp"] }
+openvmm_crypto = { package = "crypto", git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e", features = ["native"] }
+openvmm_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e", features = ["virt_whp"] }
 windows-sys = { version = "0.61", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Wdk_System_SystemServices", "Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl"] }
 
 [lib]
