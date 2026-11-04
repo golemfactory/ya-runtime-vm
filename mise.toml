@@ -22,8 +22,8 @@ run = "cargo test --locked -p virt_kvm --target x86_64-unknown-linux-musl guest_
 run_windows = "python -c \"raise SystemExit('Test the KVM backend on Linux')\""
 
 [tasks.test-build-tools]
-description = "Test OpenVMM checkout preparation and dependency isolation"
-run = "python -m unittest discover -s scripts -p test_prepare_openvmm.py"
+description = "Test OpenVMM checkout preparation, dependency isolation and source notices"
+run = "python -m unittest discover -s scripts -p test_*.py"
 
 [tasks.fmt]
 description = "Format Rust sources"

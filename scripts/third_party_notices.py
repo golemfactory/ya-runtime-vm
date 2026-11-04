@@ -79,7 +79,8 @@ def source_link(package):
         return package.get("repository") or f"https://crates.io/crates/{package['name']}/{package['version']}"
     if Path(package["manifest_path"]).is_relative_to(ROOT / "build/openvmm"):
         config = tomllib.loads((ROOT / "patches/openvmm/config.toml").read_text())
-        return (f"{config['repository'].removesuffix('.git')}/tree/{config['revision']}/{config['crate']}"
+        crate = Path(package["manifest_path"]).parent.relative_to(ROOT / "build/openvmm").as_posix()
+        return (f"{config['repository'].removesuffix('.git')}/tree/{config['revision']}/{crate}"
                 f" (local patch: {REPOSITORY}/blob/{TAG}/patches/openvmm/{config['patch']})")
     return f"{REPOSITORY}/tree/{TAG}/{Path(package['manifest_path']).parent.relative_to(ROOT).as_posix()}"
 
