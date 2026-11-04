@@ -41,7 +41,9 @@ and its `runtime/` directory together.
 
 The host needs hardware virtualization:
 
-- **Linux:** read/write access to `/dev/kvm`, usually through the `kvm` group.
+- **Linux:** read/write access to `/dev/kvm`, usually through the `kvm` group,
+  and KVM support for `KVM_CAP_ENFORCE_PV_FEATURE_CPUID`. Startup fails if this
+  capability is unavailable; see the [enforced PV policy](patches/openvmm/README.md#enforced-pv-policy).
 - **Windows:** the Windows Hypervisor Platform feature, then a reboot:
   `Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform`.
 

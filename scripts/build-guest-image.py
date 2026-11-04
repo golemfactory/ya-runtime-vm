@@ -82,6 +82,11 @@ def main():
         pkginfo = package.extractfile(members[".PKGINFO"]).read().decode()
         (DEST / "vmlinuz-virt").write_bytes(package.extractfile(members["boot/vmlinuz-virt"]).read())
         prefix = f"lib/modules/{KERNEL_RELEASE}/kernel/"
+        # Test-only privileged probe support. Never include this module in the
+        # production initramfs or runtime package.
+        (DEST / "test-msr.ko").write_bytes(gzip.decompress(
+            package.extractfile(members[prefix + "arch/x86/kernel/msr.ko.gz"]).read()
+        ))
         # The kernel has no in-kernel module decompression; ship plain .ko files.
         for module in MODULES:
             data = gzip.decompress(package.extractfile(members[prefix + module + ".ko.gz"]).read())

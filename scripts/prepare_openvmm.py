@@ -1,4 +1,4 @@
-"""Prepare a pinned OpenVMM checkout and the patched virt_kvm Cargo override."""
+"""Prepare a pinned OpenVMM checkout and the patched KVM Cargo overrides."""
 import copy
 import hashlib
 import json
@@ -127,13 +127,16 @@ def prepare(config_path=CONFIG, destination=DESTINATION):
         git(staging, "checkout", "--quiet", "--detach", actual)
         git(staging, "apply", "--check", str(patch.resolve()))
         git(staging, "apply", "--index", str(patch.resolve()))
-        manifest_path = staging / config["crate"] / "Cargo.toml"
         workspace = tomllib.loads((staging / "Cargo.toml").read_text())["workspace"]
-        manifest = tomllib.loads(manifest_path.read_text())
-        runtime_workspace = Path(os.path.relpath(ROOT, manifest_path.parent)).as_posix()
-        manifest_path.write_text(
-            standalone_manifest(manifest, workspace, config, runtime_workspace), newline="\n"
-        )
+        # Keep the original single-crate configuration usable for local fixtures.
+        crates = config["crates"] if "crates" in config else [config["crate"]]
+        for crate in crates:
+            manifest_path = staging / crate / "Cargo.toml"
+            manifest = tomllib.loads(manifest_path.read_text())
+            runtime_workspace = Path(os.path.relpath(ROOT, manifest_path.parent)).as_posix()
+            manifest_path.write_text(
+                standalone_manifest(manifest, workspace, config, runtime_workspace), newline="\n"
+            )
         state = checkout_state(staging)
         if state["untracked"]:
             raise RuntimeError("Patch created unexpected untracked files")

@@ -102,6 +102,7 @@ async fn commands(
     mut events: Statuses,
     share: &Path,
     mode: &str,
+    pv_security: bool,
 ) -> anyhow::Result<()> {
     let ga = data.lock().await.ga()?;
     let redirects = [
@@ -109,6 +110,30 @@ async fn commands(
         Some(RedirectFdType::RedirectFdPipeBlocking(4096)),
         Some(RedirectFdType::RedirectFdPipeBlocking(4096)),
     ];
+    if pv_security {
+        let pid = ga
+            .lock()
+            .await
+            .run_process(
+                "/mnt/out/probe",
+                &["probe", "pv-security"],
+                None,
+                0,
+                0,
+                &redirects,
+                Some("/"),
+            )
+            .await?
+            .map_err(|e| anyhow::anyhow!("PV security probe exec: {e}"))?;
+        let (out, err, status) = events.collect(pid).await?;
+        ensure!(
+            status == 0 && out == b"KVM_PV_SECURITY_OK\n" && err.is_empty(),
+            "PV security probe failed: status={status}, stdout={}, stderr={}",
+            String::from_utf8_lossy(&out),
+            String::from_utf8_lossy(&err)
+        );
+        println!("KVM_PV_SECURITY_OK");
+    }
     let pid = ga
         .lock()
         .await
@@ -499,6 +524,7 @@ async fn check(
     image: &Path,
     mode: &str,
     transport: network::Transport,
+    pv_module: Option<&Path>,
 ) -> anyhow::Result<()> {
     println!("VM_CASE {mode} {transport:?}");
     let mut peers = Vec::new();
@@ -514,7 +540,7 @@ async fn check(
     let image = image.canonicalize()?;
     let deployment = Deployment::try_from_input(
         tokio::fs::File::open(&image).await?,
-        1,
+        if pv_module.is_some() { 4 } else { 1 },
         512,
         std::slice::from_ref(&image),
         HashMap::from([
@@ -555,6 +581,9 @@ async fn check(
     let share = work.path().join(&deployment.volumes[0].name);
     std::fs::create_dir(&share)?;
     std::fs::copy(probe, share.join("probe"))?;
+    if let Some(module) = pv_module {
+        std::fs::copy(module, share.join("test-msr.ko"))?;
+    }
     std::fs::write(share.join("input"), b"host data")?;
     let secret = work.path().join("secret");
     std::fs::write(&secret, b"outside secret")?;
@@ -631,7 +660,7 @@ async fn check(
             .context("missing exposed network endpoint")?;
             peer.attach(exposed).await?;
         }
-        commands(data.clone(), events, &share, mode).await
+        commands(data.clone(), events, &share, mode, pv_module.is_some()).await
     })
     .await
     .context("VM integration test timed out")
@@ -657,17 +686,35 @@ async fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     ensure!(
-        args.len() == 2,
-        "usage: vm_smoke <Linux probe ELF> <self-test.gvmi>"
+        args.len() == 2 || args.len() == 3,
+        "usage: vm_smoke <Linux probe ELF> <self-test.gvmi> [test-msr.ko (KVM only)]"
     );
     tokio::task::LocalSet::new()
         .run_until(async {
+            if let Some(module) = args.get(2) {
+                check(
+                    Path::new(&args[0]),
+                    Path::new(&args[1]),
+                    "both",
+                    network::Transport::Udp,
+                    Some(Path::new(module)),
+                )
+                .await?;
+                return anyhow::Ok(());
+            }
             for (mode, transport) in [
                 ("both", network::Transport::Udp),
                 ("inet-only", network::Transport::Connect),
                 ("vpn-only", network::Transport::Listen),
             ] {
-                check(Path::new(&args[0]), Path::new(&args[1]), mode, transport).await?;
+                check(
+                    Path::new(&args[0]),
+                    Path::new(&args[1]),
+                    mode,
+                    transport,
+                    None,
+                )
+                .await?;
             }
             anyhow::Ok(())
         })

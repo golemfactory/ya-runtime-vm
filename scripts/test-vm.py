@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build the Linux test workload or run native OpenVMM integration checks."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 import os
 from pathlib import Path
@@ -53,6 +54,9 @@ def main():
     for name in assets:
         if not (ROOT / "build/guest" / name).is_file():
             raise SystemExit(f"Missing build/guest/{name}; run mise run guest-image, fetch-self-test and vm-probe-build on Linux")
+    pv_module = ROOT / "build/guest/test-msr.ko"
+    if sys.platform == "linux" and not pv_module.is_file():
+        raise SystemExit("Missing build/guest/test-msr.ko; run mise run guest-image")
     command = ["cargo", "build", "--locked", "--release", "-p", "ya-runtime-vm", "--example", "vm_smoke", "--bin", "ya-runtime-vm"]
     if sys.platform == "linux":
         command += ["--target", LINUX_TARGET]
@@ -74,6 +78,16 @@ def main():
         shutil.copy2(binary, bundle / (name + suffix))
     run_check([str(bundle / ("ya-runtime-vm" + suffix)), "test"], "self-test", 40, bundle)
     run_check([str(bundle / ("vm_smoke" + suffix)), str(PROBE), str(runtime / "self-test.gvmi")], "integration", 90, bundle)
+    if sys.platform == "linux":
+        # Two separate processes/VMs, each exercising all four guest vCPUs.
+        # Follow the hostile MSR probes with the normal I/O/network/exit checks.
+        command = [str(bundle / "vm_smoke"), str(PROBE),
+                   str(runtime / "self-test.gvmi"), str(pv_module)]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            checks = [pool.submit(run_check, command, f"pv-security-{i}", 90, bundle)
+                      for i in range(2)]
+            for check in checks:
+                check.result()
 
 
 if __name__ == "__main__":

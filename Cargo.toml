@@ -6,6 +6,7 @@ members = [
     "third_party/fuse",
     "third_party/virtio_net",
     "build/openvmm/vmm_core/virt_kvm",
+    "build/openvmm/vm/kvm",
 ]
 default-members = ["crates/runtime", "crates/agent-protocol"]
 resolver = "2"
@@ -28,3 +29,4 @@ fuse = { path = "third_party/fuse" }
 virtio_net = { path = "third_party/virtio_net" }
 # Prepared from a pinned checkout by `mise run openvmm-prepare`.
 virt_kvm = { path = "build/openvmm/vmm_core/virt_kvm" }
+kvm = { path = "build/openvmm/vm/kvm" }

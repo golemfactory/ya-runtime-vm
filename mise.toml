@@ -12,7 +12,7 @@ shellcheck = "0.11.0"
 CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = "-C target-feature=+crt-static"
 
 [tasks.openvmm-prepare]
-description = "Check out OpenVMM 0.4.0 and apply the KVM CPUID patch"
+description = "Check out OpenVMM 0.4.0 and apply the enforced KVM PV policy"
 run = "python scripts/prepare_openvmm.py"
 
 [tasks.openvmm-test]
@@ -115,7 +115,7 @@ description = "Build the static Linux workload for VM integration tests"
 run = "python scripts/test-vm.py --build-probe"
 
 [tasks.vm-test]
-description = "Run self-test, virtio-fs policy, process output and entrypoint checks in KVM/WHP"
+description = "Run VM integration checks, including concurrent PV policy probes on KVM"
 depends = ["openvmm-prepare"]
 run = "python scripts/test-vm.py"
 

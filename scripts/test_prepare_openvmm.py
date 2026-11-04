@@ -117,6 +117,37 @@ class PrepareOpenVmmTests(unittest.TestCase):
             prepare(self.config, self.destination)
         self.assertFalse(self.destination.exists())
 
+    def test_multiple_crates_share_revision_and_detect_edits(self):
+        source = self.root / "source"
+        (source / "wrapper").mkdir()
+        (source / "wrapper/Cargo.toml").write_text(
+            '[package]\nname = "kvm"\nedition.workspace = true\n'
+        )
+        with (source / "backend/Cargo.toml").open("a") as manifest:
+            manifest.write('[dependencies]\nkvm.workspace = true\n')
+        with (source / "Cargo.toml").open("a") as manifest:
+            manifest.write('[workspace.dependencies]\nkvm = { path = "wrapper" }\n')
+        git(source, "add", ".")
+        git(source, "commit", "--quiet", "-m", "second crate")
+        git(source, "tag", "v-multi")
+        revision = git(source, "rev-parse", "HEAD").decode().strip()
+        self.config.write_text(self.config.read_text()
+                               .replace(self.revision, revision)
+                               .replace('tag = "v-test"', 'tag = "v-multi"')
+                               .replace('crate = "backend"', 'crates = ["backend", "wrapper"]'))
+        prepare(self.config, self.destination)
+        backend = tomllib.loads((self.destination / "backend/Cargo.toml").read_text())
+        wrapper = tomllib.loads((self.destination / "wrapper/Cargo.toml").read_text())
+        self.assertEqual(backend["dependencies"]["kvm"]["rev"], revision)
+        self.assertEqual(wrapper["package"]["edition"], "2024")
+        self.assertEqual(backend["package"]["workspace"], wrapper["package"]["workspace"])
+        source.rename(self.root / "source-unavailable")
+        prepare(self.config, self.destination)
+        with (self.destination / "wrapper/Cargo.toml").open("a") as manifest:
+            manifest.write("# manual edit\n")
+        with self.assertRaisesRegex(RuntimeError, "local changes"):
+            prepare(self.config, self.destination)
+
     def test_unmanaged_checkout_is_not_replaced(self):
         self.destination.mkdir()
         (self.destination / "keep.txt").write_text("keep")

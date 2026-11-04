@@ -2864,7 +2864,6 @@ dependencies = [
 [[package]]
 name = "kvm"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm.git?rev=8a150698f4b8e39344f4c7099b53e20b5d54f72e#8a150698f4b8e39344f4c7099b53e20b5d54f72e"
 dependencies = [
  "kvm-bindings",
  "libc",
@@ -8066,7 +8065,7 @@ dependencies = [
 
 [[package]]
 name = "ya-runtime-vm"
-version = "0.6.0-rc4"
+version = "0.6.0-rc5"
 dependencies = [
  "anyhow",
  "async-trait",

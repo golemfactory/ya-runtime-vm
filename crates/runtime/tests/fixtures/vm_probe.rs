@@ -4,6 +4,8 @@ use std::io::{self, Write};
 use std::os::unix::fs::{DirEntryExt, MetadataExt, PermissionsExt, symlink};
 use std::path::Path;
 
+mod pv_security;
+
 fn files(role: &str) {
     let share = Path::new("/mnt/out");
     let input = share.join("input");
@@ -211,6 +213,7 @@ fn main() {
             fs::remove_file("/tmp/size-check").unwrap();
             println!("VOLUMES_OK");
         }
+        Some("pv-security") => pv_security::run(),
         Some("network") => network(&args[2], [3, 4].map(|i| args[i].parse().unwrap())),
         Some("files") => files(&args[2]),
         Some("burst") => {
