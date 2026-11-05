@@ -1,2 +1,2 @@
-runtime/image/* filter=lfs diff=lfs merge=lfs -text
-runtime/poc/runtime/* filter=lfs diff=lfs merge=lfs -text
+# git apply must see the same patch bytes on Linux and Windows checkouts.
+/patches/openvmm/*.patch text eol=lf whitespace=-blank-at-eol

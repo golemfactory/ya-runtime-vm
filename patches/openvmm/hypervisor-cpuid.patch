@@ -1,0 +1,260 @@
+--- a/vmm_core/virt_kvm/src/arch/x86_64/mod.rs
++++ b/vmm_core/virt_kvm/src/arch/x86_64/mod.rs
+@@ -145,6 +145,50 @@
+     })
+ }
+ 
++// KVM handles these MSRs and hypercalls in-kernel. Keep an explicit allowlist:
++// async page faults, migration controls and extended MSI destinations require
++// separate VMM policy/support and must not appear just because the host adds them.
++const KVM_PV_FEATURES: u32 = (1 << 0) // CLOCKSOURCE (legacy clock MSRs)
++    | (1 << 1) // NOP_IO_DELAY
++    | (1 << 3) // CLOCKSOURCE2
++    | (1 << 5) // STEAL_TIME
++    | (1 << 6) // PV_EOI
++    | (1 << 7) // PV_UNHALT (paravirtual spinlocks)
++    | (1 << 9) // PV_TLB_FLUSH
++    | (1 << 11) // PV_SEND_IPI
++    | (1 << 12) // POLL_CONTROL
++    | (1 << 13) // PV_SCHED_YIELD
++    | (1 << 24); // CLOCKSOURCE_STABLE_BIT
++
++/// Build the base guest CPU identity independently of Hyper-V enlightenments.
++fn guest_cpuid_leaf(entry: kvm::kvm_cpuid_entry2, expose_kvm: bool) -> Option<CpuidLeaf> {
++    if entry.function & 0xf0000000 == 0x40000000 {
++        if !expose_kvm {
++            return None;
++        }
++        let result = match entry.function {
++            // Advertise only the KVM leaves implemented by this policy, even if
++            // a future host kernel returns additional leaves.
++            0x4000_0000 => [0x4000_0001, entry.ebx, entry.ecx, entry.edx],
++            // Never invent host capabilities or propagate the REALTIME hint:
++            // runtime vCPUs can be preempted, particularly under nested KVM.
++            0x4000_0001 => [entry.eax & KVM_PV_FEATURES, 0, 0, 0],
++            _ => return None,
++        };
++        return Some(CpuidLeaf::new(entry.function, result));
++    }
++    let mut leaf = CpuidLeaf::new(entry.function, [entry.eax, entry.ebx, entry.ecx, entry.edx]);
++    if entry.flags & KVM_CPUID_FLAG_SIGNIFCANT_INDEX != 0 {
++        leaf = leaf.indexed(entry.index);
++    }
++    if entry.function == CpuidFunction::VersionAndFeatures.0 {
++        // KVM_GET_SUPPORTED_CPUID does not necessarily set this bit. Without it,
++        // guests can attempt bare-metal initialization of unavailable CPU MSRs.
++        leaf.result[2] |= 1 << 31;
++    }
++    Some(leaf)
++}
++
+ impl virt::Hypervisor for Kvm {
+     type ProtoPartition<'a> = KvmProtoPartition<'a>;
+     type Partition = KvmPartition;
+@@ -195,21 +239,12 @@
+             return Err(KvmError::UnsupportedCpuVendor);
+         }
+ 
++        // Keep Hyper-V's CPUID namespace and confidential-guest policy intact.
++        let expose_kvm = config.hv_config.is_none()
++            && matches!(config.isolation.isolation_type(), virt::IsolationType::None);
+         let mut cpuid_entries = supported_cpuid
+             .into_iter()
+-            .filter_map(|entry| {
+-                // Filter out KVM CPUID entries.
+-                if entry.function & 0xf0000000 == 0x40000000 {
+-                    return None;
+-                }
+-                let mut leaf =
+-                    CpuidLeaf::new(entry.function, [entry.eax, entry.ebx, entry.ecx, entry.edx]);
+-                if entry.flags & KVM_CPUID_FLAG_SIGNIFCANT_INDEX != 0 {
+-                    leaf = leaf.indexed(entry.index);
+-                }
+-
+-                Some(leaf)
+-            })
++            .filter_map(|entry| guest_cpuid_leaf(entry, expose_kvm))
+             .collect::<Vec<_>>();
+ 
+         // When nested virt is disabled, strip the virtualization
+@@ -1023,6 +1058,12 @@
+             .collect::<Vec<_>>();
+ 
+         kvm.set_cpuid(&cpuid_entries)?;
++        // CPUID advertisement alone does not restrict a malicious guest. Require
++        // KVM to enforce it on every ordinary vCPU, before its first KVM_RUN.
++        // Leave the existing Hyper-V and SNP policies unchanged.
++        if !self.partition.hv1_enabled && self.partition.snp_config.is_none() {
++            kvm.enforce_pv_feature_cpuid()?;
++        }
+ 
+         let mut vp = KvmProcessor {
+             partition: &self.partition,
+@@ -2067,11 +2108,129 @@
+ 
+ #[cfg(test)]
+ mod tests {
++    use super::guest_cpuid_leaf;
+     use super::kvm_recommends_hyperv_apic_msrs;
+     use hvdef::HV_CPUID_FUNCTION_MS_HV_ENLIGHTENMENT_INFORMATION;
+     use hvdef::HV_CPUID_FUNCTION_MS_HV_FEATURES;
+     use hvdef::HvEnlightenmentInformation;
+     use test_with_tracing::test;
++
++    #[test]
++    fn guest_cpuid_preserves_cpu_identity_and_indexed_leaves() {
++        for expose_kvm in [false, true] {
++            for ecx in [0, 0x1234_5678, u32::MAX] {
++                let leaf = guest_cpuid_leaf(
++                    kvm::kvm_cpuid_entry2 {
++                        function: 1,
++                        eax: 0x00a6_0f12,
++                        ebx: 0x1234,
++                        ecx,
++                        edx: 0x5678,
++                        ..Default::default()
++                    },
++                    expose_kvm,
++                )
++                .unwrap();
++                assert_eq!(leaf.result, [0x00a6_0f12, 0x1234, ecx | (1 << 31), 0x5678]);
++            }
++            let leaf = guest_cpuid_leaf(
++                kvm::kvm_cpuid_entry2 {
++                    function: 7,
++                    index: 2,
++                    flags: kvm::KVM_CPUID_FLAG_SIGNIFCANT_INDEX,
++                    eax: 1,
++                    ebx: 2,
++                    ecx: 3,
++                    edx: 4,
++                    ..Default::default()
++                },
++                expose_kvm,
++            )
++            .unwrap();
++            assert_eq!(leaf.result, [1, 2, 3, 4]);
++            assert_eq!(leaf.index, Some(2));
++        }
++    }
++
++    #[test]
++    fn guest_cpuid_exposes_kvm_signature_with_bounded_namespace() {
++        let leaf = guest_cpuid_leaf(
++            kvm::kvm_cpuid_entry2 {
++                function: 0x4000_0000,
++                eax: 0x4000_00ff,
++                ebx: u32::from_le_bytes(*b"KVMK"),
++                ecx: u32::from_le_bytes(*b"VMKV"),
++                edx: u32::from_le_bytes(*b"M\0\0\0"),
++                ..Default::default()
++            },
++            true,
++        )
++        .unwrap();
++        assert_eq!(leaf.result[0], 0x4000_0001);
++        let signature: Vec<u8> = leaf.result[1..]
++            .iter()
++            .flat_map(|v| v.to_le_bytes())
++            .collect();
++        assert_eq!(signature, b"KVMKVMKVM\0\0\0");
++        assert!(
++            guest_cpuid_leaf(
++                kvm::kvm_cpuid_entry2 {
++                    function: 0x4000_0002,
++                    ..Default::default()
++                },
++                true
++            )
++            .is_none()
++        );
++    }
++
++    #[test]
++    fn guest_cpuid_only_exposes_supported_allowlisted_features() {
++        // Check every host feature independently, including unknown future bits.
++        for bit in 0..32 {
++            let leaf = guest_cpuid_leaf(
++                kvm::kvm_cpuid_entry2 {
++                    function: 0x4000_0001,
++                    eax: 1 << bit,
++                    ebx: u32::MAX,
++                    ecx: u32::MAX,
++                    edx: u32::MAX,
++                    ..Default::default()
++                },
++                true,
++            )
++            .unwrap();
++            let allowed = matches!(bit, 0 | 1 | 3 | 5 | 6 | 7 | 9 | 11 | 12 | 13 | 24);
++            assert_eq!(leaf.result, [if allowed { 1 << bit } else { 0 }, 0, 0, 0]);
++        }
++        let leaf = guest_cpuid_leaf(
++            kvm::kvm_cpuid_entry2 {
++                function: 0x4000_0001,
++                ..Default::default()
++            },
++            true,
++        )
++        .unwrap();
++        assert_eq!(leaf.result, [0; 4]);
++    }
++
++    #[test]
++    fn guest_cpuid_keeps_kvm_namespace_hidden_when_disabled() {
++        // Hyper-V and confidential guests retain the existing policy.
++        for function in [0x4000_0000, 0x4000_0001, 0x4000_0002, 0x4000_0100] {
++            assert!(
++                guest_cpuid_leaf(
++                    kvm::kvm_cpuid_entry2 {
++                        function,
++                        eax: u32::MAX,
++                        ..Default::default()
++                    },
++                    false
++                )
++                .is_none()
++            );
++        }
++    }
+ 
+     #[test]
+     fn only_recommends_apic_msrs_when_kvm_does() {
+--- a/vm/kvm/src/lib.rs
++++ b/vm/kvm/src/lib.rs
+@@ -1276,6 +1276,35 @@
+ pub struct Processor<'a>(&'a Partition, u32);
+ 
+ impl<'a> Processor<'a> {
++    /// Enforce KVM PV feature access against this vCPU's CPUID policy.
++    /// Fail closed: a host without this capability must not run an ordinary VM
++    /// while silently ignoring the caller's feature restrictions.
++    #[cfg(target_arch = "x86_64")]
++    pub fn enforce_pv_feature_cpuid(&self) -> Result<()> {
++        const NAME: &str = "KVM_CAP_ENFORCE_PV_FEATURE_CPUID";
++        let supported = self
++            .0
++            .check_extension(KVM_CAP_ENFORCE_PV_FEATURE_CPUID)
++            .map_err(|err| Error::EnableCap(NAME, err))?;
++        if supported <= 0 {
++            return Err(Error::MissingCapability(NAME));
++        }
++        // SAFETY: the ioctl targets the live vCPU fd, with the documented
++        // capability and args[0]=1. The remaining fields are zero-initialized.
++        unsafe {
++            ioctl::kvm_enable_cap(
++                self.get().vcpu.as_raw_fd(),
++                &kvm_enable_cap {
++                    cap: KVM_CAP_ENFORCE_PV_FEATURE_CPUID,
++                    args: [1, 0, 0, 0],
++                    ..Default::default()
++                },
++            )
++            .map_err(|err| Error::EnableCap(NAME, err))?;
++        }
++        Ok(())
++    }
++
+     pub fn enable_synic(&self) -> Result<()> {
+         // TODO: We are not checking KVM_CAP_ENABLE_CAP_VM first.
+         // TODO: We are not calling KVM_CHECK_EXTENSION first.
