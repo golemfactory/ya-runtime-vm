@@ -8065,7 +8065,7 @@ dependencies = [
 
 [[package]]
 name = "ya-runtime-vm"
-version = "0.6.0-rc5"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "async-trait",
