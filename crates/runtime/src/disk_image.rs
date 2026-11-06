@@ -68,20 +68,16 @@ fn mark_sparse(file: &std::fs::File, sparse: bool) -> io::Result<()> {
 
 #[cfg(unix)]
 fn reserve_range(file: std::fs::File, len: u64) -> io::Result<()> {
-    use std::os::fd::AsRawFd;
+    use rustix::fs::{FallocateFlags, fallocate};
+    use rustix::io::Errno;
 
-    let len = libc::off_t::try_from(len)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "preallocation is too large"))?;
-    let result = unsafe { libc::posix_fallocate(file.as_raw_fd(), 0, len) };
-    if result == 0 {
-        return Ok(());
+    match fallocate(&file, FallocateFlags::empty(), 0, len) {
+        Ok(()) => return Ok(()),
+        Err(Errno::OPNOTSUPP | Errno::NOSYS | Errno::INVAL) => {}
+        Err(err) => return Err(err.into()),
     }
 
-    if !matches!(result, libc::EOPNOTSUPP | libc::ENOSYS | libc::EINVAL) {
-        return Err(io::Error::from_raw_os_error(result));
-    }
-
-    write_zeroes(file, len as u64)
+    write_zeroes(file, len)
 }
 
 fn write_zeroes(mut file: std::fs::File, len: u64) -> io::Result<()> {

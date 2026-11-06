@@ -7,6 +7,10 @@ members = [
     "third_party/virtio_net",
     "build/openvmm/vmm_core/virt_kvm",
     "build/openvmm/vm/kvm",
+    "build/openvmm/vm/devices/virtio/virtio",
+    "build/openvmm/vm/devices/virtio/virtio_blk",
+    "build/openvmm/vm/devices/virtio/virtio_vsock",
+    "build/openvmm/vm/devices/virtio/virtiofs",
 ]
 default-members = ["crates/runtime", "crates/agent-protocol"]
 resolver = "2"
@@ -30,3 +34,7 @@ virtio_net = { path = "third_party/virtio_net" }
 # Prepared from a pinned checkout by `mise run openvmm-prepare`.
 virt_kvm = { path = "build/openvmm/vmm_core/virt_kvm" }
 kvm = { path = "build/openvmm/vm/kvm" }
+virtio = { path = "build/openvmm/vm/devices/virtio/virtio" }
+virtio_blk = { path = "build/openvmm/vm/devices/virtio/virtio_blk" }
+virtio_vsock = { path = "build/openvmm/vm/devices/virtio/virtio_vsock" }
+virtiofs = { path = "build/openvmm/vm/devices/virtio/virtiofs" }

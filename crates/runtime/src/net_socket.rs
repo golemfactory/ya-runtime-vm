@@ -78,7 +78,6 @@ pub(crate) fn take_registered_endpoint(id: &str) -> anyhow::Result<SocketEndpoin
 pub struct SocketEndpoint {
     mode: SocketMode,
     local: SocketAddr,
-    remote: Option<SocketAddr>,
     prepared_socket: Mutex<Option<Socket>>,
 }
 
@@ -111,13 +110,20 @@ impl SocketEndpoint {
                 local = socket_local_addr(&socket)?;
                 Some(socket)
             }
-            SocketMode::TcpConnect => None,
+            SocketMode::TcpConnect => {
+                let remote_addr = remote.ok_or_else(|| {
+                    anyhow::anyhow!("TCP client endpoint requires a remote address")
+                })?;
+                let socket = frame_socket(remote_addr, Type::STREAM, Protocol::TCP)?;
+                socket.connect(&remote_addr.into())?;
+                local = socket_local_addr(&socket)?;
+                Some(socket)
+            }
         };
 
         Ok(Self {
             mode,
             local,
-            remote,
             prepared_socket: Mutex::new(prepared_socket),
         })
     }
@@ -127,33 +133,19 @@ impl SocketEndpoint {
     }
 
     fn take_prepared_socket(&self) -> anyhow::Result<Socket> {
-        if let Some(socket) = self.prepared_socket.lock().take() {
-            return Ok(socket);
+        let mut guard = self.prepared_socket.lock();
+        if let Some(socket) = guard.as_ref()
+            && let Ok(cloned) = socket.try_clone()
+        {
+            return Ok(cloned);
         }
-
-        match &self.mode {
-            SocketMode::Udp => {
-                let socket = frame_socket(self.local, Type::DGRAM, Protocol::UDP)?;
-                socket.bind(&self.local.into())?;
-                socket.connect(
-                    &self
-                        .remote
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("UDP socket endpoint requires a remote address")
-                        })?
-                        .into(),
-                )?;
-                Ok(socket)
-            }
-            SocketMode::TcpListen => {
-                let socket = frame_socket(self.local, Type::STREAM, Protocol::TCP)?;
-                socket.set_reuse_address(true)?;
-                socket.bind(&self.local.into())?;
-                socket.listen(1)?;
-                Ok(socket)
-            }
-            SocketMode::TcpConnect => anyhow::bail!("TCP client socket is not pre-bound"),
-        }
+        guard.take().ok_or_else(|| {
+            anyhow::anyhow!(
+                "prepared {:?} socket endpoint for {} was already consumed",
+                self.mode,
+                self.local
+            )
+        })
     }
 }
 
@@ -162,6 +154,8 @@ impl SocketEndpoint {
 /// from the exe-unit would be dropped. The OS may cap the request, on Linux at
 /// `net.core.rmem_max`/`wmem_max`.
 const SOCKET_BUFFER_SIZE: usize = 2 * 1024 * 1024;
+const MAX_FRAME_SIZE: usize = 65535;
+const MAX_TX_QUEUE_FRAMES: usize = 256;
 
 fn frame_socket(address: SocketAddr, kind: Type, protocol: Protocol) -> io::Result<Socket> {
     let socket = Socket::new(domain(address), kind, Some(protocol))?;
@@ -252,15 +246,10 @@ impl SocketQueue {
                 Connection::Udp(PolledSocket::new(driver.as_ref(), socket)?)
             }
             SocketMode::TcpConnect => {
-                let remote = endpoint.remote.ok_or_else(|| {
-                    anyhow::anyhow!("TCP client endpoint requires a remote address")
-                })?;
-                let socket = frame_socket(remote, Type::STREAM, Protocol::TCP)?;
-                let mut socket = PolledSocket::new(driver.as_ref(), socket)?;
-                socket.connect(&remote.into()).await?;
+                let socket = endpoint.take_prepared_socket()?;
                 Connection::Tcp {
                     listener: None,
-                    stream: Some(socket),
+                    stream: Some(PolledSocket::new(driver.as_ref(), socket)?),
                 }
             }
             SocketMode::TcpListen => {
@@ -280,7 +269,7 @@ impl SocketQueue {
             tcp_rx: Vec::new(),
             tx: VecDeque::new(),
             tx_offset: 0,
-            buffer: vec![0; 65535].into_boxed_slice(),
+            buffer: vec![0; MAX_FRAME_SIZE].into_boxed_slice(),
             oversized: 0,
         })
     }
@@ -522,7 +511,24 @@ impl Queue for SocketQueue {
     ) -> anyhow::Result<(bool, usize)> {
         let count = segments.len();
         while !segments.is_empty() {
-            let (_metadata, _packet, _rest) = next_packet(segments);
+            let (metadata, packet_segments, rest) = next_packet(segments);
+            let total_len: usize = packet_segments.iter().map(|s| s.len as usize).sum();
+            if metadata.len as usize != total_len || total_len > self.buffer.len() {
+                self.oversized += 1;
+                if self.oversized.is_power_of_two() {
+                    log::warn!(
+                        "dropping {total_len}-byte TX network frame larger than the {}-byte transport limit ({} so far)",
+                        self.buffer.len(),
+                        self.oversized
+                    );
+                }
+                segments = rest;
+                continue;
+            }
+            if self.tx.len() >= MAX_TX_QUEUE_FRAMES {
+                segments = rest;
+                continue;
+            }
             let packet = linearize(pool, &mut segments)?;
             match &self.connection {
                 Connection::Udp(_) => self.tx.push_back(packet),
@@ -605,5 +611,58 @@ mod tests {
         assert_eq!(pool.written, [(0, 100), (1, 60)]);
         assert!(queue.tcp_rx.is_empty());
         assert_eq!(queue.oversized, 2);
+    }
+
+    #[async_test]
+    async fn oversized_tx_frames_and_excess_queue_depth_are_bounded(driver: DefaultDriver) {
+        use net_backend::{TxMetadata, TxSegmentType};
+
+        let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let endpoint = SocketEndpoint::new(
+            SocketMode::Udp,
+            "127.0.0.1:0".parse().unwrap(),
+            Some(peer.local_addr().unwrap()),
+        )
+        .unwrap();
+        let mut queue = SocketQueue::new(&endpoint, Box::new(driver)).await.unwrap();
+        let mut pool = Buffers {
+            mem: guestmem::GuestMemory::allocate(4096),
+            written: Vec::new(),
+        };
+
+        // Oversized TX frame (larger than MAX_FRAME_SIZE) is dropped before linearize().
+        let oversized_len = (MAX_FRAME_SIZE + 1) as u32;
+        let oversized_seg = [TxSegment {
+            ty: TxSegmentType::Head(TxMetadata {
+                id: TxId(0),
+                segment_count: 1,
+                len: oversized_len,
+                ..Default::default()
+            }),
+            gpa: 0,
+            len: oversized_len,
+        }];
+        assert_eq!(
+            queue.tx_avail(&mut pool, &oversized_seg).unwrap(),
+            (true, 1)
+        );
+        assert!(queue.tx.is_empty());
+        assert_eq!(queue.oversized, 1);
+
+        // Flooding TX without draining caps at MAX_TX_QUEUE_FRAMES.
+        let valid_seg = [TxSegment {
+            ty: TxSegmentType::Head(TxMetadata {
+                id: TxId(1),
+                segment_count: 1,
+                len: 64,
+                ..Default::default()
+            }),
+            gpa: 0,
+            len: 64,
+        }];
+        for _ in 0..(MAX_TX_QUEUE_FRAMES + 32) {
+            queue.tx_avail(&mut pool, &valid_seg).unwrap();
+        }
+        assert_eq!(queue.tx.len(), MAX_TX_QUEUE_FRAMES);
     }
 }

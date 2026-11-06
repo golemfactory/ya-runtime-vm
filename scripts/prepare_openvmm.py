@@ -104,6 +104,7 @@ def prepare(config_path=CONFIG, destination=DESTINATION):
         raise RuntimeError(f"Preparation already running (or stale lock): {lock}") from None
     staging = None
     try:
+        verified_local = False
         if destination.exists():
             stamp = destination / ".git/ya-runtime-vm-prepare.json"
             if not stamp.is_file():
@@ -114,13 +115,19 @@ def prepare(config_path=CONFIG, destination=DESTINATION):
             if saved["inputs"] == inputs:
                 print(f"OpenVMM {config['tag']} override is ready: {destination}")
                 return
+            verified_local = saved["state"].get("revision") == config["revision"]
 
         staging = Path(tempfile.mkdtemp(prefix=".openvmm-", dir=destination.parent))
         git(staging, "init", "--quiet")
         git(staging, "config", "core.autocrlf", "false")
         git(staging, "remote", "add", "origin", config["repository"])
         print(f"Fetching OpenVMM {config['tag']} ({config['revision']})", flush=True)
-        git(staging, "fetch", "--depth=1", "origin", f"refs/tags/{config['tag']}")
+        try:
+            git(staging, "fetch", "--depth=1", "origin", f"refs/tags/{config['tag']}")
+        except subprocess.CalledProcessError:
+            if not verified_local:
+                raise
+            git(staging, "fetch", "--quiet", "--depth=1", str(destination), config["revision"])
         actual = git(staging, "rev-parse", "FETCH_HEAD^{commit}").decode().strip()
         if actual != config["revision"]:
             raise RuntimeError(f"OpenVMM tag changed: expected {config['revision']}, got {actual}")

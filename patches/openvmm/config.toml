@@ -1,5 +1,12 @@
 repository = "https://github.com/microsoft/openvmm.git"
 tag = "openvmm-v0.4.0"
 revision = "8a150698f4b8e39344f4c7099b53e20b5d54f72e"
-crates = ["vmm_core/virt_kvm", "vm/kvm"]
+crates = [
+    "vmm_core/virt_kvm",
+    "vm/kvm",
+    "vm/devices/virtio/virtio",
+    "vm/devices/virtio/virtio_blk",
+    "vm/devices/virtio/virtio_vsock",
+    "vm/devices/virtio/virtiofs",
+]
 patch = "hypervisor-cpuid.patch"

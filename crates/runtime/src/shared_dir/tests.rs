@@ -417,9 +417,14 @@ fn host_symlinks_hardlinks_and_fifos_are_not_exported() {
     symlink(temp.path().join("outside"), share.join("symlink")).unwrap();
     symlink("missing", share.join("dangling")).unwrap();
     std::fs::hard_link(temp.path().join("outside"), share.join("hardlink")).unwrap();
-    let fifo = std::ffi::CString::new(share.join("fifo").as_os_str().as_encoded_bytes()).unwrap();
-    // SAFETY: a valid NUL-terminated test path, only creates a FIFO in TempDir.
-    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    rustix::fs::mknodat(
+        rustix::fs::CWD,
+        share.join("fifo"),
+        rustix::fs::FileType::Fifo,
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        0,
+    )
+    .unwrap();
     for s in ["symlink", "dangling", "hardlink", "fifo"] {
         assert!(fs.lookup(&request(1), name(s)).is_err(), "exported {s}");
         assert!(

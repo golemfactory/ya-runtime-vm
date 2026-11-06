@@ -142,6 +142,10 @@ struct NetStatus {
 const DEFAULT_MTU: u16 = 1500;
 // ya-runtime-vm: Linux ignores VIRTIO_NET_F_MTU below ETH_MIN_MTU.
 const MIN_MTU: u16 = 68;
+// ya-runtime-vm: Cap TX packet size to a maximum IPv4/IPv6 frame plus a
+// VLAN-tagged Ethernet header so a malicious guest cannot force multi-GiB
+// allocations when a backend linearizes segments.
+const MAX_TX_PACKET_SIZE: u32 = u16::MAX as u32 + 18;
 const BITS_PER_MEGABIT: u64 = 1_000_000;
 
 #[expect(dead_code)]
@@ -874,6 +878,8 @@ enum TxPacketError {
     ReadHeader(#[source] guestmem::GuestMemoryError),
     #[error("empty or too-small packet")]
     Empty,
+    #[error("packet length {0} exceeds maximum {MAX_TX_PACKET_SIZE}")]
+    TooLarge(u32),
     #[error("too many segments")]
     TooManySegments,
     #[error("descriptor index {0} already in use")]
@@ -1042,6 +1048,12 @@ impl Worker {
             .checked_sub(header_size())
             .and_then(|len| u32::try_from(len).ok())
             .ok_or(TxPacketError::Empty)?;
+        if packet_len == 0 {
+            return Err(TxPacketError::Empty);
+        }
+        if packet_len > MAX_TX_PACKET_SIZE {
+            return Err(TxPacketError::TooLarge(packet_len));
+        }
 
         // Read the virtio-net header + enough of the Ethernet frame to parse
         // the EtherType (and a potential VLAN tag).

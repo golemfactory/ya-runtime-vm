@@ -358,7 +358,7 @@ dependencies = [
  "cap-primitives",
  "cap-std",
  "io-lifetimes 3.0.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -375,7 +375,7 @@ dependencies = [
  "maybe-owned",
  "rustix 1.1.4",
  "rustix-linux-procfs",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
  "winx",
 ]
 
@@ -1095,6 +1095,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "disk_hook"
+version = "0.0.0"
+source = "git+https://github.com/microsoft/openvmm.git?rev=8a150698f4b8e39344f4c7099b53e20b5d54f72e#8a150698f4b8e39344f4c7099b53e20b5d54f72e"
+dependencies = [
+ "disk_backend",
+ "disklayer_ram",
+ "inspect",
+ "scsi_buffers",
+]
+
+[[package]]
 name = "disk_layered"
 version = "0.0.0"
 source = "git+https://github.com/microsoft/openvmm.git?rev=8a150698f4b8e39344f4c7099b53e20b5d54f72e#8a150698f4b8e39344f4c7099b53e20b5d54f72e"
@@ -1281,7 +1292,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2759,7 +2770,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi 0.5.3",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3440,7 +3451,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4664,7 +4675,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5227,7 +5238,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5745,7 +5756,6 @@ checksum = "cc463cd8deddc3770d20f9852143d50bf6094e640b485cb2e189a2099085ff45"
 dependencies = [
  "bytes",
  "futures-core",
- "futures-io",
  "futures-sink",
  "pin-project-lite",
  "tokio",
@@ -6422,7 +6432,6 @@ dependencies = [
 [[package]]
 name = "virtio"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm.git?rev=8a150698f4b8e39344f4c7099b53e20b5d54f72e#8a150698f4b8e39344f4c7099b53e20b5d54f72e"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6437,6 +6446,8 @@ dependencies = [
  "parking_lot",
  "pci_core",
  "pci_resources",
+ "task_control",
+ "test_with_tracing",
  "thiserror 2.0.21",
  "tracelimit",
  "virtio_resources",
@@ -6449,18 +6460,20 @@ dependencies = [
 [[package]]
 name = "virtio_blk"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm.git?rev=8a150698f4b8e39344f4c7099b53e20b5d54f72e#8a150698f4b8e39344f4c7099b53e20b5d54f72e"
 dependencies = [
  "anyhow",
  "async-trait",
  "disk_backend",
+ "disk_hook",
  "futures",
  "guestmem",
  "inspect",
  "inspect_counters",
  "pal_async",
+ "pal_event",
  "scsi_buffers",
  "task_control",
+ "test_with_tracing",
  "tracelimit",
  "unicycle",
  "virtio",
@@ -6625,12 +6638,13 @@ dependencies = [
 [[package]]
 name = "virtio_vsock"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm.git?rev=8a150698f4b8e39344f4c7099b53e20b5d54f72e#8a150698f4b8e39344f4c7099b53e20b5d54f72e"
 dependencies = [
  "anyhow",
  "bitfield-struct 0.11.0",
  "futures",
+ "getrandom 0.4.3",
  "guestmem",
+ "guid",
  "hybrid_vsock",
  "inspect",
  "mesh",
@@ -6642,6 +6656,8 @@ dependencies = [
  "smallvec",
  "sparse_mmap",
  "task_control",
+ "tempfile",
+ "test_with_tracing",
  "tracelimit",
  "tracing",
  "unicycle",
@@ -6656,7 +6672,6 @@ dependencies = [
 [[package]]
 name = "virtiofs"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm.git?rev=8a150698f4b8e39344f4c7099b53e20b5d54f72e#8a150698f4b8e39344f4c7099b53e20b5d54f72e"
 dependencies = [
  "anyhow",
  "fuse",
@@ -6668,8 +6683,11 @@ dependencies = [
  "ntapi",
  "pal",
  "pal_async",
+ "pal_event",
  "parking_lot",
  "task_control",
+ "tempfile",
+ "test_with_tracing",
  "tracing",
  "virtio",
  "virtio_resources",
@@ -7463,7 +7481,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -8065,7 +8083,7 @@ dependencies = [
 
 [[package]]
 name = "ya-runtime-vm"
-version = "0.6.0"
+version = "0.6.1-rc1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8081,7 +8099,6 @@ dependencies = [
  "guestmem",
  "hypervisor_resources",
  "inspect",
- "libc",
  "log",
  "lx",
  "mesh",
@@ -8097,6 +8114,8 @@ dependencies = [
  "parking_lot",
  "rand",
  "raw-cpuid",
+ "rustix 1.1.4",
+ "seccompiler",
  "serde",
  "serde_json",
  "serial_core",
@@ -8106,15 +8125,14 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-byteorder",
- "tokio-util",
  "tracing",
- "unix_socket",
  "url",
  "uuid",
  "vfio_assigned_device_resources",
  "virtio",
  "virtio_net",
  "virtio_resources",
+ "virtio_vsock",
  "virtiofs",
  "vm_manifest_builder",
  "vm_resource",

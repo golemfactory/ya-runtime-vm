@@ -1,6 +1,1005 @@
+diff --git a/vm/devices/virtio/virtio/src/queue.rs b/vm/devices/virtio/virtio/src/queue.rs
+index 0edf769..5c1d2d2 100644
+--- a/vm/devices/virtio/virtio/src/queue.rs
++++ b/vm/devices/virtio/virtio/src/queue.rs
+@@ -703,10 +703,17 @@ fn next_descriptor(&mut self) -> Result<Option<QueueDescriptor>, QueueError> {
+                     .map_err(QueueError::Memory)?,
+             );
+             self.descriptor_index = Some(0);
+-            let indirect_len = (descriptor.length / size_of::<SplitDescriptor>() as u32) as u16;
++            let indirect_len =
++                u16::try_from(descriptor.length / size_of::<SplitDescriptor>() as u32)
++                    .map_err(|_| QueueError::TooLong)?;
+             self.indirect_table_len = Some(indirect_len);
+-            self.queue
+-                .descriptor(indirect_queue, 0, Some(indirect_len))?
++            let descriptor = self
++                .queue
++                .descriptor(indirect_queue, 0, Some(indirect_len))?;
++            if descriptor.flags.indirect() {
++                return Err(QueueError::DoubleIndirect);
++            }
++            descriptor
+         };
+ 
+         self.num_read += 1;
+@@ -793,4 +800,54 @@ fn packed_in_flight_rejects_corrupt_state() {
+             Err(QueueError::InvalidSavedState { queue_size: 8, .. })
+         ));
+     }
++
++    #[test]
++    fn indirect_descriptor_rejects_nested_entry_zero_and_u16_overflow() {
++        use super::QueueCoreGetWork;
++        use super::QueueParams;
++        use crate::spec::VirtioDeviceFeatures;
++        use crate::spec::queue::DescriptorFlags;
++        use crate::spec::queue::SplitDescriptor;
++        use crate::spec::u16_le;
++        use guestmem::GuestMemory;
++
++        let mem = GuestMemory::allocate(0x20_0000);
++        let params = QueueParams {
++            size: 8,
++            enable: true,
++            desc_addr: 0x0000,
++            avail_addr: 0x1000,
++            used_addr: 0x2000,
++        };
++        let features = VirtioDeviceFeatures::new().with_ring_indirect_desc(true);
++
++        // Case 1: 0th entry inside the indirect table also sets INDIRECT.
++        let primary = SplitDescriptor {
++            address: 0x4000.into(),
++            length: 16.into(),
++            flags_raw: u16::from(DescriptorFlags::new().with_indirect(true)).into(),
++            next: 0.into(),
++        };
++        let nested = SplitDescriptor {
++            address: 0x5000.into(),
++            length: 64.into(),
++            flags_raw: u16::from(DescriptorFlags::new().with_indirect(true)).into(),
++            next: 0.into(),
++        };
++        mem.write_plain(0x0000, &primary).unwrap();
++        mem.write_plain(0x4000, &nested).unwrap();
++        mem.write_plain(0x1002, &u16_le::from(1)).unwrap();
++        mem.write_plain(0x1004, &u16_le::from(0)).unwrap();
++        let mut q = QueueCoreGetWork::new(features, mem.clone(), params, None).unwrap();
++        assert!(matches!(q.try_next_work(), Err(QueueError::DoubleIndirect)));
++
++        // Case 2: indirect table length / 16 overflows u16 (65536 descriptors = 1 MiB).
++        let oversized_primary = SplitDescriptor {
++            length: (65536 * 16).into(),
++            ..primary
++        };
++        mem.write_plain(0x0000, &oversized_primary).unwrap();
++        let mut q2 = QueueCoreGetWork::new(features, mem, params, None).unwrap();
++        assert!(matches!(q2.try_next_work(), Err(QueueError::TooLong)));
++    }
+ }
+diff --git a/vm/devices/virtio/virtio_blk/src/lib.rs b/vm/devices/virtio/virtio_blk/src/lib.rs
+index 689afe7..8b255f2 100644
+--- a/vm/devices/virtio/virtio_blk/src/lib.rs
++++ b/vm/devices/virtio/virtio_blk/src/lib.rs
+@@ -55,6 +55,8 @@
+ /// request uses one descriptor for the header and one for the status
+ /// byte, so the data segment limit is `DEFAULT_QUEUE_SIZE - 2`.
+ const DEFAULT_SEG_MAX: u32 = virtio::DEFAULT_QUEUE_SIZE as u32 - 2;
++const MAX_IO_BYTES: u64 = 16 * 1024 * 1024;
++const MAX_BOUNCE_BYTES: usize = DEFAULT_SEG_MAX as usize * guestmem::PAGE_SIZE;
+ 
+ const MAX_IO_DEPTH: usize = 64;
+ 
+@@ -686,10 +688,8 @@ async fn do_io(
+         return Ok((0, false));
+     }
+ 
+-    // Cap request size to prevent u32 overflow when reporting bytes_written
+-    // (the caller adds +1 for the status byte). No legitimate IO should be
+-    // anywhere near this limit.
+-    if data_len > u32::MAX as u64 - 1 {
++    // Cap request size to prevent u32 overflow and unbounded host allocations.
++    if data_len > MAX_IO_BYTES {
+         return Err(VIRTIO_BLK_S_IOERR);
+     }
+ 
+@@ -708,9 +708,10 @@ async fn do_io(
+             (None, OwnedPagedRange { gpns, offset, len }, false)
+         } else {
+             // Slow path: allocate a bounce buffer.
+-            // TODO: cap data_len to a reasonable maximum (e.g. seg_max * PAGE_SIZE)
+-            // to prevent a malicious guest from causing unbounded allocation.
+             let data_len_usize = data_len as usize;
++            if data_len_usize > MAX_BOUNCE_BYTES {
++                return Err(VIRTIO_BLK_S_IOERR);
++            }
+             let mut bounce_mem = GuestMemory::allocate(data_len_usize);
+             let num_pages = data_len_usize.div_ceil(guestmem::PAGE_SIZE);
+             let gpns: Vec<u64> = (0..num_pages as u64).collect();
+diff --git a/vm/devices/virtio/virtio_vsock/src/connections.rs b/vm/devices/virtio/virtio_vsock/src/connections.rs
+index 8d22ed7..b8ebb68 100644
+--- a/vm/devices/virtio/virtio_vsock/src/connections.rs
++++ b/vm/devices/virtio/virtio_vsock/src/connections.rs
+@@ -31,7 +31,6 @@
+ use std::collections::hash_map::Entry;
+ use std::io::IoSlice;
+ use std::num::Wrapping;
+-use std::path::PathBuf;
+ use std::time::Duration;
+ use unix_socket::UnixStream;
+ use virtio::queue::VirtioQueuePayload;
+@@ -479,7 +478,10 @@ fn handle_host_data(
+                 anyhow::bail!("guest buffer too small for vsock header");
+             }
+ 
+-            let mut temp_buf = vec![0u8; buf_len - VSOCK_HEADER_SIZE];
++            let max_data_len = (buf_len - VSOCK_HEADER_SIZE)
++                .min(peer_free as usize)
++                .min(TX_BUF_SIZE as usize);
++            let mut temp_buf = vec![0u8; max_data_len];
+             let bytes_read = self
+                 .socket
+                 .read(&mut temp_buf)
+@@ -703,15 +705,11 @@ pub struct ConnectionManager {
+ }
+ 
+ impl ConnectionManager {
+-    /// Creates a new connection manager.
+-    ///
+-    /// `guest_cid` is the CID assigned to the guest.
+-    /// `base_path` is the directory path prefix for Unix sockets. For a vsock
+-    /// port P, the relay will try `<base_path>_P` first, then `<base_path>`.
+-    pub fn new(guest_cid: u64, base_path: PathBuf) -> Self {
++    /// Creates a new connection manager with the given relay implementation.
++    pub fn new_with_relay(guest_cid: u64, relay: UnixSocketRelay) -> Self {
+         Self {
+             guest_cid,
+-            relay: UnixSocketRelay::new(base_path),
++            relay,
+             conns: HashMap::new(),
+             pending_conns: HashMap::new(),
+             next_seq: 0,
+diff --git a/vm/devices/virtio/virtio_vsock/src/lib.rs b/vm/devices/virtio/virtio_vsock/src/lib.rs
+index 2812caf..aebed01 100644
+--- a/vm/devices/virtio/virtio_vsock/src/lib.rs
++++ b/vm/devices/virtio/virtio_vsock/src/lib.rs
+@@ -15,6 +15,10 @@
+ #[cfg(target_os = "linux")]
+ mod vhost;
+ 
++pub use unix_relay::MemoryStream;
++pub use unix_relay::PortConnector;
++pub use unix_relay::RelaySocket;
++
+ #[cfg(test)]
+ mod integration_tests;
+ 
+@@ -66,6 +70,8 @@
+ use zerocopy::FromZeros;
+ use zerocopy::IntoBytes;
+ 
++use crate::unix_relay::UnixSocketRelay;
++
+ const QUEUE_COUNT: usize = 3;
+ const RX_QUEUE_INDEX: usize = 0;
+ const TX_QUEUE_INDEX: usize = 1;
+@@ -81,7 +87,7 @@ pub struct VirtioVsockDevice {
+     #[inspect(skip)]
+     started_queues: [Option<VirtioQueue>; QUEUE_COUNT],
+     #[inspect(skip)]
+-    base_path: PathBuf,
++    relay: UnixSocketRelay,
+ }
+ 
+ impl VirtioVsockDevice {
+@@ -111,9 +117,36 @@ pub fn new(
+         Ok(Self {
+             guest_cid,
+             driver: driver.clone(),
+-            worker: TaskControl::new(VsockWorker { driver, listener }),
++            worker: TaskControl::new(VsockWorker {
++                driver,
++                listener: Some(listener),
++            }),
+             started_queues: [const { None }; QUEUE_COUNT],
+-            base_path,
++            relay: UnixSocketRelay::new(base_path),
++        })
++    }
++
++    /// Create a new virtio-vsock device backed purely by in-process memory streams.
++    pub fn new_in_memory(
++        driver_source: &VmTaskDriverSource,
++        guest_cid: u64,
++        connector: PortConnector,
++    ) -> anyhow::Result<Self> {
++        anyhow::ensure!(
++            (3..u64::from(u32::MAX)).contains(&guest_cid),
++            "virtio-vsock guest CID must be between 3 and {}",
++            u32::MAX - 1
++        );
++        let driver = driver_source.simple();
++        Ok(Self {
++            guest_cid,
++            driver: driver.clone(),
++            worker: TaskControl::new(VsockWorker {
++                driver,
++                listener: None,
++            }),
++            started_queues: [const { None }; QUEUE_COUNT],
++            relay: UnixSocketRelay::new_in_memory(connector),
+         })
+     }
+ }
+@@ -201,7 +234,7 @@ async fn start_queue(
+                 tx_queue: self.started_queues[TX_QUEUE_INDEX].take().unwrap().fuse(),
+                 _event_queue: self.started_queues[EVENT_QUEUE_INDEX].take().unwrap(),
+                 memory: resources.guest_memory.clone(),
+-                connections: ConnectionManager::new(self.guest_cid, self.base_path.clone()),
++                connections: ConnectionManager::new_with_relay(self.guest_cid, self.relay.clone()),
+                 rx_ready: FuturesUnordered::new(),
+                 write_ready: FuturesUnordered::new(),
+             };
+@@ -320,7 +353,7 @@ fn queue_pending(&mut self, pending: PendingFutures) {
+ /// The main worker for the virtio-vsock device.
+ struct VsockWorker {
+     driver: VmTaskDriver,
+-    listener: PolledSocket<UnixListener>,
++    listener: Option<PolledSocket<UnixListener>>,
+ }
+ 
+ impl VsockWorker {
+@@ -469,6 +502,15 @@ fn handle_host_rx(&mut self, state: &mut VsockWorkerState, rx_ready: RxReady) {
+ 
+         state.queue_pending(pending);
+     }
++
++    async fn accept_host(
++        listener: &mut Option<PolledSocket<UnixListener>>,
++    ) -> std::io::Result<unix_socket::UnixStream> {
++        match listener {
++            Some(listener) => listener.accept().await.map(|(stream, _)| stream),
++            None => std::future::pending().await,
++        }
++    }
+ }
+ 
+ impl AsyncRun<VsockWorkerState> for VsockWorker {
+@@ -529,9 +571,9 @@ async fn run(
+                     _ = rx_queue_kick => {
+                         // New buffers are available in the rx queue; repeat the loop to peek again.
+                     }
+-                    r = self.listener.accept().fuse() => {
++                    r = Self::accept_host(&mut self.listener).fuse() => {
+                         match r {
+-                            Ok((stream, _)) => {
++                            Ok(stream) => {
+                                 tracing::trace!("host unix socket accepted");
+                                 match state.connections.handle_host_connect(&self.driver, stream) {
+                                     Err(err) => {
+diff --git a/vm/devices/virtio/virtio_vsock/src/ring.rs b/vm/devices/virtio/virtio_vsock/src/ring.rs
+index d9bd66b..8f7c242 100644
+--- a/vm/devices/virtio/virtio_vsock/src/ring.rs
++++ b/vm/devices/virtio/virtio_vsock/src/ring.rs
+@@ -2,6 +2,7 @@
+ // Licensed under the MIT License.
+ 
+ use std::io::IoSlice;
++use std::io::IoSliceMut;
+ use std::io::Write;
+ 
+ /// A simple, single-threaded byte ring buffer with a fixed capacity.
+@@ -104,6 +105,79 @@ pub fn read_to(&mut self, writer: &mut impl Write) -> std::io::Result<usize> {
+ 
+         Ok(total_written)
+     }
++
++    /// Writes up to `self.available()` bytes from `bufs` into the ring buffer.
++    pub fn write_some(&mut self, bufs: &[IoSlice<'_>]) -> usize {
++        let mut tail = (self.head + self.len) % self.buf.len();
++        let mut written = 0;
++
++        for slice in bufs {
++            let remaining_space = self.available() - written;
++            if remaining_space == 0 {
++                break;
++            }
++            let chunk = &slice[..slice.len().min(remaining_space)];
++            if chunk.is_empty() {
++                continue;
++            }
++            let first = chunk.len().min(self.buf.len() - tail);
++            self.buf[tail..tail + first].copy_from_slice(&chunk[..first]);
++            let second = chunk.len() - first;
++            if second > 0 {
++                self.buf[..second].copy_from_slice(&chunk[first..]);
++            }
++            tail = (tail + chunk.len()) % self.buf.len();
++            written += chunk.len();
++        }
++
++        self.len += written;
++        written
++    }
++
++    /// Reads up to `self.len()` bytes from the ring buffer into `bufs`.
++    pub fn read_some(&mut self, bufs: &mut [IoSliceMut<'_>]) -> usize {
++        let mut total_read = 0;
++
++        for dst in bufs {
++            let dst: &mut [u8] = dst;
++            let to_copy = dst.len().min(self.len);
++            if to_copy == 0 {
++                if self.is_empty() {
++                    break;
++                }
++                continue;
++            }
++            let first = to_copy.min(self.buf.len() - self.head);
++            dst[..first].copy_from_slice(&self.buf[self.head..self.head + first]);
++            let second = to_copy - first;
++            if second > 0 {
++                dst[first..to_copy].copy_from_slice(&self.buf[..second]);
++            }
++            self.head = (self.head + to_copy) % self.buf.len();
++            self.len -= to_copy;
++            total_read += to_copy;
++        }
++
++        total_read
++    }
++
++    /// Moves as many bytes as possible from `self` into `dst`.
++    pub fn read_to_ring(&mut self, dst: &mut Self) -> usize {
++        if self.is_empty() || dst.available() == 0 {
++            return 0;
++        }
++        let first_end = (self.head + self.len).min(self.buf.len());
++        let first = &self.buf[self.head..first_end];
++        let moved = if first.len() < self.len {
++            let second = &self.buf[..self.len - first.len()];
++            dst.write_some(&[IoSlice::new(first), IoSlice::new(second)])
++        } else {
++            dst.write_some(&[IoSlice::new(first)])
++        };
++        self.head = (self.head + moved) % self.buf.len();
++        self.len -= moved;
++        moved
++    }
+ }
+ 
+ #[cfg(test)]
+diff --git a/vm/devices/virtio/virtio_vsock/src/unix_relay.rs b/vm/devices/virtio/virtio_vsock/src/unix_relay.rs
+index 38d28b9..581d7b0 100644
+--- a/vm/devices/virtio/virtio_vsock/src/unix_relay.rs
++++ b/vm/devices/virtio/virtio_vsock/src/unix_relay.rs
+@@ -1,6 +1,7 @@
+ // Copyright (c) Microsoft Corporation.
+ // Licensed under the MIT License.
+ 
++use crate::connections::TX_BUF_SIZE;
+ use crate::ring::RingBuffer;
+ use anyhow::Context;
+ use futures::future::poll_fn;
+@@ -24,37 +25,211 @@
+ use std::sync::Arc;
+ use std::sync::atomic::AtomicBool;
+ use std::sync::atomic::Ordering;
++use std::task::Context as TaskContext;
++use std::task::Poll;
++use std::task::Waker;
+ use unix_socket::UnixStream;
+ use vmcore::vm_task::VmTaskDriver;
+ 
+-/// A Unix domain socket relay for vsock connections.
+-pub struct UnixSocketRelay {
+-    // Base path for listening Unix domain sockets on the host. Typically identical to the path
+-    // used by the listener for host-to-guest connection.
+-    base_path: PathBuf,
++/// In-process connector callback for guest-initiated vsock connections.
++pub type PortConnector = Arc<dyn Fn(u32) -> io::Result<RelaySocket> + Send + Sync>;
++
++/// A Unix domain socket or in-memory relay for vsock connections.
++#[derive(Clone)]
++pub enum UnixSocketRelay {
++    /// Base path for listening Unix domain sockets on the host.
++    Path(PathBuf),
++    /// In-memory connector callback invoked with the requested vsock port.
++    InMemory(PortConnector),
+ }
+ 
+ impl UnixSocketRelay {
+     /// Creates a new Unix socket relay with the given base path for socket connections.
+     pub fn new(base_path: PathBuf) -> Self {
+-        Self { base_path }
++        Self::Path(base_path)
++    }
++
++    /// Creates an in-memory relay for guest-initiated vsock connections.
++    pub fn new_in_memory(connector: PortConnector) -> Self {
++        Self::InMemory(connector)
+     }
+ 
+-    /// Connects to the Unix domain socket for the given vsock port and returns a RelaySocket for it.
++    /// Connects to the Unix domain socket or in-memory endpoint for the given vsock port.
+     pub fn connect(&self, driver: &VmTaskDriver, port: u32) -> anyhow::Result<RelaySocket> {
+-        let request = VsockPortOrId::Port(port);
+-        let socket_path = request.host_uds_path(&self.base_path)?;
+-        let stream = UnixStream::connect(socket_path)
+-            .context("Failed to connect to Unix socket for vsock relay")?;
++        match self {
++            Self::Path(base_path) => {
++                let request = VsockPortOrId::Port(port);
++                let socket_path = request.host_uds_path(base_path)?;
++                let stream = UnixStream::connect(socket_path)
++                    .context("Failed to connect to Unix socket for vsock relay")?;
+ 
+-        let socket = RelaySocket::new(driver, stream)
+-            .context("Failed to create relay socket for vsock relay")?;
++                let socket = RelaySocket::new(driver, stream)
++                    .context("Failed to create relay socket for vsock relay")?;
+ 
+-        Ok(socket)
++                Ok(socket)
++            }
++            Self::InMemory(connector) => {
++                connector(port).context("Failed to connect to in-memory vsock relay")
++            }
++        }
++    }
++}
++
++struct PipeDirection {
++    ring: RingBuffer,
++    write_closed: bool,
++    read_closed: bool,
++    read_waker: Option<Waker>,
++    write_waker: Option<Waker>,
++}
++
++impl PipeDirection {
++    fn new() -> Self {
++        Self {
++            ring: RingBuffer::new(TX_BUF_SIZE as usize),
++            write_closed: false,
++            read_closed: false,
++            read_waker: None,
++            write_waker: None,
++        }
++    }
++}
++
++struct MemoryPipe {
++    a_to_b: PipeDirection,
++    b_to_a: PipeDirection,
++}
++
++impl MemoryPipe {
++    fn new() -> Self {
++        Self {
++            a_to_b: PipeDirection::new(),
++            b_to_a: PipeDirection::new(),
++        }
++    }
++
++    fn dirs_mut(&mut self, is_a: bool) -> (&mut PipeDirection, &mut PipeDirection) {
++        if is_a {
++            (&mut self.b_to_a, &mut self.a_to_b)
++        } else {
++            (&mut self.a_to_b, &mut self.b_to_a)
++        }
++    }
++}
++
++/// Host-side endpoint of an in-memory vsock stream.
++pub struct MemoryStream {
++    pipe: Arc<Mutex<MemoryPipe>>,
++    is_a: bool,
++}
++
++impl MemoryStream {
++    /// Creates a connected pair of in-memory streams for unit testing or in-process IPC.
++    pub fn pair() -> (Self, Self) {
++        let pipe = Arc::new(Mutex::new(MemoryPipe::new()));
++        (
++            Self {
++                pipe: pipe.clone(),
++                is_a: true,
++            },
++            Self { pipe, is_a: false },
++        )
++    }
++
++    /// Polls for incoming bytes from the peer.
++    pub fn poll_read_slice(
++        &self,
++        cx: &mut TaskContext<'_>,
++        buf: &mut [u8],
++    ) -> Poll<io::Result<usize>> {
++        let (res, waker) = {
++            let mut pipe = self.pipe.lock();
++            let (read_dir, _) = pipe.dirs_mut(self.is_a);
++            if read_dir.read_closed {
++                return Poll::Ready(Ok(0));
++            }
++            if !read_dir.ring.is_empty() {
++                if buf.is_empty() {
++                    return Poll::Ready(Ok(0));
++                }
++                let n = read_dir.ring.read_some(&mut [io::IoSliceMut::new(buf)]);
++                (Poll::Ready(Ok(n)), read_dir.write_waker.take())
++            } else if read_dir.write_closed {
++                (Poll::Ready(Ok(0)), None)
++            } else {
++                read_dir.read_waker = Some(cx.waker().clone());
++                (Poll::Pending, None)
++            }
++        };
++        if let Some(waker) = waker {
++            waker.wake();
++        }
++        res
++    }
++
++    /// Polls to write bytes to the peer.
++    pub fn poll_write_slice(
++        &self,
++        cx: &mut TaskContext<'_>,
++        buf: &[u8],
++    ) -> Poll<io::Result<usize>> {
++        let (res, waker) = {
++            let mut pipe = self.pipe.lock();
++            let (_, write_dir) = pipe.dirs_mut(self.is_a);
++            if write_dir.read_closed || write_dir.write_closed {
++                return Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)));
++            }
++            if buf.is_empty() {
++                return Poll::Ready(Ok(0));
++            }
++            if write_dir.ring.available() > 0 {
++                let n = write_dir.ring.write_some(&[io::IoSlice::new(buf)]);
++                (Poll::Ready(Ok(n)), write_dir.read_waker.take())
++            } else {
++                write_dir.write_waker = Some(cx.waker().clone());
++                (Poll::Pending, None)
++            }
++        };
++        if let Some(waker) = waker {
++            waker.wake();
++        }
++        res
++    }
++
++    /// Shuts down the write half of this stream.
++    pub fn poll_shutdown(&self, _cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
++        let waker = {
++            let mut pipe = self.pipe.lock();
++            let (_, write_dir) = pipe.dirs_mut(self.is_a);
++            write_dir.write_closed = true;
++            write_dir.read_waker.take()
++        };
++        if let Some(waker) = waker {
++            waker.wake();
++        }
++        Poll::Ready(Ok(()))
++    }
++}
++
++impl Drop for MemoryStream {
++    fn drop(&mut self) {
++        let (r_waker, w_waker) = {
++            let mut pipe = self.pipe.lock();
++            let (read_dir, write_dir) = pipe.dirs_mut(self.is_a);
++            read_dir.read_closed = true;
++            write_dir.write_closed = true;
++            (read_dir.write_waker.take(), write_dir.read_waker.take())
++        };
++        if let Some(waker) = r_waker {
++            waker.wake();
++        }
++        if let Some(waker) = w_waker {
++            waker.wake();
++        }
+     }
+ }
+ 
+-/// A wrapper around a UnixStream that provides relay-specific functionality.
++/// A wrapper around a UnixStream or in-memory pipe that provides relay-specific functionality.
+ ///
+ /// This is similar in principle to [`pal_async::socket::PolledSocket`], but gives us control over
+ /// the shared poll implementation, allowing both read and write polling operations without needing
+@@ -79,8 +254,10 @@ pub fn new(driver: &VmTaskDriver, stream: UnixStream) -> io::Result<Self> {
+ 
+         Ok(Self {
+             inner: Arc::new(RelaySocketInner {
+-                socket: stream,
+-                poll: Mutex::new(poll),
++                backend: RelayBackend::Unix {
++                    poll: Mutex::new(poll),
++                    socket: stream,
++                },
+                 awaiting_read: AtomicBool::new(false),
+                 awaiting_write: AtomicBool::new(false),
+                 has_data: AtomicBool::new(false),
+@@ -89,52 +266,178 @@ pub fn new(driver: &VmTaskDriver, stream: UnixStream) -> io::Result<Self> {
+         })
+     }
+ 
++    /// Creates a connected `(RelaySocket, MemoryStream)` pair backed purely by in-process memory.
++    pub fn pair() -> (Self, MemoryStream) {
++        let pipe = Arc::new(Mutex::new(MemoryPipe::new()));
++        let relay = Self {
++            inner: Arc::new(RelaySocketInner {
++                backend: RelayBackend::Memory(pipe.clone()),
++                awaiting_read: AtomicBool::new(false),
++                awaiting_write: AtomicBool::new(false),
++                has_data: AtomicBool::new(false),
++                closed: AtomicBool::new(false),
++            }),
++        };
++        let stream = MemoryStream { pipe, is_a: false };
++        (relay, stream)
++    }
++
+     /// Reads data from the socket. If the operation would block, returns Ok(None) and clears the
+     /// cached ready state for the read half.
+     pub fn read(&self, buf: &mut [u8]) -> io::Result<Option<usize>> {
+-        // Read and Write technically require &mut self, but they are actually implemented on
+-        // &UnixStream, so this translates the Arc into something that will work.
+-        let socket = &mut &self.inner.socket;
+-        self.check_would_block(socket.read(buf), InterestSlot::Read)
++        match &self.inner.backend {
++            RelayBackend::Unix { socket, .. } => {
++                // Read and Write technically require &mut self, but they are actually implemented on
++                // &UnixStream, so this translates the Arc into something that will work.
++                let mut socket = socket;
++                self.check_would_block(socket.read(buf), InterestSlot::Read)
++            }
++            RelayBackend::Memory(_) => self.read_vectored(&mut [io::IoSliceMut::new(buf)]),
++        }
+     }
+ 
+     /// Reads data from the socket into multiple buffers. If the operation would block, returns
+     /// Ok(None) and clears the cached ready state for the socket.
+     pub fn read_vectored(&self, bufs: &mut [io::IoSliceMut<'_>]) -> io::Result<Option<usize>> {
+-        let socket = &mut &self.inner.socket;
+-        self.check_would_block(socket.read_vectored(bufs), InterestSlot::Read)
++        match &self.inner.backend {
++            RelayBackend::Unix { socket, .. } => {
++                let mut socket = socket;
++                self.check_would_block(socket.read_vectored(bufs), InterestSlot::Read)
++            }
++            RelayBackend::Memory(pipe) => {
++                let (result, waker) = {
++                    let mut pipe = pipe.lock();
++                    let (read_dir, write_dir) = pipe.dirs_mut(true);
++                    if !read_dir.ring.is_empty() {
++                        let n = read_dir.ring.read_some(bufs);
++                        (Some(n), read_dir.write_waker.take())
++                    } else if read_dir.write_closed {
++                        if write_dir.read_closed || write_dir.write_closed {
++                            self.inner.closed.store(true, Ordering::Release);
++                        }
++                        (Some(0), None)
++                    } else {
++                        (None, None)
++                    }
++                };
++                if let Some(waker) = waker {
++                    waker.wake();
++                }
++                Ok(result)
++            }
++        }
+     }
+ 
+     /// Writes data to the socket from multiple buffers. If the operation would block, returns Ok(0)
+     /// and clears the cached ready state for the write half.
+     pub fn write_vectored(&self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+-        let socket = &mut &self.inner.socket;
+-
+-        // Just return 0 instead of None for simplicity, since for Write that does not mean
+-        // shutdown.
+-        self.check_would_block(socket.write_vectored(bufs), InterestSlot::Write)
+-            .map(|size| size.unwrap_or_default())
++        match &self.inner.backend {
++            RelayBackend::Unix { socket, .. } => {
++                let mut socket = socket;
++
++                // Just return 0 instead of None for simplicity, since for Write that does not mean
++                // shutdown.
++                self.check_would_block(socket.write_vectored(bufs), InterestSlot::Write)
++                    .map(|size| size.unwrap_or_default())
++            }
++            RelayBackend::Memory(pipe) => {
++                let (written, waker) = {
++                    let mut pipe = pipe.lock();
++                    let (_, write_dir) = pipe.dirs_mut(true);
++                    if write_dir.read_closed || write_dir.write_closed {
++                        return Err(io::Error::from(io::ErrorKind::BrokenPipe));
++                    }
++                    let n = write_dir.ring.write_some(bufs);
++                    let waker = if n > 0 {
++                        write_dir.read_waker.take()
++                    } else {
++                        None
++                    };
++                    (n, waker)
++                };
++                if let Some(waker) = waker {
++                    waker.wake();
++                }
++                Ok(written)
++            }
++        }
+     }
+ 
+     /// Writes data to the socket. If the operation would block, returns Ok(0) and clears the cached
+     /// ready state for the write half.
+     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
+-        let socket = &mut &self.inner.socket;
+-        self.check_would_block(socket.write(buf), InterestSlot::Write)
+-            .map(|size| size.unwrap_or_default())
++        match &self.inner.backend {
++            RelayBackend::Unix { socket, .. } => {
++                let mut socket = socket;
++                self.check_would_block(socket.write(buf), InterestSlot::Write)
++                    .map(|size| size.unwrap_or_default())
++            }
++            RelayBackend::Memory(_) => self.write_vectored(&[io::IoSlice::new(buf)]),
++        }
+     }
+ 
+     /// Writes data from the given ring buffer to the socket. If the operation would block, clears
+     /// the cached ready state for the write half and returns Ok(0).
+     pub fn write_from_ring(&self, ring: &mut RingBuffer) -> io::Result<usize> {
+-        let socket = &mut &self.inner.socket;
+-        self.check_would_block(ring.read_to(socket), InterestSlot::Write)
+-            .map(|size| size.unwrap_or_default())
++        match &self.inner.backend {
++            RelayBackend::Unix { socket, .. } => {
++                let mut socket = socket;
++                self.check_would_block(ring.read_to(&mut socket), InterestSlot::Write)
++                    .map(|size| size.unwrap_or_default())
++            }
++            RelayBackend::Memory(pipe) => {
++                let (written, waker) = {
++                    let mut pipe = pipe.lock();
++                    let (_, write_dir) = pipe.dirs_mut(true);
++                    if write_dir.read_closed || write_dir.write_closed {
++                        return Err(io::Error::from(io::ErrorKind::BrokenPipe));
++                    }
++                    let n = ring.read_to_ring(&mut write_dir.ring);
++                    let waker = if n > 0 {
++                        write_dir.read_waker.take()
++                    } else {
++                        None
++                    };
++                    (n, waker)
++                };
++                if let Some(waker) = waker {
++                    waker.wake();
++                }
++                Ok(written)
++            }
++        }
+     }
+ 
+     /// Shuts down the socket with the specified mode.
+     pub fn shutdown(&self, how: std::net::Shutdown) -> io::Result<()> {
+-        self.inner.socket.shutdown(how)
++        match &self.inner.backend {
++            RelayBackend::Unix { socket, .. } => socket.shutdown(how),
++            RelayBackend::Memory(pipe) => {
++                let wakers = {
++                    let mut pipe = pipe.lock();
++                    let (read_dir, write_dir) = pipe.dirs_mut(true);
++                    let mut wakers = [None, None, None, None];
++                    if matches!(how, std::net::Shutdown::Write | std::net::Shutdown::Both) {
++                        write_dir.write_closed = true;
++                        wakers[0] = write_dir.read_waker.take();
++                        wakers[1] = read_dir.read_waker.take();
++                    }
++                    if matches!(how, std::net::Shutdown::Read | std::net::Shutdown::Both) {
++                        read_dir.read_closed = true;
++                        wakers[2] = read_dir.write_waker.take();
++                        wakers[3] = write_dir.write_waker.take();
++                    }
++                    if read_dir.write_closed && (write_dir.read_closed || write_dir.write_closed) {
++                        self.inner.closed.store(true, Ordering::Release);
++                    }
++                    wakers
++                };
++                for waker in wakers.into_iter().flatten() {
++                    waker.wake();
++                }
++                Ok(())
++            }
++        }
+     }
+ 
+     /// Returns a future that resolves when the socket is ready for reading, has been closed, or
+@@ -234,7 +537,9 @@ pub fn await_write_ready<T: 'static + Send>(
+ 
+     /// Clears the cached ready state for the specified slot.
+     fn clear_ready(&self, slot: InterestSlot) {
+-        self.inner.poll.lock().clear_socket_ready(slot);
++        if let RelayBackend::Unix { poll, .. } = &self.inner.backend {
++            poll.lock().clear_socket_ready(slot);
++        }
+     }
+ 
+     /// Checks if the socket has data available based the last completed read poll. The flag is
+@@ -286,23 +591,90 @@ fn await_write_ready_needed(&self) -> bool {
+     }
+ }
+ 
++enum RelayBackend {
++    Unix {
++        poll: Mutex<PollImpl<dyn PollSocketReady>>,
++        // The UnixStream must not be destructed before PollImpl, so this must come after.
++        socket: UnixStream,
++    },
++    Memory(Arc<Mutex<MemoryPipe>>),
++}
++
+ /// Internal state for a RelaySocket, shared between clones.
+ struct RelaySocketInner {
+-    poll: Mutex<PollImpl<dyn PollSocketReady>>,
+-    // The UnixStream must not be destructed before PollImp, so this must come after.
+-    socket: UnixStream,
++    backend: RelayBackend,
+     awaiting_read: AtomicBool,
+     awaiting_write: AtomicBool,
+     has_data: AtomicBool,
+     closed: AtomicBool,
+ }
+ 
++impl Drop for RelaySocketInner {
++    fn drop(&mut self) {
++        if let RelayBackend::Memory(pipe) = &self.backend {
++            let (r_waker, w_waker) = {
++                let mut pipe = pipe.lock();
++                let (read_dir, write_dir) = pipe.dirs_mut(true);
++                read_dir.read_closed = true;
++                write_dir.write_closed = true;
++                (read_dir.write_waker.take(), write_dir.read_waker.take())
++            };
++            if let Some(waker) = r_waker {
++                waker.wake();
++            }
++            if let Some(waker) = w_waker {
++                waker.wake();
++            }
++        }
++    }
++}
++
+ impl RelaySocketInner {
+     /// Waits for the socket to be ready for the specified slot with the specified events.
+     async fn await_ready(&self, slot: InterestSlot, events: PollEvents) -> PollEvents {
+-        let events = poll_fn(|cx| {
+-            let mut poll = self.poll.lock();
+-            poll.poll_socket_ready(cx, slot, events)
++        let events = poll_fn(|cx| match &self.backend {
++            RelayBackend::Unix { poll, .. } => {
++                let mut poll = poll.lock();
++                poll.poll_socket_ready(cx, slot, events)
++            }
++            RelayBackend::Memory(pipe) => {
++                let mut pipe = pipe.lock();
++                let (read_dir, write_dir) = pipe.dirs_mut(true);
++                let mut ready = PollEvents::EMPTY;
++                match slot {
++                    InterestSlot::Read => {
++                        if !read_dir.ring.is_empty() {
++                            ready |= PollEvents::IN;
++                        } else if read_dir.write_closed {
++                            ready |= PollEvents::IN;
++                            if write_dir.read_closed || write_dir.write_closed {
++                                ready |= PollEvents::HUP;
++                            }
++                        }
++                        let matched = ready & events;
++                        if matched != PollEvents::EMPTY {
++                            Poll::Ready(matched)
++                        } else {
++                            read_dir.read_waker = Some(cx.waker().clone());
++                            Poll::Pending
++                        }
++                    }
++                    InterestSlot::Write => {
++                        if write_dir.read_closed || write_dir.write_closed {
++                            ready |= PollEvents::HUP | PollEvents::OUT;
++                        } else if write_dir.ring.available() > 0 {
++                            ready |= PollEvents::OUT;
++                        }
++                        let matched = ready & events;
++                        if matched != PollEvents::EMPTY {
++                            Poll::Ready(matched)
++                        } else {
++                            write_dir.write_waker = Some(cx.waker().clone());
++                            Poll::Pending
++                        }
++                    }
++                }
++            }
+         })
+         .await;
+ 
+diff --git a/vm/devices/virtio/virtiofs/src/virtio.rs b/vm/devices/virtio/virtiofs/src/virtio.rs
+index a66fbe4..84ec543 100644
+--- a/vm/devices/virtio/virtiofs/src/virtio.rs
++++ b/vm/devices/virtio/virtiofs/src/virtio.rs
+@@ -166,7 +166,7 @@ fn traits(&self) -> DeviceTraits {
+     async fn read_registers_u32(&mut self, offset: u16) -> u32 {
+         let offset = offset as usize;
+         let config = self.config.as_bytes();
+-        if offset < config.len() {
++        if offset + 4 <= config.len() {
+             u32::from_le_bytes(
+                 config[offset..offset + 4]
+                     .try_into()
+@@ -476,4 +476,13 @@ async fn with_num_request_queues_accepts_value_in_range(driver: DefaultDriver) {
+         assert_eq!(device.config.num_request_queues, 3);
+         assert_eq!(device.traits().max_queues, 4);
+     }
++
++    #[async_test]
++    async fn read_registers_u32_near_end_of_config_does_not_panic(driver: DefaultDriver) {
++        let (mut device, _tmp) = make_device(&driver, None);
++        let len = device.config.as_bytes().len() as u16;
++        for offset in (len - 3)..=(len + 4) {
++            assert_eq!(device.read_registers_u32(offset).await, 0);
++        }
++    }
+ }
+diff --git a/vm/kvm/src/lib.rs b/vm/kvm/src/lib.rs
+index 51fbe67..2444140 100644
+--- a/vm/kvm/src/lib.rs
++++ b/vm/kvm/src/lib.rs
+@@ -1276,6 +1276,35 @@ pub enum RoutingEntry {
+ pub struct Processor<'a>(&'a Partition, u32);
+ 
+ impl<'a> Processor<'a> {
++    /// Enforce KVM PV feature access against this vCPU's CPUID policy.
++    /// Fail closed: a host without this capability must not run an ordinary VM
++    /// while silently ignoring the caller's feature restrictions.
++    #[cfg(target_arch = "x86_64")]
++    pub fn enforce_pv_feature_cpuid(&self) -> Result<()> {
++        const NAME: &str = "KVM_CAP_ENFORCE_PV_FEATURE_CPUID";
++        let supported = self
++            .0
++            .check_extension(KVM_CAP_ENFORCE_PV_FEATURE_CPUID)
++            .map_err(|err| Error::EnableCap(NAME, err))?;
++        if supported <= 0 {
++            return Err(Error::MissingCapability(NAME));
++        }
++        // SAFETY: the ioctl targets the live vCPU fd, with the documented
++        // capability and args[0]=1. The remaining fields are zero-initialized.
++        unsafe {
++            ioctl::kvm_enable_cap(
++                self.get().vcpu.as_raw_fd(),
++                &kvm_enable_cap {
++                    cap: KVM_CAP_ENFORCE_PV_FEATURE_CPUID,
++                    args: [1, 0, 0, 0],
++                    ..Default::default()
++                },
++            )
++            .map_err(|err| Error::EnableCap(NAME, err))?;
++        }
++        Ok(())
++    }
++
+     pub fn enable_synic(&self) -> Result<()> {
+         // TODO: We are not checking KVM_CAP_ENABLE_CAP_VM first.
+         // TODO: We are not calling KVM_CHECK_EXTENSION first.
+diff --git a/vmm_core/virt_kvm/src/arch/x86_64/mod.rs b/vmm_core/virt_kvm/src/arch/x86_64/mod.rs
+index 31735e9..d27a546 100644
 --- a/vmm_core/virt_kvm/src/arch/x86_64/mod.rs
 +++ b/vmm_core/virt_kvm/src/arch/x86_64/mod.rs
-@@ -145,6 +145,50 @@
+@@ -145,6 +145,50 @@ fn kvm_recommends_hyperv_apic_msrs(cpuid: &[kvm::kvm_cpuid_entry2]) -> bool {
      })
  }
  
@@ -51,7 +1050,7 @@
  impl virt::Hypervisor for Kvm {
      type ProtoPartition<'a> = KvmProtoPartition<'a>;
      type Partition = KvmPartition;
-@@ -195,21 +239,12 @@
+@@ -195,21 +239,12 @@ fn new_partition<'a>(
              return Err(KvmError::UnsupportedCpuVendor);
          }
  
@@ -77,7 +1076,7 @@
              .collect::<Vec<_>>();
  
          // When nested virt is disabled, strip the virtualization
-@@ -1023,6 +1058,12 @@
+@@ -1023,6 +1058,12 @@ fn bind(&mut self) -> Result<Self::Processor<'_>, Self::Error> {
              .collect::<Vec<_>>();
  
          kvm.set_cpuid(&cpuid_entries)?;
@@ -90,7 +1089,7 @@
  
          let mut vp = KvmProcessor {
              partition: &self.partition,
-@@ -2067,11 +2108,129 @@
+@@ -2067,12 +2108,130 @@ fn signal_msi(&self, _devid: Option<u32>, address: u64, data: u32) {
  
  #[cfg(test)]
  mod tests {
@@ -100,7 +1099,7 @@
      use hvdef::HV_CPUID_FUNCTION_MS_HV_FEATURES;
      use hvdef::HvEnlightenmentInformation;
      use test_with_tracing::test;
-+
+ 
 +    #[test]
 +    fn guest_cpuid_preserves_cpu_identity_and_indexed_leaves() {
 +        for expose_kvm in [false, true] {
@@ -217,44 +1216,7 @@
 +            );
 +        }
 +    }
- 
++
      #[test]
      fn only_recommends_apic_msrs_when_kvm_does() {
---- a/vm/kvm/src/lib.rs
-+++ b/vm/kvm/src/lib.rs
-@@ -1276,6 +1276,35 @@
- pub struct Processor<'a>(&'a Partition, u32);
- 
- impl<'a> Processor<'a> {
-+    /// Enforce KVM PV feature access against this vCPU's CPUID policy.
-+    /// Fail closed: a host without this capability must not run an ordinary VM
-+    /// while silently ignoring the caller's feature restrictions.
-+    #[cfg(target_arch = "x86_64")]
-+    pub fn enforce_pv_feature_cpuid(&self) -> Result<()> {
-+        const NAME: &str = "KVM_CAP_ENFORCE_PV_FEATURE_CPUID";
-+        let supported = self
-+            .0
-+            .check_extension(KVM_CAP_ENFORCE_PV_FEATURE_CPUID)
-+            .map_err(|err| Error::EnableCap(NAME, err))?;
-+        if supported <= 0 {
-+            return Err(Error::MissingCapability(NAME));
-+        }
-+        // SAFETY: the ioctl targets the live vCPU fd, with the documented
-+        // capability and args[0]=1. The remaining fields are zero-initialized.
-+        unsafe {
-+            ioctl::kvm_enable_cap(
-+                self.get().vcpu.as_raw_fd(),
-+                &kvm_enable_cap {
-+                    cap: KVM_CAP_ENFORCE_PV_FEATURE_CPUID,
-+                    args: [1, 0, 0, 0],
-+                    ..Default::default()
-+                },
-+            )
-+            .map_err(|err| Error::EnableCap(NAME, err))?;
-+        }
-+        Ok(())
-+    }
-+
-     pub fn enable_synic(&self) -> Result<()> {
-         // TODO: We are not checking KVM_CAP_ENABLE_CAP_VM first.
-         // TODO: We are not calling KVM_CHECK_EXTENSION first.
+         let recommendation =
