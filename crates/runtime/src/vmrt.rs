@@ -22,6 +22,7 @@ use crate::guest_agent_comm::{GuestAgent, Notification};
 
 const DIR_RUNTIME: &str = "runtime";
 const GUEST_AGENT_VSOCK_PORT: u32 = ya_vm_agent_protocol::VSOCK_PORT;
+const MAX_EXIT_DRAIN_CHUNKS: usize = 64;
 
 fn guest_halt_error(reason: &HaltReason) -> anyhow::Error {
     let mut message = format!(
@@ -85,26 +86,16 @@ pub async fn start_vmrt(
     emitter: EventEmitter,
 ) -> anyhow::Result<Option<serialize::json::Value>> {
     let runtime_dir = runtime_dir().or_err("Unable to resolve current directory")?;
-    let temp_dir = std::env::temp_dir();
-    let uid = uuid::Uuid::new_v4().simple().to_string();
 
     let mut data = runtime_data.lock().await;
     let deployment = data.deployment.clone().or_err("Missing deployment data")?;
 
-    // Guest-initiated connections to host port P are relayed by OpenVMM to
-    // <base_path>_P. The backend runs in this process, without vhost-vsock.
-    let vsock_base = temp_dir.join(format!("{}.sock", uid));
-    let relay_listener = unix_socket::UnixListener::bind(&vsock_base)
-        .context("binding embedded virtio-vsock relay")?;
-    let _relay_sock_cleanup = SocketPathCleanup(vsock_base.clone());
-    let manager_sock = temp_dir.join(format!("{}.sock_{}", uid, GUEST_AGENT_VSOCK_PORT));
-    let mut manager_listener = crate::local_socket::LocalListener::bind(&manager_sock)
-        .with_context(|| format!("binding guest agent socket {}", manager_sock.display()))?;
-    let _manager_sock_cleanup = SocketPathCleanup(manager_sock.clone());
-    let manager_vsock = virtio_resources::vsock::VirtioVsockHandle {
+    // Guest-initiated connections to GUEST_AGENT_VSOCK_PORT are relayed purely
+    // in memory within this process, without host Unix sockets or vhost-vsock.
+    let mut manager_listener = crate::local_socket::LocalListener::bind(GUEST_AGENT_VSOCK_PORT);
+    let manager_vsock = crate::openvmm_adapter::VsockDeviceHandle {
         guest_cid: 3,
-        base_path: vsock_base.to_string_lossy().into_owned(),
-        listener: relay_listener,
+        listener_id: manager_listener.id().to_owned(),
     };
     let (cfg, vpn_endpoint, inet_endpoint, _socket_registrations) =
         crate::openvmm_adapter::build_config(
@@ -126,6 +117,7 @@ pub async fn start_vmrt(
         rpc: rpc_recv,
         notify: notify_send,
     };
+    crate::host_platform::harden_process().context("applying host process security hardening")?;
     let mut runtime = launch_local_worker::<VmWorker>(params)
         .await
         .context("launching embedded OpenVMM worker")?;
@@ -236,21 +228,6 @@ pub async fn start_vmrt(
     Ok(None)
 }
 
-struct SocketPathCleanup(PathBuf);
-
-impl Drop for SocketPathCleanup {
-    fn drop(&mut self) {
-        if let Err(error) = std::fs::remove_file(&self.0)
-            && error.kind() != io::ErrorKind::NotFound
-        {
-            log::warn!(
-                "failed to remove guest agent socket {}: {error}",
-                self.0.display()
-            );
-        }
-    }
-}
-
 pub fn runtime_dir() -> io::Result<PathBuf> {
     Ok(std::env::current_exe()?
         .parent()
@@ -278,7 +255,7 @@ async fn deliver_notification(
     };
     if let Some(id) = exited {
         for fd in [1, 2] {
-            loop {
+            for _ in 0..MAX_EXIT_DRAIN_CHUNKS {
                 let output = query_output(&ga, id, fd).await;
                 if output.is_empty() {
                     break;
@@ -493,5 +470,30 @@ mod tests {
                 responder.await.unwrap();
             })
             .await;
+    }
+
+    #[tokio::test]
+    async fn in_memory_vsock_listener_rejects_unexpected_ports_and_relays_traffic() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut listener = crate::local_socket::LocalListener::bind(GUEST_AGENT_VSOCK_PORT);
+        let connector =
+            crate::local_socket::take_registered_vsock_connector(listener.id()).unwrap();
+
+        let err = connector(GUEST_AGENT_VSOCK_PORT + 1).err().unwrap();
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionRefused);
+
+        let relay = connector(GUEST_AGENT_VSOCK_PORT).unwrap();
+        let mut host_stream = listener.accept().await.unwrap();
+
+        assert_eq!(relay.write(b"ping").unwrap(), 4);
+        let mut buf = [0u8; 4];
+        host_stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"ping");
+
+        host_stream.write_all(b"pong").await.unwrap();
+        let mut reply = [0u8; 4];
+        assert_eq!(relay.read(&mut reply).unwrap(), Some(4));
+        assert_eq!(&reply, b"pong");
     }
 }

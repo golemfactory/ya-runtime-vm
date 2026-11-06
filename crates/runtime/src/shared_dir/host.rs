@@ -210,23 +210,17 @@ pub(super) fn check_metadata(metadata: &Metadata) -> lx::Result<()> {
 pub(super) fn pin(parent: &Dir, name: &OsStr) -> lx::Result<Object> {
     #[cfg(target_os = "linux")]
     let file = {
-        use std::os::fd::{AsRawFd, FromRawFd};
-        use std::os::unix::ffi::OsStrExt;
-        let name = std::ffi::CString::new(name.as_bytes()).map_err(|_| lx::Error::EINVAL)?;
+        use rustix::fs::{Mode, OFlags, openat};
         // O_PATH pins the object without opening devices or blocking on FIFOs.
         // The parent is pinned, and name is exactly one validated component.
-        let fd = unsafe {
-            libc::openat(
-                parent.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        };
-        if fd < 0 {
-            return Err(io::Error::last_os_error().into());
-        }
-        // SAFETY: openat returned a new owned descriptor.
-        unsafe { File::from_raw_fd(fd) }
+        let fd = openat(
+            parent,
+            name,
+            OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(io::Error::from)?;
+        File::from(fd)
     };
     #[cfg(windows)]
     let file = {

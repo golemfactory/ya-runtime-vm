@@ -2116,3 +2116,40 @@ async fn configured_mtu_is_advertised(driver: DefaultDriver) {
             .is_err()
     );
 }
+
+/// ya-runtime-vm: oversized TX descriptor chains are dropped in order without
+/// forwarding huge segments to the backend.
+#[async_test]
+async fn oversized_tx_packet_is_dropped_without_reaching_backend(driver: DefaultDriver) {
+    let mut harness = TestHarness::new(&driver);
+    let handle = harness.enable_and_get_handle().await;
+
+    let header_gpa = harness.alloc_data(NET_HEADER_SIZE);
+    let data_gpa = harness.alloc_data(64);
+    harness
+        .mem
+        .write_at(header_gpa, &vec![0u8; NET_HEADER_SIZE as usize])
+        .unwrap();
+
+    // Claim a 100 MiB payload in the descriptor chain.
+    post_tx_packet(
+        &harness.mem,
+        0,
+        header_gpa,
+        NET_HEADER_SIZE,
+        &[(data_gpa, 100 * 1024 * 1024)],
+    );
+    make_available(
+        &harness.mem,
+        TX_AVAIL_ADDR,
+        QUEUE_SIZE,
+        0,
+        &mut harness.tx_avail_idx,
+    );
+    harness.tx_event.signal();
+
+    let (used_id, used_len) = harness.wait_for_used().await;
+    assert_eq!(used_id, 0);
+    assert_eq!(used_len, 0);
+    assert!(handle.take_tx_avail_log().is_empty());
+}

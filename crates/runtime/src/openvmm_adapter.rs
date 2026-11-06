@@ -23,7 +23,7 @@ use vm_resource::{
 use ya_client_model::activity::exe_script_command::VolumeMount;
 use ya_runtime_sdk::runtime_api::server::NetworkInterface;
 
-use crate::deploy::Deployment;
+use crate::deploy::{Deployment, validate_cmdline_token};
 use crate::net_socket::{
     SocketEndpoint, SocketMode, SocketRegistrationGuard, take_registered_endpoint,
 };
@@ -34,7 +34,7 @@ pub(crate) fn build_config(
     runtime_dir: &Path,
     work_dir: &Path,
     deployment: &Deployment,
-    manager_vsock: virtio_resources::vsock::VirtioVsockHandle,
+    manager_vsock: VsockDeviceHandle,
     vpn_remote: Option<&ya_runtime_sdk::server::ContainerEndpoint>,
     inet_remote: Option<&ya_runtime_sdk::server::ContainerEndpoint>,
     pci_device_ids: &[String],
@@ -157,23 +157,7 @@ pub(crate) fn build_config(
         openvmm_defs::config::VirtioBus::Pci,
         virtio_resources::rng::VirtioRngHandle.into_resource(),
     ));
-    let mut cmdline = format!("console=ttyS0 panic=1 hostname={}", deployment.hostname);
-    for (index, mount) in deployment.mounts.iter().enumerate() {
-        match &mount.mount {
-            VolumeMount::Host {} => log::warn!("unexpected host mount in guest volume list"),
-            VolumeMount::Storage { errors, .. } => {
-                cmdline.push_str(&format!(" vol-{index}-path={}", mount.guest_path));
-                cmdline.push_str(&format!(
-                    " vol-{index}-errors={}",
-                    errors.as_deref().unwrap_or("continue")
-                ));
-            }
-            VolumeMount::Ram { size } => {
-                cmdline.push_str(&format!(" vol-{index}-path={}", mount.guest_path));
-                cmdline.push_str(&format!(" vol-{index}-size={}", size.as_u64()));
-            }
-        }
-    }
+    let cmdline = build_kernel_cmdline(deployment)?;
     let mem_size = u64::try_from(deployment.mem_mib)
         .context("guest memory size does not fit u64")?
         .checked_mul(1024 * 1024)
@@ -340,6 +324,41 @@ fn open_file_disk(
     Ok(disk_backend_resources::FileDiskHandle(file).into_resource())
 }
 
+/// An in-process virtio-vsock device backed by memory streams instead of host Unix sockets.
+#[derive(MeshPayload)]
+pub struct VsockDeviceHandle {
+    pub guest_cid: u64,
+    pub listener_id: String,
+}
+
+impl ResourceId<VirtioDeviceHandle> for VsockDeviceHandle {
+    const ID: &'static str = "ya-runtime-virtio-vsock";
+}
+
+pub struct VsockDeviceResolver;
+declare_static_resolver!(VsockDeviceResolver, (VirtioDeviceHandle, VsockDeviceHandle));
+vm_resource::register_static_resolvers! { VsockDeviceResolver }
+
+impl ResolveResource<VirtioDeviceHandle, VsockDeviceHandle> for VsockDeviceResolver {
+    type Output = ResolvedVirtioDevice;
+    type Error = anyhow::Error;
+
+    fn resolve(
+        &self,
+        resource: VsockDeviceHandle,
+        input: VirtioResolveInput<'_>,
+    ) -> Result<Self::Output, Self::Error> {
+        let connector =
+            crate::local_socket::take_registered_vsock_connector(&resource.listener_id)?;
+        let device = virtio_vsock::VirtioVsockDevice::new_in_memory(
+            input.driver_source,
+            resource.guest_cid,
+            connector,
+        )?;
+        Ok(device.into())
+    }
+}
+
 /// A virtio-net device with a per-device MTU. Upstream `VirtioNetHandle` has
 /// no MTU field; the vendored `virtio_net` crate provides the builder option.
 #[derive(MeshPayload)]
@@ -456,11 +475,68 @@ fn socket_resource(
     }
 }
 
+fn build_kernel_cmdline(deployment: &Deployment) -> anyhow::Result<String> {
+    validate_cmdline_token("hostname", &deployment.hostname)?;
+    let mut cmdline = format!("console=ttyS0 panic=1 hostname={}", deployment.hostname);
+    for (index, mount) in deployment.mounts.iter().enumerate() {
+        match &mount.mount {
+            VolumeMount::Host {} => log::warn!("unexpected host mount in guest volume list"),
+            VolumeMount::Storage { errors, .. } => {
+                validate_cmdline_token("volume guest_path", &mount.guest_path)?;
+                let errors = errors.as_deref().unwrap_or("continue");
+                validate_cmdline_token("volume errors policy", errors)?;
+                cmdline.push_str(&format!(" vol-{index}-path={}", mount.guest_path));
+                cmdline.push_str(&format!(" vol-{index}-errors={errors}"));
+            }
+            VolumeMount::Ram { size } => {
+                validate_cmdline_token("volume guest_path", &mount.guest_path)?;
+                cmdline.push_str(&format!(" vol-{index}-path={}", mount.guest_path));
+                cmdline.push_str(&format!(" vol-{index}-size={}", size.as_u64()));
+            }
+        }
+    }
+    Ok(cmdline)
+}
+
 fn loopback_for(address: SocketAddr) -> SocketAddr {
     match address {
         SocketAddr::V4(_) => SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)),
         SocketAddr::V6(_) => {
             SocketAddr::V6(std::net::SocketAddrV6::new(Ipv6Addr::LOCALHOST, 0, 0, 0))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::deploy::DeploymentMount;
+
+    #[test]
+    fn kernel_cmdline_rejects_injected_parameters() {
+        let mut deployment = Deployment {
+            hostname: "golem".into(),
+            mounts: vec![DeploymentMount {
+                name: "vol-0.img".into(),
+                guest_path: "/golem/output".into(),
+                mount: VolumeMount::Storage {
+                    size: "16MiB".parse().unwrap(),
+                    preallocate: None,
+                    errors: Some("continue".into()),
+                },
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            build_kernel_cmdline(&deployment).unwrap(),
+            "console=ttyS0 panic=1 hostname=golem vol-0-path=/golem/output vol-0-errors=continue"
+        );
+
+        deployment.mounts[0].guest_path = "/golem/output init=/bin/sh".into();
+        assert!(build_kernel_cmdline(&deployment).is_err());
+
+        deployment.mounts[0].guest_path = "/golem/output".into();
+        deployment.hostname = "golem panic=0".into();
+        assert!(build_kernel_cmdline(&deployment).is_err());
     }
 }

@@ -1,6 +1,6 @@
 use crate::local_socket::LocalStream;
 use futures::{SinkExt, StreamExt, channel::mpsc, future::BoxFuture, lock::Mutex};
-use std::{io, path::Path, sync::Arc};
+use std::{io, sync::Arc};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf, split};
 pub use ya_vm_agent_protocol::Event as Notification;
 use ya_vm_agent_protocol::{
@@ -13,6 +13,8 @@ pub enum RedirectFdType<'a> {
     RedirectFdPipeCyclic(u64),
 }
 pub type RemoteCommandResult<T> = Result<T, u32>;
+
+const MAX_PENDING_EVENTS: usize = 256;
 
 pub struct GuestAgent {
     stream: WriteHalf<LocalStream>,
@@ -77,7 +79,7 @@ impl GuestAgent {
             responses,
             responses_reader_handle: None,
         }));
-        let (events_tx, mut events) = mpsc::unbounded();
+        let (events_tx, mut events) = mpsc::channel(MAX_PENDING_EVENTS);
         let agent_for_events = agent.clone();
         tokio::spawn(async move {
             while let Some(event) = events.next().await {
@@ -87,29 +89,6 @@ impl GuestAgent {
         let reader = tokio::spawn(read_responses(read, responses_tx, events_tx));
         agent.lock().await.responses_reader_handle = Some(reader);
         Ok(agent)
-    }
-
-    pub async fn connected<F, P>(path: P, timeout: u32, handler: F) -> io::Result<Arc<Mutex<Self>>>
-    where
-        F: FnMut(Notification, Arc<Mutex<Self>>) -> BoxFuture<'static, ()> + Send + 'static,
-        P: AsRef<Path>,
-    {
-        for attempt in 0..=timeout {
-            match LocalStream::connect(path.as_ref()).await {
-                Ok(stream) => return Self::from_stream(stream, timeout, handler).await,
-                Err(e)
-                    if attempt < timeout
-                        && matches!(
-                            e.kind(),
-                            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-                        ) =>
-                {
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        unreachable!()
     }
 
     pub async fn acknowledge_exit(&mut self, id: u64) -> io::Result<()> {
@@ -331,7 +310,7 @@ impl GuestAgent {
 async fn read_responses(
     mut stream: ReadHalf<LocalStream>,
     mut responses: mpsc::Sender<(u64, Result<Value, AgentError>)>,
-    events: mpsc::UnboundedSender<Notification>,
+    mut events: mpsc::Sender<Notification>,
 ) -> io::Error {
     loop {
         match read_message(&mut stream).await {
@@ -341,7 +320,15 @@ async fn read_responses(
                 }
             }
             Ok(Message::Event(event)) => {
-                let _ = events.unbounded_send(event);
+                if let Err(err) = events.try_send(event) {
+                    if err.is_full() {
+                        log::warn!(
+                            "Guest agent event queue full ({MAX_PENDING_EVENTS}); dropping event"
+                        );
+                    } else {
+                        return io::Error::new(io::ErrorKind::BrokenPipe, "event receiver closed");
+                    }
+                }
             }
             Ok(_) => return io::Error::new(io::ErrorKind::InvalidData, "unexpected guest message"),
             Err(e) => return e,

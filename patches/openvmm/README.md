@@ -1,9 +1,10 @@
 # OpenVMM KVM CPUID override
 
 The runtime uses OpenVMM **0.4.0**, pinned to commit
-`8a150698f4b8e39344f4c7099b53e20b5d54f72e`. The `virt_kvm` backend and its small
-`kvm` ioctl wrapper are overridden from a generated checkout; their Rust sources
-are not copied into this repository.
+`8a150698f4b8e39344f4c7099b53e20b5d54f72e`. The `virt_kvm` backend, its `kvm`
+ioctl wrapper, and the virtio device crates (`virtio`, `virtio_blk`,
+`virtio_vsock`, and `virtiofs`) are overridden from a generated checkout; their
+Rust sources are not copied into this repository.
 The existing FUSE and virtio-net overrides remain under `third_party/`.
 
 ## Preparation
@@ -104,6 +105,25 @@ signature and leaf limit, each allowed/rejected feature bit, and suppression of
 KVM leaves when disabled. They run without `/dev/kvm` and are also included
 in `mise run test` on Linux. A guest boot on an AMD KVM host is still required to
 confirm that the reported MSR probes disappear in that environment.
+
+## Virtio bounds and hardening
+
+In addition to the KVM CPUID policy, `hypervisor-cpuid.patch` applies defensive
+bounds to the OpenVMM virtio crates:
+
+- `virtio`: rejects indirect descriptor tables whose entry count would overflow
+  `u16` (`QueueError::TooLong`) and rejects `VIRTIO_DESC_F_INDIRECT` on entry `0`
+  of an indirect descriptor table (`QueueError::DoubleIndirect`).
+- `virtio_blk`: bounds request `data_len` to `16 MiB` and bounce-buffer slow-path
+  allocations to `DEFAULT_SEG_MAX * PAGE_SIZE` (`254 * 4096` bytes).
+- `virtio_vsock`: bounds host-to-guest bounce buffer allocations in
+  `handle_host_data` to `min(peer_free, TX_BUF_SIZE)` and adds
+  `VirtioVsockDevice::new_in_memory` / `RelaySocket::pair` (`MemoryStream`) so
+  in-process guest-agent communication runs entirely in memory without host Unix
+  domain sockets or temporary directories.
+- `virtiofs`: checks `offset + 4 <= config.len()` in `read_registers_u32` so
+  unaligned config reads near the end of `virtio_fs_config` return `0` instead
+  of panicking.
 
 When upgrading, update all OpenVMM Git revisions in the Cargo manifests together
 with `config.toml`, rebase the patch, regenerate `Cargo.lock`, and run the build

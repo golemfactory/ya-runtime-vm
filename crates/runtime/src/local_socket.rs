@@ -1,94 +1,123 @@
-//! Local relay sockets driven by OpenVMM's portable Linux/Windows I/O pool.
-use pal_async::{DefaultDriver, DefaultPool, socket::PolledSocket};
+//! In-memory vsock stream transport between the Tokio runtime and OpenVMM's vsock worker.
+use parking_lot::Mutex;
 use std::{
+    collections::HashMap,
     io,
-    path::Path,
     pin::Pin,
+    sync::{Arc, OnceLock},
     task::{Context, Poll},
 };
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt};
+use tokio::{
+    io::{AsyncRead, AsyncWrite, ReadBuf},
+    sync::mpsc,
+};
+use virtio_vsock::{MemoryStream, PortConnector, RelaySocket};
+
+type RegisteredListener = (u32, mpsc::Sender<LocalStream>);
+
+static REGISTERED_LISTENERS: OnceLock<Mutex<HashMap<String, RegisteredListener>>> = OnceLock::new();
+
+fn registered_listeners() -> &'static Mutex<HashMap<String, RegisteredListener>> {
+    REGISTERED_LISTENERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 pub(crate) struct LocalListener {
-    socket: PolledSocket<unix_socket::UnixListener>,
-    driver: DefaultDriver,
+    id: String,
+    rx: mpsc::Receiver<LocalStream>,
 }
 
 pub(crate) struct LocalStream {
-    socket: Compat<PolledSocket<unix_socket::UnixStream>>,
-    // The pool thread stops once its last driver is dropped.
-    _driver: DefaultDriver,
-}
-
-fn driver() -> DefaultDriver {
-    DefaultPool::spawn_on_thread("guest-agent-relay").1
+    stream: MemoryStream,
 }
 
 impl LocalListener {
-    pub(crate) fn bind(path: &Path) -> io::Result<Self> {
-        let driver = driver();
-        let socket = PolledSocket::new(&driver, unix_socket::UnixListener::bind(path)?)?;
-        Ok(Self { socket, driver })
+    pub(crate) fn bind(port: u32) -> Self {
+        let id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = mpsc::channel(4);
+        registered_listeners().lock().insert(id.clone(), (port, tx));
+        Self { id, rx }
+    }
+
+    pub(crate) fn id(&self) -> &str {
+        &self.id
     }
 
     pub(crate) async fn accept(&mut self) -> io::Result<LocalStream> {
-        let (socket, _) = self.socket.accept().await?;
-        Ok(LocalStream {
-            socket: PolledSocket::new(&self.driver, socket)?.compat(),
-            _driver: self.driver.clone(),
+        self.rx.recv().await.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "in-memory vsock listener channel closed",
+            )
         })
     }
 }
 
-impl LocalStream {
-    pub(crate) async fn connect(path: &Path) -> io::Result<Self> {
-        let driver = driver();
-        let socket = PolledSocket::connect_unix(&driver, path).await?.compat();
-        Ok(Self {
-            socket,
-            _driver: driver,
-        })
+impl Drop for LocalListener {
+    fn drop(&mut self) {
+        registered_listeners().lock().remove(&self.id);
     }
+}
 
+pub(crate) fn take_registered_vsock_connector(id: &str) -> anyhow::Result<PortConnector> {
+    let (expected_port, tx) = registered_listeners()
+        .lock()
+        .remove(id)
+        .ok_or_else(|| anyhow::anyhow!("vsock listener {id} was not registered"))?;
+    Ok(Arc::new(move |port| {
+        if port != expected_port {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                format!("unexpected vsock port {port}"),
+            ));
+        }
+        let (relay_socket, stream) = RelaySocket::pair();
+        tx.try_send(LocalStream { stream }).map_err(|_| {
+            io::Error::new(io::ErrorKind::ConnectionRefused, "vsock listener closed")
+        })?;
+        Ok(relay_socket)
+    }))
+}
+
+impl LocalStream {
     #[cfg(test)]
     pub(crate) fn pair() -> io::Result<(Self, Self)> {
-        let driver = driver();
-        let (a, b) = unix_socket::UnixStream::pair()?;
-        Ok((
-            Self {
-                socket: PolledSocket::new(&driver, a)?.compat(),
-                _driver: driver.clone(),
-            },
-            Self {
-                socket: PolledSocket::new(&driver, b)?.compat(),
-                _driver: driver,
-            },
-        ))
+        let (a, b) = MemoryStream::pair();
+        Ok((Self { stream: a }, Self { stream: b }))
     }
 }
 
 impl AsyncRead for LocalStream {
     fn poll_read(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.socket).poll_read(cx, buf)
+        let slice = buf.initialize_unfilled();
+        match self.stream.poll_read_slice(cx, slice) {
+            Poll::Ready(Ok(n)) => {
+                buf.advance(n);
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
 impl AsyncWrite for LocalStream {
     fn poll_write(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.socket).poll_write(cx, buf)
+        self.stream.poll_write_slice(cx, buf)
     }
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.socket).poll_flush(cx)
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
     }
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.socket).poll_shutdown(cx)
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.stream.poll_shutdown(cx)
     }
 }

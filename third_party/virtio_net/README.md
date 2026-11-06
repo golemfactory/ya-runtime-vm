@@ -15,6 +15,9 @@ the Linux driver uses as the interface's maximum MTU. Local changes, marked
 
 - `NicBuilder::mtu` sets the advertised MTU per device; the default stays 1500.
 - `NicBuilder::build` rejects an MTU below 68, which Linux would ignore.
+- `Worker::try_queue_tx_packet` rejects TX packets larger than `MAX_TX_PACKET_SIZE`
+  (`65553` bytes) before queuing segments so a guest cannot trigger unbounded
+  host allocations when a backend linearizes packets.
 
 The upstream resolver for `VirtioNetHandle` is unchanged and keeps 1500. The
 runtime builds its devices through its own resource handle to pass the MTU, so

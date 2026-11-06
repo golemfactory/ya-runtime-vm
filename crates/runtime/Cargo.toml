@@ -1,7 +1,7 @@
 [package]
 name = "ya-runtime-vm"
 description = "OpenVMM runtime for Linux task images"
-version = "0.6.0"
+version = "0.6.1-rc1"
 authors = ["Golem Factory <contact@golem.network>"]
 edition = "2024"
 license = "GPL-3.0"
@@ -51,7 +51,6 @@ anyhow = "1.0"
 bollard-stubs = "1.40.2"
 crc = "1.8"
 futures = "0.3"
-libc = "0.2"
 log = "0.4.8"
 # Forward embedded OpenVMM events to the SDK logger when no tracing subscriber
 # is installed, including the underlying error behind a fatal VM debug break.
@@ -82,7 +81,7 @@ serial_core = { git = "https://github.com/microsoft/openvmm.git", rev = "8a15069
 vm_resource = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
 vm_manifest_builder = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
 vmgs_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
-unix_socket = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
+virtio_vsock = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
 # "crossbeam-channel" and "macos_fsevent" are default features. 
 # Remove `macos_fsevent` if `macos` build will get dropped.
 notify = { version = "6.0", features = ["crossbeam-channel", "macos_fsevent"] }
@@ -104,7 +103,6 @@ tokio = { version = "1.54.1", features = [
     "net",
 ] }
 tokio-byteorder = "0.3"
-tokio-util = { version = "0.7", features = ["compat"] }
 uuid = { version = "1.1", features = ["v4"] }
 url = "2.5.4"
 ya-client-model.workspace = true
@@ -114,6 +112,9 @@ env_logger = "0.10"
 guestmem = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
 zerocopy = "0.8"
 tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "=1.1.4", features = ["fs", "process", "thread"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Embedded core does not select a crypto backend as the OpenVMM CLI does.

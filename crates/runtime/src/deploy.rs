@@ -12,6 +12,19 @@ use uuid::Uuid;
 use ya_client_model::activity::exe_script_command::VolumeMount;
 use ya_runtime_sdk::runtime_api::deploy::ContainerVolume;
 
+const MAX_CONFIG_JSON_LEN: u32 = 1024 * 1024;
+
+pub(crate) fn validate_cmdline_token(name: &str, value: &str) -> anyhow::Result<()> {
+    if value.is_empty()
+        || value
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_ascii_control() || c == '"')
+    {
+        anyhow::bail!("Invalid {name} for kernel cmdline: {value:?}");
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DeploymentMount {
     pub name: String,
@@ -46,12 +59,29 @@ impl Deployment {
     where
         Input: AsyncRead + AsyncSeek + Unpin,
     {
+        validate_cmdline_token("hostname", &hostname)?;
+        for (path, mount) in &volume_override {
+            validate_cmdline_token("volume path", path)?;
+            if let VolumeMount::Storage {
+                errors: Some(errors),
+                ..
+            } = mount
+            {
+                validate_cmdline_token("volume errors policy", errors)?;
+            }
+        }
+
         let json_len: u32 = {
             let mut buf = [0; 8];
             input.seek(SeekFrom::End(-8)).await?;
             input.read_exact(&mut buf).await?;
             std::str::from_utf8(&buf)?.parse()?
         };
+        if json_len > MAX_CONFIG_JSON_LEN {
+            return Err(anyhow::anyhow!(
+                "ContainerConfig JSON length {json_len} exceeds maximum {MAX_CONFIG_JSON_LEN} bytes"
+            ));
+        }
         let crc: u32 = {
             let offset = 4 + json_len as i64 + 8;
             input.seek(SeekFrom::End(-offset)).await?;
@@ -168,4 +198,33 @@ fn parse_volumes(volumes: Option<&HashMap<String, HashMap<(), ()>>>) -> Vec<Cont
             path: key.to_string(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[tokio::test]
+    async fn rejects_oversized_footer_json_length_and_unsafe_cmdline_tokens() {
+        let mut fake_image = vec![0u8; 32];
+        // Footer claiming 99,999,999 bytes of JSON (> 1 MiB cap).
+        fake_image.extend_from_slice(b"99999999");
+        let err = Deployment::try_from_input(
+            Cursor::new(fake_image),
+            1,
+            256,
+            &[],
+            HashMap::new(),
+            "golem".into(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("exceeds maximum"));
+
+        for bad in ["", "golem init=/bin/sh", "golem\n", "golem\"quote"] {
+            assert!(validate_cmdline_token("hostname", bad).is_err());
+        }
+        assert!(validate_cmdline_token("hostname", "golem-node_1").is_ok());
+    }
 }

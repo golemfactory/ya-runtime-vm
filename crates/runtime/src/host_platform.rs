@@ -14,6 +14,14 @@ pub(crate) fn stderr_file() -> io::Result<File> {
     }
 }
 
+pub(crate) fn harden_process() -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        rustix::thread::set_no_new_privs(true)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn hypervisor() -> anyhow::Result<Resource<hypervisor_resources::HypervisorKind>> {
     #[cfg(target_os = "linux")]
     {
