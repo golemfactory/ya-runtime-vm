@@ -121,6 +121,7 @@ rustix = { version = "=1.1.4", features = ["fs", "process", "thread"] }
 # Force vendored OpenSSL instead of the musl default's shared SymCrypt backend.
 openvmm_crypto = { package = "crypto", git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e", features = ["openssl", "vendored"] }
 openvmm_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e", features = ["virt_kvm"] }
+seccompiler = { version = "0.5.0", default-features = false }
 vfio_assigned_device_resources = { git = "https://github.com/microsoft/openvmm.git", rev = "8a150698f4b8e39344f4c7099b53e20b5d54f72e" }
 
 [target.'cfg(windows)'.dependencies]

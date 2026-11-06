@@ -8115,6 +8115,7 @@ dependencies = [
  "rand",
  "raw-cpuid",
  "rustix 1.1.4",
+ "seccompiler",
  "serde",
  "serde_json",
  "serial_core",

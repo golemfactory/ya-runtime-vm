@@ -78,7 +78,6 @@ pub(crate) fn take_registered_endpoint(id: &str) -> anyhow::Result<SocketEndpoin
 pub struct SocketEndpoint {
     mode: SocketMode,
     local: SocketAddr,
-    remote: Option<SocketAddr>,
     prepared_socket: Mutex<Option<Socket>>,
 }
 
@@ -111,13 +110,20 @@ impl SocketEndpoint {
                 local = socket_local_addr(&socket)?;
                 Some(socket)
             }
-            SocketMode::TcpConnect => None,
+            SocketMode::TcpConnect => {
+                let remote_addr = remote.ok_or_else(|| {
+                    anyhow::anyhow!("TCP client endpoint requires a remote address")
+                })?;
+                let socket = frame_socket(remote_addr, Type::STREAM, Protocol::TCP)?;
+                socket.connect(&remote_addr.into())?;
+                local = socket_local_addr(&socket)?;
+                Some(socket)
+            }
         };
 
         Ok(Self {
             mode,
             local,
-            remote,
             prepared_socket: Mutex::new(prepared_socket),
         })
     }
@@ -127,33 +133,19 @@ impl SocketEndpoint {
     }
 
     fn take_prepared_socket(&self) -> anyhow::Result<Socket> {
-        if let Some(socket) = self.prepared_socket.lock().take() {
-            return Ok(socket);
+        let mut guard = self.prepared_socket.lock();
+        if let Some(socket) = guard.as_ref()
+            && let Ok(cloned) = socket.try_clone()
+        {
+            return Ok(cloned);
         }
-
-        match &self.mode {
-            SocketMode::Udp => {
-                let socket = frame_socket(self.local, Type::DGRAM, Protocol::UDP)?;
-                socket.bind(&self.local.into())?;
-                socket.connect(
-                    &self
-                        .remote
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("UDP socket endpoint requires a remote address")
-                        })?
-                        .into(),
-                )?;
-                Ok(socket)
-            }
-            SocketMode::TcpListen => {
-                let socket = frame_socket(self.local, Type::STREAM, Protocol::TCP)?;
-                socket.set_reuse_address(true)?;
-                socket.bind(&self.local.into())?;
-                socket.listen(1)?;
-                Ok(socket)
-            }
-            SocketMode::TcpConnect => anyhow::bail!("TCP client socket is not pre-bound"),
-        }
+        guard.take().ok_or_else(|| {
+            anyhow::anyhow!(
+                "prepared {:?} socket endpoint for {} was already consumed",
+                self.mode,
+                self.local
+            )
+        })
     }
 }
 
@@ -254,15 +246,10 @@ impl SocketQueue {
                 Connection::Udp(PolledSocket::new(driver.as_ref(), socket)?)
             }
             SocketMode::TcpConnect => {
-                let remote = endpoint.remote.ok_or_else(|| {
-                    anyhow::anyhow!("TCP client endpoint requires a remote address")
-                })?;
-                let socket = frame_socket(remote, Type::STREAM, Protocol::TCP)?;
-                let mut socket = PolledSocket::new(driver.as_ref(), socket)?;
-                socket.connect(&remote.into()).await?;
+                let socket = endpoint.take_prepared_socket()?;
                 Connection::Tcp {
                     listener: None,
-                    stream: Some(socket),
+                    stream: Some(PolledSocket::new(driver.as_ref(), socket)?),
                 }
             }
             SocketMode::TcpListen => {
